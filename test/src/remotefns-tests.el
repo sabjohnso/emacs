@@ -36,43 +36,19 @@
 
 (require 'cl-lib)
 (require 'ert)
-
-(defconst remotefns-tests--trials 500
-  "Number of generated values for each property test.")
-
-(defvar remotefns-tests--random-state nil
-  "The random state of the generators.
-The tests use their own state, so that they do not change the
-random state of other tests.")
-
-(defun remotefns-tests--random (limit)
-  "Return a random integer from 0 to LIMIT - 1."
-  (cl-random limit remotefns-tests--random-state))
-
-(defun remotefns-tests--for-all (generate check)
-  "Call CHECK with values from GENERATE.
-Use a fixed seed, so that a failure is reproducible.  The trial
-and the value that failed are in the ERT message."
-  (setq remotefns-tests--random-state (cl-make-random-state 1))
-  (dotimes (trial remotefns-tests--trials)
-    (let ((value (funcall generate)))
-      (ert-info ((format "%d: %S" trial value) :prefix "Trial: ")
-        (funcall check value)))))
-
-(defun remotefns-tests--uint16 ()
-  "Return a random 16-bit unsigned integer, often a boundary value."
-  (pcase (remotefns-tests--random 4)
-    (0 0)
-    (1 #xffff)
-    (_ (remotefns-tests--random #x10000))))
+(eval-and-compile
+  (require 'remote-display-generators
+           (expand-file-name
+            "remote-display-resources/remote-display-generators"
+            (file-name-directory (macroexp-file-name)))))
 
 (defun remotefns-tests--message ()
   "Return a random valid message."
-  (list 'hello :version (remotefns-tests--uint16)))
+  (list 'hello :version (rd-gen-uint16)))
 
 (ert-deftest remotefns-tests-round-trip ()
   (skip-unless (featurep 'remote-display))
-  (remotefns-tests--for-all
+  (rd-gen-for-all
    #'remotefns-tests--message
    (lambda (message)
      (let ((bytes (remote-display--encode message)))
@@ -81,7 +57,7 @@ and the value that failed are in the ERT message."
 
 (ert-deftest remotefns-tests-stream ()
   (skip-unless (featurep 'remote-display))
-  (remotefns-tests--for-all
+  (rd-gen-for-all
    (lambda () (cons (remotefns-tests--message) (remotefns-tests--message)))
    (lambda (pair)
      (let ((first (remote-display--encode (car pair)))
@@ -91,7 +67,7 @@ and the value that failed are in the ERT message."
 
 (ert-deftest remotefns-tests-incomplete ()
   (skip-unless (featurep 'remote-display))
-  (remotefns-tests--for-all
+  (rd-gen-for-all
    #'remotefns-tests--message
    (lambda (message)
      (let ((bytes (remote-display--encode message)))
@@ -175,29 +151,29 @@ and the value that failed are in the ERT message."
   "Return a random unibyte string for the decoder.
 Half of the strings are random bytes.  The other half are valid
 frames with one change, so that the decoder reaches the body."
-  (if (zerop (remotefns-tests--random 2))
+  (if (zerop (rd-gen-random 2))
       (apply #'unibyte-string
-             (cl-loop repeat (remotefns-tests--random 17)
-                      collect (remotefns-tests--random 256)))
+             (cl-loop repeat (rd-gen-random 17)
+                      collect (rd-gen-random 256)))
     (remotefns-tests--mutate
      (remote-display--encode (remotefns-tests--message)))))
 
 (defun remotefns-tests--mutate (bytes)
   "Return BYTES with one random change."
   (let ((bytes (copy-sequence bytes))
-        (index (remotefns-tests--random (length bytes))))
-    (pcase (remotefns-tests--random 4)
-      (0 (aset bytes index (remotefns-tests--random 256)) bytes)
+        (index (rd-gen-random (length bytes))))
+    (pcase (rd-gen-random 4)
+      (0 (aset bytes index (rd-gen-random 256)) bytes)
       (1 (substring bytes 0 index))
-      (2 (aset bytes 3 (mod (+ (aref bytes 3) (remotefns-tests--random 3) -1)
+      (2 (aset bytes 3 (mod (+ (aref bytes 3) (rd-gen-random 3) -1)
                             256))
          bytes)
-      (_ (concat bytes (unibyte-string (remotefns-tests--random 256)))))))
+      (_ (concat bytes (unibyte-string (rd-gen-random 256)))))))
 
 (ert-deftest remotefns-tests-decode-arbitrary-bytes ()
   "The decoder must accept any input without a crash."
   (skip-unless (featurep 'remote-display))
-  (remotefns-tests--for-all
+  (rd-gen-for-all
    #'remotefns-tests--bytes
    (lambda (bytes)
      (let ((result (condition-case nil

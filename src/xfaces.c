@@ -258,6 +258,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifdef HAVE_ANDROID
 #define GCGraphicsExposures 0
 #endif /* HAVE_ANDROID */
+
+#ifdef HAVE_REMOTE_DISPLAY
+#define GCGraphicsExposures 0
+#endif /* HAVE_REMOTE_DISPLAY */
 #endif /* HAVE_WINDOW_SYSTEM */
 
 #include "buffer.h"
@@ -591,8 +595,8 @@ x_free_gc (struct frame *f, Emacs_GC *gc)
 }
 #endif  /* HAVE_NS */
 
-#ifdef HAVE_PGTK
-/* PGTK emulation of GCs */
+#if defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY
+/* PGTK and remote display emulation of GCs */
 
 static Emacs_GC *
 x_create_gc (struct frame *f,

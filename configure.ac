@@ -2663,9 +2663,16 @@ if test "${with_pgtk}" = "yes"; then
   window_system=pgtk
 fi
 
+dnl The remote display backend draws through the remote display
+dnl protocol, and needs no local display library.
+if test "${with_remote_display}" = "yes"; then
+  window_system=remote
+fi
+
 if test "${ANDROID}" != "yes"; then
   AC_PATH_X
-  if test "$no_x" != yes && test "${with_pgtk}" != "yes"; then
+  if test "$no_x" != yes && test "${with_pgtk}" != "yes" \
+     && test "${with_remote_display}" != "yes"; then
     window_system=x11
   fi
 fi
@@ -3164,6 +3171,9 @@ dnl use the toolkit if we have gtk, or X11R5 or newer.
   ;;
   haiku )
     term_header=haikuterm.h
+  ;;
+  remote )
+    term_header=remoteterm.h
   ;;
   android )
     term_header=androidterm.h
@@ -4344,17 +4354,18 @@ if test "$with_xwidgets" != "no"; then
 fi
 AC_SUBST([XWIDGETS_OBJ])
 
+dnl HAVE_REMOTE_DISPLAY means that remote is the window system.
 HAVE_REMOTE_DISPLAY=no
 REMOTE_DISPLAY_OBJ=
-if test "$with_remote_display" != "no"; then
+if test "$window_system" = "remote"; then
   HAVE_REMOTE_DISPLAY=yes
-  REMOTE_DISPLAY_OBJ="remotefns.o rdproto.o"
+  REMOTE_DISPLAY_OBJ="remotefns.o rdproto.o remoteterm.o"
   AC_DEFINE([HAVE_REMOTE_DISPLAY], [1],
-    [Define to 1 if you have the remote display protocol.])
+    [Define to 1 if the remote display protocol is the window system.])
 fi
 AC_SUBST([REMOTE_DISPLAY_OBJ])
 
-if test "$window_system" = "pgtk"; then
+if test "$window_system" = "pgtk" || test "$window_system" = "remote"; then
   CAIRO_REQUIRED=1.12.0
   CAIRO_MODULE="cairo >= $CAIRO_REQUIRED"
   EMACS_CHECK_MODULES([CAIRO], [$CAIRO_MODULE])
@@ -4524,7 +4535,7 @@ if test "${HAVE_X11}" = "yes"; then
     fi
   fi
 else # "${HAVE_X11}" != "yes"
-  if test $window_system = pgtk; then
+  if test $window_system = pgtk || test $window_system = remote; then
     EMACS_CHECK_MODULES([FONTCONFIG], [fontconfig >= 2.2.0])
     EMACS_CHECK_MODULES([FREETYPE], [freetype2])
     if test "$HAVE_FONTCONFIG" != yes -o "$HAVE_FREETYPE" != yes; then
@@ -4564,6 +4575,7 @@ else
 fi
 if test "${HAVE_X11}" = "yes" && test "${HAVE_FREETYPE}" = "yes" \
         || test "$window_system" = "pgtk" \
+        || test "$window_system" = "remote" \
         || test "${HAVE_W32}" = "yes" \
 	|| test "$REALLY_ANDROID" = "yes"; then
   if test "${with_harfbuzz}" != "no"; then
@@ -7057,7 +7069,7 @@ if test "${HAVE_X_WINDOWS}" = "yes" ; then
   fi
 fi
 
-if test "${window_system}" = "pgtk"; then
+if test "${window_system}" = "pgtk" || test "${window_system}" = "remote"; then
    FONT_OBJ="ftfont.o ftcrfont.o"
 fi
 

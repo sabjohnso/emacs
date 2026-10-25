@@ -166,6 +166,10 @@ typedef struct ns_bitmap_record Bitmap_Record;
 typedef struct pgtk_bitmap_record Bitmap_Record;
 #endif /* HAVE_PGTK */
 
+#ifdef HAVE_REMOTE_DISPLAY
+typedef struct remote_bitmap_record Bitmap_Record;
+#endif /* HAVE_REMOTE_DISPLAY */
+
 #if (defined HAVE_X_WINDOWS \
      && ! (defined HAVE_NTGUI || defined USE_CAIRO || defined HAVE_NS))
 /* W32_TODO : Color tables on W32.  */
@@ -495,7 +499,7 @@ image_reference_bitmap (struct frame *f, ptrdiff_t id)
   ++FRAME_DISPLAY_INFO (f)->bitmaps[id - 1].refcount;
 }
 
-#ifdef HAVE_PGTK
+#if defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY
 
 /* Create a Cairo pattern from the bitmap BITS, which should be WIDTH
    and HEIGHT in size.  BITS's fill order is LSB first, meaning that
@@ -657,7 +661,7 @@ image_create_bitmap_from_data (struct frame *f, char *bits,
       return -1;
 #endif
 
-#ifdef HAVE_PGTK
+#if defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY
   cairo_pattern_t *pattern;
 
   pattern = image_bitmap_to_cr_pattern (bits, width, height);
@@ -693,7 +697,7 @@ image_create_bitmap_from_data (struct frame *f, char *bits,
   dpyinfo->bitmaps[id - 1].depth = 1;
 #endif
 
-#ifdef HAVE_PGTK
+#if defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY
   dpyinfo->bitmaps[id - 1].depth = 1;
   dpyinfo->bitmaps[id - 1].pattern = pattern;
 #endif
@@ -745,7 +749,7 @@ typedef int image_fd;
 #endif /* defined HAVE_ANDROID && !defined ANDROID_STUBIFY */
 
 #if defined HAVE_HAIKU || defined HAVE_NS || defined HAVE_PGTK	\
-  || defined HAVE_ANDROID || defined HAVE_NTGUI
+  || defined HAVE_ANDROID || defined HAVE_NTGUI || defined HAVE_REMOTE_DISPLAY
 static char *slurp_file (image_fd, ptrdiff_t *);
 static Lisp_Object image_find_image_fd (Lisp_Object, image_fd *);
 static bool xbm_read_bitmap_data (struct frame *, char *, char *,
@@ -851,7 +855,7 @@ image_create_bitmap_from_file (struct frame *f, Lisp_Object file)
   return id;
 #endif
 
-#ifdef HAVE_PGTK
+#if defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY
   ptrdiff_t id, size;
   int fd, width, height, rc;
   char *contents, *data;
@@ -1133,7 +1137,7 @@ free_bitmap_record (Display_Info *dpyinfo, Bitmap_Record *bm)
   ns_release_object (bm->img);
 #endif
 
-#ifdef HAVE_PGTK
+#if defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY
   if (bm->pattern != NULL)
     cairo_pattern_destroy (bm->pattern);
 #endif

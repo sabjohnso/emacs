@@ -314,6 +314,8 @@ See also `frame-live-p'.  */)
       return Qhaiku;
     case output_android:
       return Qandroid;
+    case output_remote:
+      return Qremote;
     default:
       emacs_abort ();
     }
@@ -7380,6 +7382,7 @@ syms_of_frame (void)
   DEFSYM (Qpc, "pc");
   DEFSYM (Qns, "ns");
   DEFSYM (Qpgtk, "pgtk");
+  DEFSYM (Qremote, "remote");
   DEFSYM (Qhaiku, "haiku");
   DEFSYM (Qandroid, "android");
   DEFSYM (Qvisible, "visible");

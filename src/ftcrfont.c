@@ -28,6 +28,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "haikuterm.h"
 #include "haiku_support.h"
 #include "termchar.h"
+#elif defined HAVE_REMOTE_DISPLAY
+#include "remoteterm.h"
 #else
 #include "pgtkterm.h"
 #endif
@@ -539,6 +541,11 @@ static int
 ftcrfont_draw (struct glyph_string *s,
                int from, int to, int x, int y, bool with_background)
 {
+#ifdef HAVE_REMOTE_DISPLAY
+  /* The remote display backend sends glyph codes to its client, and
+     the client draws them.  The backend never calls this function.  */
+  emacs_abort ();
+#else
   struct frame *f = s->f;
   struct font_info *ftcrfont_info = (struct font_info *) s->font;
   cairo_t *cr;
@@ -639,6 +646,7 @@ ftcrfont_draw (struct glyph_string *s,
   unblock_input ();
 
   return len;
+#endif /* !HAVE_REMOTE_DISPLAY */
 }
 
 #ifdef HAVE_PGTK
