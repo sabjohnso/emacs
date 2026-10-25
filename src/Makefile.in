@@ -173,6 +173,10 @@ DBUS_OBJ = @DBUS_OBJ@
 ## xwidgets.o if HAVE_XWIDGETS, else empty.
 XWIDGETS_OBJ = @XWIDGETS_OBJ@
 
+## remotefns.o and rdproto.o if configured --with-remote-display,
+## else empty.
+REMOTE_DISPLAY_OBJ = @REMOTE_DISPLAY_OBJ@
+
 LIB_EXECINFO=@LIB_EXECINFO@
 
 SETTINGS_CFLAGS = @SETTINGS_CFLAGS@
@@ -461,7 +465,7 @@ base_obj = dispnew.o frame.o scroll.o xdisp.o menu.o $(XMENU_OBJ) window.o     \
 	process.o gnutls.o callproc.o					       \
 	region-cache.o sound.o timefns.o atimer.o			       \
 	doprnt.o intervals.o textprop.o composite.o xml.o lcms.o $(NOTIFY_OBJ) \
-	$(XWIDGETS_OBJ) 						       \
+	$(XWIDGETS_OBJ) $(REMOTE_DISPLAY_OBJ)				       \
 	profiler.o decompress.o 					       \
 	thread.o systhread.o sqlite.o  treesit.o			       \
 	itree.o json.o 							       \

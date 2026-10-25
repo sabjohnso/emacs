@@ -645,6 +645,9 @@ otherwise for the first of 'inotify', 'kqueue' or 'gfile' that is usable.])
 OPTION_DEFAULT_OFF([xwidgets],
   [enable use of xwidgets in Emacs buffers (requires gtk3 or macOS Cocoa)])
 
+OPTION_DEFAULT_OFF([remote-display],
+  [enable the protocol that shows frames on a remote display client])
+
 OPTION_DEFAULT_OFF([be-app],
   [enable use of Haiku's Application Kit as a window system])
 
@@ -4341,6 +4344,16 @@ if test "$with_xwidgets" != "no"; then
 fi
 AC_SUBST([XWIDGETS_OBJ])
 
+HAVE_REMOTE_DISPLAY=no
+REMOTE_DISPLAY_OBJ=
+if test "$with_remote_display" != "no"; then
+  HAVE_REMOTE_DISPLAY=yes
+  REMOTE_DISPLAY_OBJ="remotefns.o rdproto.o"
+  AC_DEFINE([HAVE_REMOTE_DISPLAY], [1],
+    [Define to 1 if you have the remote display protocol.])
+fi
+AC_SUBST([REMOTE_DISPLAY_OBJ])
+
 if test "$window_system" = "pgtk"; then
   CAIRO_REQUIRED=1.12.0
   CAIRO_MODULE="cairo >= $CAIRO_REQUIRED"
@@ -7507,6 +7520,7 @@ AS_ECHO(["  Does Emacs use -lXaw3d?                                 ${HAVE_XAW3D
   Does Emacs have dynamic modules support?                ${HAVE_MODULES}
   Does Emacs use toolkit scroll bars?                     ${USE_TOOLKIT_SCROLL_BARS}
   Does Emacs support Xwidgets?                            ${HAVE_XWIDGETS}
+  Does Emacs support the remote display protocol?         ${HAVE_REMOTE_DISPLAY}
   Does Emacs have threading support in lisp?              ${threads_enabled}
   Does Emacs support the portable dumper?                 ${with_pdumper}
   Which dumping strategy does Emacs use?                  ${with_dumping}

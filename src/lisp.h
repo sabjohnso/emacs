@@ -5450,6 +5450,11 @@ extern void syms_of_xml (void);
 extern void xml_cleanup_parser (void);
 #endif
 
+#ifdef HAVE_REMOTE_DISPLAY
+/* Defined in remotefns.c.  */
+extern void syms_of_remotefns (void);
+#endif
+
 #ifdef HAVE_LCMS2
 /* Defined in lcms.c.  */
 extern void syms_of_lcms2 (void);
