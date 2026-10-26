@@ -77,6 +77,19 @@ struct remote_display_info
   struct frame *last_mouse_motion_frame;
   int last_mouse_motion_x;
   int last_mouse_motion_y;
+
+  /* The ID of the last frame that this session made.  The client
+     knows a frame by its ID.  */
+  Window last_frame_id;
+
+  /* True if a client receives the messages of this session.  While
+     it is false, the session sends no messages.  */
+  bool attached;
+
+  /* The encoded messages that the client has not taken.  */
+  unsigned char *output;
+  ptrdiff_t output_used;
+  ptrdiff_t output_size;
 };
 
 /* The list of all sessions.  The generic code uses this name.  */

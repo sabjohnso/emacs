@@ -26,11 +26,22 @@
 ;;    message, and uses all bytes of the encoding.
 ;; 2. Stream: decoding the concatenation of two encodings gives the
 ;;    first message, and uses only the bytes of the first encoding.
+;;    Decoding a concatenation of messages one at a time gives all
+;;    the messages, in order.
 ;; 3. Incomplete input: decoding a proper prefix of an encoding gives
 ;;    nil, because the rest of the message has not arrived.
 ;; 4. Total decoder: for any bytes, decoding gives nil, a message, or
 ;;    a `remote-display-protocol-error'.  The bytes come from the
 ;;    network, so the decoder must not trust them.
+;;
+;; The message types:
+;;
+;; (hello :version V)
+;;     The first message of each side of a connection.
+;; (draw-glyphs :frame F :x X :y Y :glyphs [CODE...])
+;;     Draw the glyphs with the codes CODE of the font of the frame at
+;;     the pixel position X, Y of the baseline.  The number of glyphs
+;;     is at most `remotefns-tests--max-glyphs'.
 
 ;;; Code:
 
@@ -42,9 +53,28 @@
             "remote-display-resources/remote-display-generators"
             (file-name-directory (macroexp-file-name)))))
 
+(defconst remotefns-tests--max-glyphs 512
+  "The maximum number of glyphs in a `draw-glyphs' message.")
+
 (defun remotefns-tests--message ()
   "Return a random valid message."
+  (funcall (rd-gen-element (list #'remotefns-tests--hello
+                                 #'remotefns-tests--draw-glyphs))))
+
+(defun remotefns-tests--hello ()
+  "Return a random `hello' message."
   (list 'hello :version (rd-gen-uint16)))
+
+(defun remotefns-tests--draw-glyphs ()
+  "Return a random `draw-glyphs' message."
+  (list 'draw-glyphs
+        :frame (rd-gen-uint32)
+        :x (rd-gen-int16)
+        :y (rd-gen-int16)
+        :glyphs (let ((count (rd-gen-integer
+                              0 (rd-gen-element
+                                 (list 8 remotefns-tests--max-glyphs)))))
+                  (vconcat (cl-loop repeat count collect (rd-gen-uint32))))))
 
 (ert-deftest remotefns-tests-round-trip ()
   (skip-unless (featurep 'remote-display))
@@ -65,6 +95,26 @@
        (should (equal (remote-display--decode (concat first second))
                       (cons (car pair) (length first))))))))
 
+(defun remotefns-tests--decode-all (bytes)
+  "Decode the messages in BYTES one at a time, and return their list."
+  (let ((messages nil)
+        (start 0))
+    (while (< start (length bytes))
+      (let ((result (remote-display--decode (substring bytes start))))
+        (push (car result) messages)
+        (setq start (+ start (cdr result)))))
+    (nreverse messages)))
+
+(ert-deftest remotefns-tests-stream-of-many ()
+  (skip-unless (featurep 'remote-display))
+  (rd-gen-for-all
+   (lambda () (rd-gen-list #'remotefns-tests--message 5))
+   (lambda (messages)
+     (should (equal (remotefns-tests--decode-all
+                     (apply #'concat (mapcar #'remote-display--encode
+                                             messages)))
+                    messages)))))
+
 (ert-deftest remotefns-tests-incomplete ()
   (skip-unless (featurep 'remote-display))
   (rd-gen-for-all
@@ -79,6 +129,40 @@
   ;; Length 3 (big-endian), type 1, version #x0102 (big-endian).
   (should (equal (remote-display--encode '(hello :version #x0102))
                  (unibyte-string 0 0 0 3 1 1 2))))
+
+(ert-deftest remotefns-tests-draw-glyphs-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 19, type 2, frame 1, x -1, y 2, 2 glyphs, the glyph codes.
+  (should (equal (remote-display--encode
+                  '(draw-glyphs :frame 1 :x -1 :y 2 :glyphs [65 #x01020304]))
+                 (unibyte-string 0 0 0 19 2 0 0 0 1 #xff #xff 0 2 0 2
+                                 0 0 0 65 1 2 3 4))))
+
+(ert-deftest remotefns-tests-too-many-glyphs ()
+  (skip-unless (featurep 'remote-display))
+  (should-error (remote-display--encode
+                 `(draw-glyphs :frame 0 :x 0 :y 0
+                               :glyphs ,(make-vector
+                                         (1+ remotefns-tests--max-glyphs) 0)))
+                :type 'args-out-of-range)
+  ;; A frame with 513 glyphs.
+  (let ((count (1+ remotefns-tests--max-glyphs)))
+    (should (equal (remotefns-tests--decode-error
+                    (concat (unibyte-string 0 0 (ash (+ 11 (* 4 count)) -8)
+                                            (logand (+ 11 (* 4 count)) #xff)
+                                            2 0 0 0 0 0 0 0 0
+                                            (ash count -8) (logand count #xff))
+                            (make-string (* 4 count) 0)))
+                   '(bad-length)))))
+
+(ert-deftest remotefns-tests-glyph-out-of-range ()
+  (skip-unless (featurep 'remote-display))
+  (should-error (remote-display--encode
+                 '(draw-glyphs :frame 0 :x 0 :y 0 :glyphs [#x100000000]))
+                :type 'args-out-of-range)
+  (should-error (remote-display--encode
+                 '(draw-glyphs :frame 0 :x #x8000 :y 0 :glyphs []))
+                :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-encode-is-unibyte ()
   (skip-unless (featurep 'remote-display))
@@ -116,6 +200,10 @@
                  '(bad-length)))
   ;; A hello frame with a body that is too short.
   (should (equal (remotefns-tests--decode-error (unibyte-string 0 0 0 2 1 0))
+                 '(bad-length)))
+  ;; A draw-glyphs frame with 2 glyphs and the bytes of only 1.
+  (should (equal (remotefns-tests--decode-error
+                  (unibyte-string 0 0 0 15 2 0 0 0 1 0 0 0 0 0 2 0 0 0 65))
                  '(bad-length))))
 
 (ert-deftest remotefns-tests-frame-too-long ()
@@ -181,7 +269,7 @@ frames with one change, so that the decoder reaches the body."
                      (remote-display-protocol-error 'rejected))))
        (should (or (null result)
                    (eq result 'rejected)
-                   (and (eq (car-safe (car result)) 'hello)
+                   (and (memq (car-safe (car result)) '(hello draw-glyphs))
                         (<= 5 (cdr result) (length bytes)))))))))
 
 (provide 'remotefns-tests)

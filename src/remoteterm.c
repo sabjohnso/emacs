@@ -34,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "termhooks.h"
 #include "window.h"
 #include "remoteterm.h"
+#include "rdproto.h"
 
 struct remote_display_info *x_display_list;
 
@@ -53,6 +54,8 @@ static bool remote_terminal_has_frames (struct terminal *);
 static Lisp_Object remote_frame_session_arg (Lisp_Object);
 static struct frame *remote_make_frame_on (struct remote_display_info *,
 					   Lisp_Object);
+static void remote_assign_frame_id (struct frame *);
+static uint32_t remote_frame_id (struct frame *);
 static void remote_init_frame_font (struct frame *, Lisp_Object);
 static void remote_default_frame_parameters (struct frame *, Lisp_Object);
 static void remote_finish_frame (struct frame *, Lisp_Object);
@@ -60,6 +63,9 @@ static void remote_delete_terminal (struct terminal *);
 static bool remote_defined_color (struct frame *, const char *,
 				  Emacs_Color *, bool, bool);
 static struct redisplay_interface remote_redisplay_interface;
+static void remote_send (struct remote_display_info *,
+			 const struct rd_message *);
+static void remote_send_glyphs (struct glyph_string *, int, int, int);
 
 
 /***********************************************************************
@@ -260,10 +266,63 @@ remote_delete_terminal (struct terminal *terminal)
 	}
   remote_display_name_list = Fdelq (dpyinfo->name_list_element,
 				    remote_display_name_list);
+  xfree (dpyinfo->output);
   xfree (dpyinfo->bitmaps);
   xfree (dpyinfo);
   terminal->display_info.remote = NULL;
   unblock_input ();
+}
+
+
+/***********************************************************************
+				Output
+ ***********************************************************************/
+
+/* The tests attach a recording client to a session, and take the
+   bytes that the session sends.  */
+
+DEFUN ("remote-display--record", Fremote_display__record,
+       Sremote_display__record, 1, 1, 0,
+       doc: /* Attach a new recording client to the session DISPLAY.
+Discard the bytes that the last client did not take.  The session
+keeps the bytes that it sends, until a call of
+`remote-display--take-output' takes them.  */)
+  (Lisp_Object display)
+{
+  struct remote_display_info *dpyinfo = check_x_display_info (display);
+  dpyinfo->attached = true;
+  dpyinfo->output_used = 0;
+  return Qnil;
+}
+
+DEFUN ("remote-display--take-output", Fremote_display__take_output,
+       Sremote_display__take_output, 1, 1, 0,
+       doc: /* Return and remove the bytes that the session DISPLAY sent.
+The value is a unibyte string of encoded messages.  */)
+  (Lisp_Object display)
+{
+  struct remote_display_info *dpyinfo = check_x_display_info (display);
+  Lisp_Object bytes = make_unibyte_string ((char *) dpyinfo->output,
+					   dpyinfo->output_used);
+  dpyinfo->output_used = 0;
+  return bytes;
+}
+
+/* Send MESSAGE to the client of DPYINFO.  Do nothing if no client is
+   attached.  */
+static void
+remote_send (struct remote_display_info *dpyinfo,
+	     const struct rd_message *message)
+{
+  if (!dpyinfo->attached)
+    return;
+  ptrdiff_t size = rd_encoded_size (message);
+  ptrdiff_t needed = dpyinfo->output_used + size - dpyinfo->output_size;
+  if (needed > 0)
+    dpyinfo->output = xpalloc (dpyinfo->output, &dpyinfo->output_size,
+			       needed, -1, 1);
+  rd_encode (message, dpyinfo->output + dpyinfo->output_used);
+  dpyinfo->output_used += size;
 }
 
 
@@ -495,6 +554,7 @@ remote_make_frame_on (struct remote_display_info *dpyinfo, Lisp_Object parms)
   f->output_method = output_remote;
   f->output_data.remote = xzalloc (sizeof *f->output_data.remote);
   FRAME_DISPLAY_INFO (f) = dpyinfo;
+  remote_assign_frame_id (f);
   FRAME_FONTSET (f) = -1;
   fset_name (f, Vinvocation_name);
   f->explicit_name = false;
@@ -502,6 +562,20 @@ remote_make_frame_on (struct remote_display_info *dpyinfo, Lisp_Object parms)
 }
 
 /* Give F its font drivers and its default font.  */
+/* Give F the next frame ID of its session.  */
+static void
+remote_assign_frame_id (struct frame *f)
+{
+  FRAME_NATIVE_WINDOW (f) = ++FRAME_DISPLAY_INFO (f)->last_frame_id;
+}
+
+/* Return the ID by which the client knows F.  */
+static uint32_t
+remote_frame_id (struct frame *f)
+{
+  return FRAME_NATIVE_WINDOW (f);
+}
+
 static void
 remote_init_frame_font (struct frame *f, Lisp_Object parms)
 {
@@ -743,9 +817,40 @@ remote_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
 {
 }
 
+/* Send the glyph codes of S.  A message holds at most RD_MAX_GLYPHS
+   glyphs, so send a long glyph string in parts.  */
 static void
 remote_draw_glyph_string (struct glyph_string *s)
 {
+  if (!FRAME_DISPLAY_INFO (s->f)->attached
+      || s->first_glyph->type != CHAR_GLYPH)
+    return;
+  int x = s->x;
+  for (int start = 0; start < s->nchars; start += RD_MAX_GLYPHS)
+    {
+      int n = min (s->nchars - start, RD_MAX_GLYPHS);
+      remote_send_glyphs (s, start, n, x);
+      for (int i = start; i < start + n; i++)
+	x += s->first_glyph[i].pixel_width;
+    }
+}
+
+/* Send the N glyph codes of S from index START, drawn at X.  */
+static void
+remote_send_glyphs (struct glyph_string *s, int start, int n, int x)
+{
+  /* Do not initialize the message: that fills all RD_MAX_GLYPHS
+     glyphs, and the encoder reads only N of them.  */
+  struct rd_message message;
+  message.type = RD_DRAW_GLYPHS;
+  struct rd_draw_glyphs *m = &message.u.draw_glyphs;
+  m->frame = remote_frame_id (s->f);
+  m->x = x;
+  m->y = s->ybase;
+  m->nglyphs = n;
+  for (int i = 0; i < n; i++)
+    m->glyphs[i] = s->char2b[start + i];
+  remote_send (FRAME_DISPLAY_INFO (s->f), &message);
 }
 
 static void
@@ -858,6 +963,8 @@ syms_of_remoteterm (void)
   defsubr (&Sx_open_connection);
   defsubr (&Sx_close_connection);
   defsubr (&Sx_display_list);
+  defsubr (&Sremote_display__record);
+  defsubr (&Sremote_display__take_output);
   defsubr (&Sx_create_frame);
   defsubr (&Sxw_display_color_p);
   defsubr (&Sx_display_grayscale_p);

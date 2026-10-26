@@ -39,9 +39,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 enum { RD_MAX_LENGTH = 1 << 24 };
 
+/* The maximum number of glyphs in one draw-glyphs message.  The
+   server sends a longer run of glyphs in more than one message.  */
+enum { RD_MAX_GLYPHS = 512 };
+
 enum rd_type
   {
     RD_HELLO = 1,
+    RD_DRAW_GLYPHS = 2,
   };
 
 /* The first message of each side of a connection.  */
@@ -50,12 +55,25 @@ struct rd_hello
   uint16_t version;
 };
 
+/* Draw glyphs of the frame font.  X and Y are the pixel position of
+   the start of the baseline.  Each glyph code is a glyph index of
+   the font, not a character.  */
+struct rd_draw_glyphs
+{
+  uint32_t frame;
+  int16_t x;
+  int16_t y;
+  uint16_t nglyphs;
+  uint32_t glyphs[RD_MAX_GLYPHS];
+};
+
 struct rd_message
 {
   enum rd_type type;
   union
   {
     struct rd_hello hello;
+    struct rd_draw_glyphs draw_glyphs;
   } u;
 };
 
@@ -67,7 +85,8 @@ enum rd_status
     RD_INCOMPLETE,
     /* The type byte is not an enum rd_type value.  */
     RD_UNKNOWN_TYPE,
-    /* The length is too small for the type.  */
+    /* The length is too small for the type, or a count in the
+       message is too large.  */
     RD_BAD_LENGTH,
     /* The length is more than RD_MAX_LENGTH.  */
     RD_FRAME_TOO_LONG,
@@ -76,14 +95,17 @@ enum rd_status
 /* Return the number of bytes that rd_encode writes for MESSAGE.  */
 extern size_t rd_encoded_size (const struct rd_message *message);
 
-/* Write MESSAGE to BUF, which has rd_encoded_size (MESSAGE) bytes.  */
+/* Write MESSAGE to BUF, which has rd_encoded_size (MESSAGE) bytes.
+   The values of MESSAGE must be in range, for example NGLYPHS at
+   most RD_MAX_GLYPHS.  */
 extern void rd_encode (const struct rd_message *message,
 		       unsigned char *buf);
 
 /* Decode the first message in the LEN bytes at BUF.  If the result
    is RD_OK, set *MESSAGE to the message and *USED to the number of
-   bytes that it occupies.  Report an error as soon as the length
-   and the type byte are present, before the rest of the frame.  */
+   bytes that it occupies.  For any other result, *MESSAGE and *USED
+   are not specified.  Report an error as soon as the length and the
+   type byte are present, before the rest of the frame.  */
 extern enum rd_status rd_decode (const unsigned char *buf, size_t len,
 				 struct rd_message *message, size_t *used);
 

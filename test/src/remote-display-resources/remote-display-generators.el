@@ -60,6 +60,14 @@ ERT message."
   "Return a random 16-bit unsigned integer, often a boundary value."
   (rd-gen-integer 0 #xffff))
 
+(defun rd-gen-uint32 ()
+  "Return a random 32-bit unsigned integer, often a boundary value."
+  (rd-gen-integer 0 #xffffffff))
+
+(defun rd-gen-int16 ()
+  "Return a random 16-bit signed integer, often a boundary value."
+  (rd-gen-integer (- #x8000) #x7fff))
+
 (defun rd-gen-element (list)
   "Return a random element of LIST."
   (nth (rd-gen-random (length list)) list))

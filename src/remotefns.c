@@ -30,12 +30,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 static struct rd_message message_from_lisp (Lisp_Object);
 static Lisp_Object message_to_lisp (const struct rd_message *);
 static uint16_t uint16_field (Lisp_Object, Lisp_Object);
+static uint32_t uint32_field (Lisp_Object, Lisp_Object);
+static int16_t int16_field (Lisp_Object, Lisp_Object);
+static intmax_t integer_field (Lisp_Object, Lisp_Object, intmax_t, intmax_t);
+static uint16_t glyphs_field (Lisp_Object, Lisp_Object, uint32_t *);
+static Lisp_Object glyphs_to_lisp (const struct rd_draw_glyphs *);
 static Lisp_Object status_symbol (enum rd_status);
 
 DEFUN ("remote-display--encode", Fremote_display__encode,
        Sremote_display__encode, 1, 1, 0,
        doc: /* Return the bytes of MESSAGE as a unibyte string.
-MESSAGE is a list such as (hello :version 1).  */)
+MESSAGE is a list such as (hello :version 1) or
+(draw-glyphs :frame 1 :x 0 :y 12 :glyphs [72 105]).  */)
   (Lisp_Object message)
 {
   struct rd_message m = message_from_lisp (message);
@@ -84,6 +90,16 @@ message_from_lisp (Lisp_Object message)
       m.u.hello.version = uint16_field (fields, QCversion);
       return m;
     }
+  if (EQ (type, Qremote_display_draw_glyphs))
+    {
+      m.type = RD_DRAW_GLYPHS;
+      m.u.draw_glyphs.frame = uint32_field (fields, QCframe);
+      m.u.draw_glyphs.x = int16_field (fields, QCx);
+      m.u.draw_glyphs.y = int16_field (fields, QCy);
+      m.u.draw_glyphs.nglyphs = glyphs_field (fields, QCglyphs,
+					      m.u.draw_glyphs.glyphs);
+      return m;
+    }
   xsignal1 (Qremote_display_protocol_error, message);
 }
 
@@ -96,6 +112,12 @@ message_to_lisp (const struct rd_message *m)
     case RD_HELLO:
       return list3 (Qremote_display_hello, QCversion,
 		    make_fixnum (m->u.hello.version));
+    case RD_DRAW_GLYPHS:
+      return listn (9, Qremote_display_draw_glyphs,
+		    QCframe, make_uint (m->u.draw_glyphs.frame),
+		    QCx, make_fixnum (m->u.draw_glyphs.x),
+		    QCy, make_fixnum (m->u.draw_glyphs.y),
+		    QCglyphs, glyphs_to_lisp (&m->u.draw_glyphs));
     }
   emacs_abort ();
 }
@@ -105,11 +127,69 @@ message_to_lisp (const struct rd_message *m)
 static uint16_t
 uint16_field (Lisp_Object fields, Lisp_Object name)
 {
+  return integer_field (fields, name, 0, UINT16_MAX);
+}
+
+/* Return the value of property NAME in FIELDS.  Signal an error if
+   it is not a 32-bit unsigned integer.  */
+static uint32_t
+uint32_field (Lisp_Object fields, Lisp_Object name)
+{
+  return integer_field (fields, name, 0, UINT32_MAX);
+}
+
+/* Return the value of property NAME in FIELDS.  Signal an error if
+   it is not a 16-bit signed integer.  */
+static int16_t
+int16_field (Lisp_Object fields, Lisp_Object name)
+{
+  return integer_field (fields, name, INT16_MIN, INT16_MAX);
+}
+
+/* Return the value of property NAME in FIELDS.  Signal an error if
+   it is not an integer from LOW to HIGH.  */
+static intmax_t
+integer_field (Lisp_Object fields, Lisp_Object name,
+	       intmax_t low, intmax_t high)
+{
   Lisp_Object value = plist_get (fields, name);
   CHECK_FIXNUM (value);
-  if (! (0 <= XFIXNUM (value) && XFIXNUM (value) <= UINT16_MAX))
-    args_out_of_range (value, make_fixnum (UINT16_MAX));
+  if (! (low <= XFIXNUM (value) && XFIXNUM (value) <= high))
+    args_out_of_range_3 (value, make_int (low), make_int (high));
   return XFIXNUM (value);
+}
+
+/* Copy the vector of glyph codes in property NAME of FIELDS to
+   GLYPHS, and return the number of glyphs.  Signal an error if the
+   vector has more than RD_MAX_GLYPHS elements, or if an element is
+   not a 32-bit unsigned integer.  */
+static uint16_t
+glyphs_field (Lisp_Object fields, Lisp_Object name, uint32_t *glyphs)
+{
+  Lisp_Object vector = plist_get (fields, name);
+  CHECK_VECTOR (vector);
+  ptrdiff_t n = ASIZE (vector);
+  if (n > RD_MAX_GLYPHS)
+    args_out_of_range (make_fixnum (n), make_fixnum (RD_MAX_GLYPHS));
+  for (ptrdiff_t i = 0; i < n; i++)
+    {
+      Lisp_Object code = AREF (vector, i);
+      CHECK_FIXNUM (code);
+      if (! (0 <= XFIXNUM (code) && XFIXNUM (code) <= UINT32_MAX))
+	args_out_of_range (code, make_uint (UINT32_MAX));
+      glyphs[i] = XFIXNUM (code);
+    }
+  return n;
+}
+
+/* Return the glyph codes of M as a vector.  */
+static Lisp_Object
+glyphs_to_lisp (const struct rd_draw_glyphs *m)
+{
+  Lisp_Object vector = make_nil_vector (m->nglyphs);
+  for (int i = 0; i < m->nglyphs; i++)
+    ASET (vector, i, make_uint (m->glyphs[i]));
+  return vector;
 }
 
 /* Return the symbol for an error STATUS of rd_decode.  */
@@ -135,6 +215,11 @@ syms_of_remotefns (void)
   DEFSYM (Qremote_display, "remote-display");
   DEFSYM (Qremote_display_hello, "hello");
   DEFSYM (QCversion, ":version");
+  DEFSYM (Qremote_display_draw_glyphs, "draw-glyphs");
+  DEFSYM (QCframe, ":frame");
+  DEFSYM (QCx, ":x");
+  DEFSYM (QCy, ":y");
+  DEFSYM (QCglyphs, ":glyphs");
 
   DEFSYM (Qremote_display_protocol_error, "remote-display-protocol-error");
   DEFSYM (Qunknown_type, "unknown-type");

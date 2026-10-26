@@ -26,22 +26,61 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 /* The size of the length field at the start of each frame.  */
 enum { LENGTH_SIZE = 4 };
 
-/* The size of the type byte and the fields of each message type.  */
-enum { HELLO_SIZE = 1 + 2 };
+/* The codec of one message type.  FIXED_SIZE is the size of the
+   type byte and the fields that each message of the type has.
+   EXTRA_SIZE gives the size of the fields that follow them, for
+   example an array.  PUT writes the fields after the type byte.  GET
+   reads the SIZE bytes of fields at FIELDS, and returns RD_OK or
+   RD_BAD_LENGTH.  */
+struct codec
+{
+  size_t fixed_size;
+  size_t (*extra_size) (const struct rd_message *);
+  void (*put) (const struct rd_message *, unsigned char *);
+  enum rd_status (*get) (const unsigned char *, size_t,
+			 struct rd_message *);
+};
 
-static size_t fields_size (unsigned int);
+static const struct codec *message_codec (const struct rd_message *);
+static const struct codec *codec_of (unsigned int);
+static size_t no_extra_size (const struct rd_message *);
+static void put_hello (const struct rd_message *, unsigned char *);
+static enum rd_status get_hello (const unsigned char *, size_t,
+				 struct rd_message *);
+static size_t draw_glyphs_extra_size (const struct rd_message *);
+static void put_draw_glyphs (const struct rd_message *, unsigned char *);
+static enum rd_status get_draw_glyphs (const unsigned char *, size_t,
+				       struct rd_message *);
 static void put_uint16 (unsigned char *, uint16_t);
 static void put_uint32 (unsigned char *, uint32_t);
 static uint16_t get_uint16 (const unsigned char *);
 static uint32_t get_uint32 (const unsigned char *);
 
+/* The offsets of the fields of a draw-glyphs message.  The glyph
+   codes follow the number of glyphs, GLYPH_SIZE bytes each.  */
+enum
+  {
+    DRAW_GLYPHS_FRAME = 0,
+    DRAW_GLYPHS_X = DRAW_GLYPHS_FRAME + 4,
+    DRAW_GLYPHS_Y = DRAW_GLYPHS_X + 2,
+    DRAW_GLYPHS_COUNT = DRAW_GLYPHS_Y + 2,
+    DRAW_GLYPHS_HEAD = DRAW_GLYPHS_COUNT + 2,
+    GLYPH_SIZE = 4,
+  };
+
+/* The codecs, indexed by enum rd_type.  */
+static const struct codec codecs[] =
+  {
+    [RD_HELLO] = { 1 + 2, no_extra_size, put_hello, get_hello },
+    [RD_DRAW_GLYPHS] = { 1 + DRAW_GLYPHS_HEAD, draw_glyphs_extra_size,
+			 put_draw_glyphs, get_draw_glyphs },
+  };
+
 size_t
 rd_encoded_size (const struct rd_message *message)
 {
-  size_t size = fields_size (message->type);
-  if (size == 0)
-    abort ();
-  return LENGTH_SIZE + size;
+  const struct codec *codec = message_codec (message);
+  return LENGTH_SIZE + codec->fixed_size + codec->extra_size (message);
 }
 
 void
@@ -49,12 +88,7 @@ rd_encode (const struct rd_message *message, unsigned char *buf)
 {
   put_uint32 (buf, rd_encoded_size (message) - LENGTH_SIZE);
   buf[LENGTH_SIZE] = message->type;
-  switch (message->type)
-    {
-    case RD_HELLO:
-      put_uint16 (buf + LENGTH_SIZE + 1, message->u.hello.version);
-      break;
-    }
+  message_codec (message)->put (message, buf + LENGTH_SIZE + 1);
 }
 
 enum rd_status
@@ -72,38 +106,94 @@ rd_decode (const unsigned char *buf, size_t len,
     return RD_INCOMPLETE;
 
   unsigned int type = buf[LENGTH_SIZE];
-  size_t size = fields_size (type);
-  if (size == 0)
+  const struct codec *codec = codec_of (type);
+  if (!codec)
     return RD_UNKNOWN_TYPE;
-  if (length < size)
+  if (length < codec->fixed_size)
     return RD_BAD_LENGTH;
   if (len - LENGTH_SIZE < length)
     return RD_INCOMPLETE;
 
-  const unsigned char *fields = buf + LENGTH_SIZE + 1;
-  switch (type)
-    {
-    case RD_HELLO:
-      message->type = RD_HELLO;
-      message->u.hello.version = get_uint16 (fields);
-      break;
-    }
-  *used = LENGTH_SIZE + length;
+  message->type = type;
+  enum rd_status status = codec->get (buf + LENGTH_SIZE + 1, length - 1,
+				      message);
+  if (status == RD_OK)
+    *used = LENGTH_SIZE + length;
+  return status;
+}
+
+/* Return the codec of MESSAGE.  The type of MESSAGE must be valid.  */
+static const struct codec *
+message_codec (const struct rd_message *message)
+{
+  const struct codec *codec = codec_of (message->type);
+  if (!codec)
+    abort ();
+  return codec;
+}
+
+/* Return the codec of TYPE, or NULL if TYPE is not a message type.  */
+static const struct codec *
+codec_of (unsigned int type)
+{
+  if (type < sizeof codecs / sizeof *codecs && codecs[type].put)
+    return &codecs[type];
+  return NULL;
+}
+
+static size_t
+no_extra_size (const struct rd_message *message)
+{
+  return 0;
+}
+
+static void
+put_hello (const struct rd_message *message, unsigned char *fields)
+{
+  put_uint16 (fields, message->u.hello.version);
+}
+
+static enum rd_status
+get_hello (const unsigned char *fields, size_t size,
+	   struct rd_message *message)
+{
+  message->u.hello.version = get_uint16 (fields);
   return RD_OK;
 }
 
-/* Return the size of the type byte and the fields of a TYPE message,
-   or 0 if TYPE is not a message type.  */
 static size_t
-fields_size (unsigned int type)
+draw_glyphs_extra_size (const struct rd_message *message)
 {
-  switch (type)
-    {
-    case RD_HELLO:
-      return HELLO_SIZE;
-    default:
-      return 0;
-    }
+  return GLYPH_SIZE * message->u.draw_glyphs.nglyphs;
+}
+
+static void
+put_draw_glyphs (const struct rd_message *message, unsigned char *fields)
+{
+  const struct rd_draw_glyphs *m = &message->u.draw_glyphs;
+  put_uint32 (fields + DRAW_GLYPHS_FRAME, m->frame);
+  put_uint16 (fields + DRAW_GLYPHS_X, m->x);
+  put_uint16 (fields + DRAW_GLYPHS_Y, m->y);
+  put_uint16 (fields + DRAW_GLYPHS_COUNT, m->nglyphs);
+  for (int i = 0; i < m->nglyphs; i++)
+    put_uint32 (fields + DRAW_GLYPHS_HEAD + GLYPH_SIZE * i, m->glyphs[i]);
+}
+
+static enum rd_status
+get_draw_glyphs (const unsigned char *fields, size_t size,
+		 struct rd_message *message)
+{
+  struct rd_draw_glyphs *m = &message->u.draw_glyphs;
+  m->nglyphs = get_uint16 (fields + DRAW_GLYPHS_COUNT);
+  if (m->nglyphs > RD_MAX_GLYPHS
+      || size < DRAW_GLYPHS_HEAD + GLYPH_SIZE * m->nglyphs)
+    return RD_BAD_LENGTH;
+  m->frame = get_uint32 (fields + DRAW_GLYPHS_FRAME);
+  m->x = get_uint16 (fields + DRAW_GLYPHS_X);
+  m->y = get_uint16 (fields + DRAW_GLYPHS_Y);
+  for (int i = 0; i < m->nglyphs; i++)
+    m->glyphs[i] = get_uint32 (fields + DRAW_GLYPHS_HEAD + GLYPH_SIZE * i);
+  return RD_OK;
 }
 
 static void
