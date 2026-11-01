@@ -47,6 +47,8 @@ enum rd_type
   {
     RD_HELLO = 1,
     RD_DRAW_GLYPHS = 2,
+    RD_CLEAR_AREA = 3,
+    RD_COPY_AREA = 4,
   };
 
 /* The first message of each side of a connection.  */
@@ -67,6 +69,31 @@ struct rd_draw_glyphs
   uint32_t glyphs[RD_MAX_GLYPHS];
 };
 
+/* Fill a rectangle with the background color of the frame.  X and Y
+   are the pixel position of the top left corner.  */
+struct rd_clear_area
+{
+  uint32_t frame;
+  int16_t x;
+  int16_t y;
+  uint16_t width;
+  uint16_t height;
+};
+
+/* Copy the rectangle at X, Y with the size WIDTH, HEIGHT to the
+   position TO_X, TO_Y of the same frame.  The rectangles can
+   overlap.  */
+struct rd_copy_area
+{
+  uint32_t frame;
+  int16_t x;
+  int16_t y;
+  uint16_t width;
+  uint16_t height;
+  int16_t to_x;
+  int16_t to_y;
+};
+
 struct rd_message
 {
   enum rd_type type;
@@ -74,6 +101,8 @@ struct rd_message
   {
     struct rd_hello hello;
     struct rd_draw_glyphs draw_glyphs;
+    struct rd_clear_area clear_area;
+    struct rd_copy_area copy_area;
   } u;
 };
 

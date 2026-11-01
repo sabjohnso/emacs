@@ -51,6 +51,12 @@ static size_t draw_glyphs_extra_size (const struct rd_message *);
 static void put_draw_glyphs (const struct rd_message *, unsigned char *);
 static enum rd_status get_draw_glyphs (const unsigned char *, size_t,
 				       struct rd_message *);
+static void put_clear_area (const struct rd_message *, unsigned char *);
+static enum rd_status get_clear_area (const unsigned char *, size_t,
+				      struct rd_message *);
+static void put_copy_area (const struct rd_message *, unsigned char *);
+static enum rd_status get_copy_area (const unsigned char *, size_t,
+				     struct rd_message *);
 static void put_uint16 (unsigned char *, uint16_t);
 static void put_uint32 (unsigned char *, uint32_t);
 static uint16_t get_uint16 (const unsigned char *);
@@ -68,12 +74,40 @@ enum
     GLYPH_SIZE = 4,
   };
 
+/* The offsets of the fields of a clear-area message.  */
+enum
+  {
+    CLEAR_AREA_FRAME = 0,
+    CLEAR_AREA_X = CLEAR_AREA_FRAME + 4,
+    CLEAR_AREA_Y = CLEAR_AREA_X + 2,
+    CLEAR_AREA_WIDTH = CLEAR_AREA_Y + 2,
+    CLEAR_AREA_HEIGHT = CLEAR_AREA_WIDTH + 2,
+    CLEAR_AREA_SIZE = CLEAR_AREA_HEIGHT + 2,
+  };
+
+/* The offsets of the fields of a copy-area message.  */
+enum
+  {
+    COPY_AREA_FRAME = 0,
+    COPY_AREA_X = COPY_AREA_FRAME + 4,
+    COPY_AREA_Y = COPY_AREA_X + 2,
+    COPY_AREA_WIDTH = COPY_AREA_Y + 2,
+    COPY_AREA_HEIGHT = COPY_AREA_WIDTH + 2,
+    COPY_AREA_TO_X = COPY_AREA_HEIGHT + 2,
+    COPY_AREA_TO_Y = COPY_AREA_TO_X + 2,
+    COPY_AREA_SIZE = COPY_AREA_TO_Y + 2,
+  };
+
 /* The codecs, indexed by enum rd_type.  */
 static const struct codec codecs[] =
   {
     [RD_HELLO] = { 1 + 2, no_extra_size, put_hello, get_hello },
     [RD_DRAW_GLYPHS] = { 1 + DRAW_GLYPHS_HEAD, draw_glyphs_extra_size,
 			 put_draw_glyphs, get_draw_glyphs },
+    [RD_CLEAR_AREA] = { 1 + CLEAR_AREA_SIZE, no_extra_size,
+			put_clear_area, get_clear_area },
+    [RD_COPY_AREA] = { 1 + COPY_AREA_SIZE, no_extra_size,
+		       put_copy_area, get_copy_area },
   };
 
 size_t
@@ -193,6 +227,58 @@ get_draw_glyphs (const unsigned char *fields, size_t size,
   m->y = get_uint16 (fields + DRAW_GLYPHS_Y);
   for (int i = 0; i < m->nglyphs; i++)
     m->glyphs[i] = get_uint32 (fields + DRAW_GLYPHS_HEAD + GLYPH_SIZE * i);
+  return RD_OK;
+}
+
+static void
+put_clear_area (const struct rd_message *message, unsigned char *fields)
+{
+  const struct rd_clear_area *m = &message->u.clear_area;
+  put_uint32 (fields + CLEAR_AREA_FRAME, m->frame);
+  put_uint16 (fields + CLEAR_AREA_X, m->x);
+  put_uint16 (fields + CLEAR_AREA_Y, m->y);
+  put_uint16 (fields + CLEAR_AREA_WIDTH, m->width);
+  put_uint16 (fields + CLEAR_AREA_HEIGHT, m->height);
+}
+
+static enum rd_status
+get_clear_area (const unsigned char *fields, size_t size,
+		struct rd_message *message)
+{
+  struct rd_clear_area *m = &message->u.clear_area;
+  m->frame = get_uint32 (fields + CLEAR_AREA_FRAME);
+  m->x = get_uint16 (fields + CLEAR_AREA_X);
+  m->y = get_uint16 (fields + CLEAR_AREA_Y);
+  m->width = get_uint16 (fields + CLEAR_AREA_WIDTH);
+  m->height = get_uint16 (fields + CLEAR_AREA_HEIGHT);
+  return RD_OK;
+}
+
+static void
+put_copy_area (const struct rd_message *message, unsigned char *fields)
+{
+  const struct rd_copy_area *m = &message->u.copy_area;
+  put_uint32 (fields + COPY_AREA_FRAME, m->frame);
+  put_uint16 (fields + COPY_AREA_X, m->x);
+  put_uint16 (fields + COPY_AREA_Y, m->y);
+  put_uint16 (fields + COPY_AREA_WIDTH, m->width);
+  put_uint16 (fields + COPY_AREA_HEIGHT, m->height);
+  put_uint16 (fields + COPY_AREA_TO_X, m->to_x);
+  put_uint16 (fields + COPY_AREA_TO_Y, m->to_y);
+}
+
+static enum rd_status
+get_copy_area (const unsigned char *fields, size_t size,
+	       struct rd_message *message)
+{
+  struct rd_copy_area *m = &message->u.copy_area;
+  m->frame = get_uint32 (fields + COPY_AREA_FRAME);
+  m->x = get_uint16 (fields + COPY_AREA_X);
+  m->y = get_uint16 (fields + COPY_AREA_Y);
+  m->width = get_uint16 (fields + COPY_AREA_WIDTH);
+  m->height = get_uint16 (fields + COPY_AREA_HEIGHT);
+  m->to_x = get_uint16 (fields + COPY_AREA_TO_X);
+  m->to_y = get_uint16 (fields + COPY_AREA_TO_Y);
   return RD_OK;
 }
 

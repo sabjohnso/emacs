@@ -800,9 +800,23 @@ remote_menu_show (struct frame *f, int x, int y, int menuflags,
   return Qnil;
 }
 
+/* Copy the pixels of RUN in W from their current position to their
+   desired position.  */
 static void
 remote_scroll_run (struct window *w, struct run *run)
 {
+  int x, y, width, height;
+  window_box (w, ANY_AREA, &x, &y, &width, &height);
+  struct frame *f = XFRAME (w->frame);
+  struct rd_message message =
+    {
+      .type = RD_COPY_AREA,
+      .u.copy_area = { .frame = remote_frame_id (f), .x = x,
+		       .y = WINDOW_TO_FRAME_PIXEL_Y (w, run->current_y),
+		       .width = width, .height = run->height, .to_x = x,
+		       .to_y = WINDOW_TO_FRAME_PIXEL_Y (w, run->desired_y) },
+    };
+  remote_send (FRAME_DISPLAY_INFO (f), &message);
 }
 
 static void
@@ -858,9 +872,18 @@ remote_define_frame_cursor (struct frame *f, Emacs_Cursor cursor)
 {
 }
 
+/* Fill the rectangle at X, Y with the size WIDTH, HEIGHT with the
+   background color of F.  */
 static void
 remote_clear_frame_area (struct frame *f, int x, int y, int width, int height)
 {
+  struct rd_message message =
+    {
+      .type = RD_CLEAR_AREA,
+      .u.clear_area = { .frame = remote_frame_id (f), .x = x, .y = y,
+			.width = width, .height = height },
+    };
+  remote_send (FRAME_DISPLAY_INFO (f), &message);
 }
 
 static void

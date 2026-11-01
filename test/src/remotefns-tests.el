@@ -42,6 +42,12 @@
 ;;     Draw the glyphs with the codes CODE of the font of the frame at
 ;;     the pixel position X, Y of the baseline.  The number of glyphs
 ;;     is at most `remotefns-tests--max-glyphs'.
+;; (clear-area :frame F :x X :y Y :width W :height H)
+;;     Fill the rectangle of the frame at the pixel position X, Y with
+;;     the size W, H with the background color of the frame.
+;; (copy-area :frame F :x X :y Y :width W :height H :to-x TX :to-y TY)
+;;     Copy the rectangle of the frame at X, Y with the size W, H to
+;;     the position TX, TY of the same frame.
 
 ;;; Code:
 
@@ -56,10 +62,15 @@
 (defconst remotefns-tests--max-glyphs 512
   "The maximum number of glyphs in a `draw-glyphs' message.")
 
+(defconst remotefns-tests--types '(hello draw-glyphs clear-area copy-area)
+  "The message types.")
+
 (defun remotefns-tests--message ()
   "Return a random valid message."
   (funcall (rd-gen-element (list #'remotefns-tests--hello
-                                 #'remotefns-tests--draw-glyphs))))
+                                 #'remotefns-tests--draw-glyphs
+                                 #'remotefns-tests--clear-area
+                                 #'remotefns-tests--copy-area))))
 
 (defun remotefns-tests--hello ()
   "Return a random `hello' message."
@@ -75,6 +86,26 @@
                               0 (rd-gen-element
                                  (list 8 remotefns-tests--max-glyphs)))))
                   (vconcat (cl-loop repeat count collect (rd-gen-uint32))))))
+
+(defun remotefns-tests--clear-area ()
+  "Return a random `clear-area' message."
+  (list 'clear-area
+        :frame (rd-gen-uint32)
+        :x (rd-gen-int16)
+        :y (rd-gen-int16)
+        :width (rd-gen-uint16)
+        :height (rd-gen-uint16)))
+
+(defun remotefns-tests--copy-area ()
+  "Return a random `copy-area' message."
+  (list 'copy-area
+        :frame (rd-gen-uint32)
+        :x (rd-gen-int16)
+        :y (rd-gen-int16)
+        :width (rd-gen-uint16)
+        :height (rd-gen-uint16)
+        :to-x (rd-gen-int16)
+        :to-y (rd-gen-int16)))
 
 (ert-deftest remotefns-tests-round-trip ()
   (skip-unless (featurep 'remote-display))
@@ -138,6 +169,24 @@
                  (unibyte-string 0 0 0 19 2 0 0 0 1 #xff #xff 0 2 0 2
                                  0 0 0 65 1 2 3 4))))
 
+(ert-deftest remotefns-tests-clear-area-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 13, type 3, frame 1, x -1, y 2, width 3, height #x0405.
+  (should (equal (remote-display--encode
+                  '(clear-area :frame 1 :x -1 :y 2 :width 3 :height #x0405))
+                 (unibyte-string 0 0 0 13 3 0 0 0 1 #xff #xff 0 2 0 3
+                                 4 5))))
+
+(ert-deftest remotefns-tests-copy-area-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 17, type 4, frame 1, x -1, y 2, width 3, height 4,
+  ;; to-x 5, to-y -2.
+  (should (equal (remote-display--encode
+                  '(copy-area :frame 1 :x -1 :y 2 :width 3 :height 4
+                              :to-x 5 :to-y -2))
+                 (unibyte-string 0 0 0 17 4 0 0 0 1 #xff #xff 0 2 0 3
+                                 0 4 0 5 #xff #xfe))))
+
 (ert-deftest remotefns-tests-too-many-glyphs ()
   (skip-unless (featurep 'remote-display))
   (should-error (remote-display--encode
@@ -162,6 +211,13 @@
                 :type 'args-out-of-range)
   (should-error (remote-display--encode
                  '(draw-glyphs :frame 0 :x #x8000 :y 0 :glyphs []))
+                :type 'args-out-of-range)
+  (should-error (remote-display--encode
+                 '(clear-area :frame 0 :x 0 :y 0 :width -1 :height 0))
+                :type 'args-out-of-range)
+  (should-error (remote-display--encode
+                 '(copy-area :frame 0 :x 0 :y 0 :width 0 :height 0
+                             :to-x 0 :to-y #x8000))
                 :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-encode-is-unibyte ()
@@ -200,6 +256,14 @@
                  '(bad-length)))
   ;; A hello frame with a body that is too short.
   (should (equal (remotefns-tests--decode-error (unibyte-string 0 0 0 2 1 0))
+                 '(bad-length)))
+  ;; A clear-area frame without the height.
+  (should (equal (remotefns-tests--decode-error
+                  (unibyte-string 0 0 0 11 3 0 0 0 1 0 0 0 0 0 3))
+                 '(bad-length)))
+  ;; A copy-area frame without the to-y field.
+  (should (equal (remotefns-tests--decode-error
+                  (unibyte-string 0 0 0 15 4 0 0 0 1 0 0 0 0 0 3 0 4 0 5))
                  '(bad-length)))
   ;; A draw-glyphs frame with 2 glyphs and the bytes of only 1.
   (should (equal (remotefns-tests--decode-error
@@ -269,7 +333,7 @@ frames with one change, so that the decoder reaches the body."
                      (remote-display-protocol-error 'rejected))))
        (should (or (null result)
                    (eq result 'rejected)
-                   (and (memq (car-safe (car result)) '(hello draw-glyphs))
+                   (and (memq (car-safe (car result)) remotefns-tests--types)
                         (<= 5 (cdr result) (length bytes)))))))))
 
 (provide 'remotefns-tests)

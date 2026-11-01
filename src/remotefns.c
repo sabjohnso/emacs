@@ -100,6 +100,28 @@ message_from_lisp (Lisp_Object message)
 					      m.u.draw_glyphs.glyphs);
       return m;
     }
+  if (EQ (type, Qremote_display_clear_area))
+    {
+      m.type = RD_CLEAR_AREA;
+      m.u.clear_area.frame = uint32_field (fields, QCframe);
+      m.u.clear_area.x = int16_field (fields, QCx);
+      m.u.clear_area.y = int16_field (fields, QCy);
+      m.u.clear_area.width = uint16_field (fields, QCwidth);
+      m.u.clear_area.height = uint16_field (fields, QCheight);
+      return m;
+    }
+  if (EQ (type, Qremote_display_copy_area))
+    {
+      m.type = RD_COPY_AREA;
+      m.u.copy_area.frame = uint32_field (fields, QCframe);
+      m.u.copy_area.x = int16_field (fields, QCx);
+      m.u.copy_area.y = int16_field (fields, QCy);
+      m.u.copy_area.width = uint16_field (fields, QCwidth);
+      m.u.copy_area.height = uint16_field (fields, QCheight);
+      m.u.copy_area.to_x = int16_field (fields, QCto_x);
+      m.u.copy_area.to_y = int16_field (fields, QCto_y);
+      return m;
+    }
   xsignal1 (Qremote_display_protocol_error, message);
 }
 
@@ -118,6 +140,22 @@ message_to_lisp (const struct rd_message *m)
 		    QCx, make_fixnum (m->u.draw_glyphs.x),
 		    QCy, make_fixnum (m->u.draw_glyphs.y),
 		    QCglyphs, glyphs_to_lisp (&m->u.draw_glyphs));
+    case RD_CLEAR_AREA:
+      return listn (11, Qremote_display_clear_area,
+		    QCframe, make_uint (m->u.clear_area.frame),
+		    QCx, make_fixnum (m->u.clear_area.x),
+		    QCy, make_fixnum (m->u.clear_area.y),
+		    QCwidth, make_fixnum (m->u.clear_area.width),
+		    QCheight, make_fixnum (m->u.clear_area.height));
+    case RD_COPY_AREA:
+      return listn (15, Qremote_display_copy_area,
+		    QCframe, make_uint (m->u.copy_area.frame),
+		    QCx, make_fixnum (m->u.copy_area.x),
+		    QCy, make_fixnum (m->u.copy_area.y),
+		    QCwidth, make_fixnum (m->u.copy_area.width),
+		    QCheight, make_fixnum (m->u.copy_area.height),
+		    QCto_x, make_fixnum (m->u.copy_area.to_x),
+		    QCto_y, make_fixnum (m->u.copy_area.to_y));
     }
   emacs_abort ();
 }
@@ -220,6 +258,10 @@ syms_of_remotefns (void)
   DEFSYM (QCx, ":x");
   DEFSYM (QCy, ":y");
   DEFSYM (QCglyphs, ":glyphs");
+  DEFSYM (Qremote_display_clear_area, "clear-area");
+  DEFSYM (Qremote_display_copy_area, "copy-area");
+  DEFSYM (QCto_x, ":to-x");
+  DEFSYM (QCto_y, ":to-y");
 
   DEFSYM (Qremote_display_protocol_error, "remote-display-protocol-error");
   DEFSYM (Qunknown_type, "unknown-type");
