@@ -40,6 +40,22 @@ struct remote_bitmap_record
   cairo_pattern_t *pattern;
 };
 
+/* The operations of the place where a session writes its encoded
+   messages.  WRITE takes DATA and the SIZE bytes at BYTES, and it can
+   keep the bytes.  FLUSH takes DATA, and sends all the bytes that the
+   sink keeps: the session calls it at the end of each update, so an
+   update can reach the client as a whole.  FREE takes DATA, and frees
+   all that the sink holds.  The sinks of src/remotetest.c are two
+   kinds of sink, and each transport is another kind.  */
+struct remote_sink_ops
+{
+  void (*write) (void *data, const unsigned char *bytes, ptrdiff_t size);
+  void (*flush) (void *data);
+  void (*free) (void *data);
+};
+
+struct remote_sink;
+
 /* The information about one remote terminal (a session).  */
 struct remote_display_info
 {
@@ -80,16 +96,13 @@ struct remote_display_info
 
   /* The ID of the last frame that this session made.  The client
      knows a frame by its ID.  */
-  Window last_frame_id;
+  uint32_t last_frame_id;
 
-  /* True if a client receives the messages of this session.  While
-     it is false, the session sends no messages.  */
-  bool attached;
-
-  /* The encoded messages that the client has not taken.  */
-  unsigned char *output;
-  ptrdiff_t output_used;
-  ptrdiff_t output_size;
+  /* The sink of the client that receives the messages of this
+     session.  The session owns the sink.  A client is attached if
+     and only if this is not NULL.  While it is NULL, the session sends
+     no messages.  */
+  struct remote_sink *sink;
 };
 
 /* The list of all sessions.  The generic code uses this name.  */
@@ -124,8 +137,9 @@ struct remote_output
   Emacs_Cursor bottom_edge_cursor;
   Emacs_Cursor bottom_left_corner_cursor;
 
-  /* The frame ID that the client knows.  */
-  Window window_desc;
+  /* The frame ID that the client knows.  It has the type of the
+     frame field of the protocol, and it is not 0.  */
+  uint32_t frame_id;
   Window parent_desc;
 
   struct font *font;
@@ -139,7 +153,7 @@ struct remote_output
 #define FRAME_FONT(f)             (FRAME_REMOTE_OUTPUT (f)->font)
 #define FRAME_FONTSET(f)          (FRAME_REMOTE_OUTPUT (f)->fontset)
 #define FRAME_BASELINE_OFFSET(f)  (FRAME_REMOTE_OUTPUT (f)->baseline_offset)
-#define FRAME_NATIVE_WINDOW(f)    (FRAME_REMOTE_OUTPUT (f)->window_desc)
+#define FRAME_NATIVE_WINDOW(f)    (FRAME_REMOTE_OUTPUT (f)->frame_id)
 
 /* A pixel is 0xRRGGBB.  */
 #define RGB_TO_ULONG(r, g, b) (((r) << 16) | ((g) << 8) | (b))
@@ -151,6 +165,15 @@ struct remote_output
 #define WHITE_PIX_DEFAULT(f) 0xffffff
 
 /* Defined in remoteterm.c.  */
+extern struct remote_sink *remote_make_sink (const struct remote_sink_ops *,
+					     void *);
+extern void remote_set_sink (struct remote_display_info *,
+			     struct remote_sink *);
+extern void *remote_sink_data (struct remote_display_info *,
+			       const struct remote_sink_ops *);
 extern void syms_of_remoteterm (void);
+
+/* Defined in remotetest.c.  */
+extern void syms_of_remotetest (void);
 
 #endif /* EMACS_REMOTETERM_H */

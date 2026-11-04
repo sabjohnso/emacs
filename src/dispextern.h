@@ -2230,6 +2230,7 @@ struct draw_fringe_bitmap_params
   int which;  /* enum fringe_bitmap_type */
   unsigned short *bits;
   int wd, h, dh;
+  int bitmap_wd;  /* Width of BITS.  WD is smaller in a narrow fringe.  */
   int x, y;
   int bx, nx, by, ny;
   bool_bf cursor_p : 1;

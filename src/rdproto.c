@@ -26,103 +26,67 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 /* The size of the length field at the start of each frame.  */
 enum { LENGTH_SIZE = 4 };
 
-/* The codec of one message type.  FIXED_SIZE is the size of the
-   type byte and the fields that each message of the type has.
-   EXTRA_SIZE gives the size of the fields that follow them, for
-   example an array.  PUT writes the fields after the type byte.  GET
-   reads the SIZE bytes of fields at FIELDS, and returns RD_OK or
-   RD_BAD_LENGTH.  */
-struct codec
-{
-  size_t fixed_size;
-  size_t (*extra_size) (const struct rd_message *);
-  void (*put) (const struct rd_message *, unsigned char *);
-  enum rd_status (*get) (const unsigned char *, size_t,
-			 struct rd_message *);
-};
+static const struct rd_value_type uint8_value;
+static const struct rd_value_type uint16_value;
+static const struct rd_value_type uint32_value;
+static const struct rd_value_type int32_value;
 
-static const struct codec *message_codec (const struct rd_message *);
-static const struct codec *codec_of (unsigned int);
-static size_t no_extra_size (const struct rd_message *);
-static void put_hello (const struct rd_message *, unsigned char *);
-static enum rd_status get_hello (const unsigned char *, size_t,
-				 struct rd_message *);
-static size_t draw_glyphs_extra_size (const struct rd_message *);
-static void put_draw_glyphs (const struct rd_message *, unsigned char *);
-static enum rd_status get_draw_glyphs (const unsigned char *, size_t,
-				       struct rd_message *);
-static void put_clear_area (const struct rd_message *, unsigned char *);
-static enum rd_status get_clear_area (const unsigned char *, size_t,
-				      struct rd_message *);
-static void put_copy_area (const struct rd_message *, unsigned char *);
-static enum rd_status get_copy_area (const unsigned char *, size_t,
-				     struct rd_message *);
-static void put_uint16 (unsigned char *, uint16_t);
-static void put_uint32 (unsigned char *, uint32_t);
-static uint16_t get_uint16 (const unsigned char *);
-static uint32_t get_uint32 (const unsigned char *);
+/* The fields of each message type.  */
+#define FIELD_ROW(M, TYPE, NAME)					\
+  { #NAME, &TYPE##_value, offsetof (struct rd_message, u.M.NAME), 0, 0 },
+#define ARRAY_ROW(M, TYPE, NAME, COUNT, MAX)				\
+  { #NAME, &TYPE##_value, offsetof (struct rd_message, u.M.NAME),	\
+    offsetof (struct rd_message, u.M.COUNT), MAX },
+#define FIELD_TABLE(ENUM, NAME, FIELDS)					\
+  static const struct rd_field NAME##_fields[] =			\
+    { FIELDS (FIELD_ROW, ARRAY_ROW, NAME) };
+RD_MESSAGES (FIELD_TABLE)
 
-/* The offsets of the fields of a draw-glyphs message.  The glyph
-   codes follow the number of glyphs, GLYPH_SIZE bytes each.  */
-enum
+#define FORMAT_ROW(ENUM, NAME, FIELDS)					\
+  [RD_##ENUM] = { #NAME, NAME##_fields,					\
+		  sizeof NAME##_fields / sizeof *NAME##_fields },
+const struct rd_format rd_formats[RD_TYPE_LIMIT] =
   {
-    DRAW_GLYPHS_FRAME = 0,
-    DRAW_GLYPHS_X = DRAW_GLYPHS_FRAME + 4,
-    DRAW_GLYPHS_Y = DRAW_GLYPHS_X + 2,
-    DRAW_GLYPHS_COUNT = DRAW_GLYPHS_Y + 2,
-    DRAW_GLYPHS_HEAD = DRAW_GLYPHS_COUNT + 2,
-    GLYPH_SIZE = 4,
+    RD_MESSAGES (FORMAT_ROW)
   };
 
-/* The offsets of the fields of a clear-area message.  */
-enum
-  {
-    CLEAR_AREA_FRAME = 0,
-    CLEAR_AREA_X = CLEAR_AREA_FRAME + 4,
-    CLEAR_AREA_Y = CLEAR_AREA_X + 2,
-    CLEAR_AREA_WIDTH = CLEAR_AREA_Y + 2,
-    CLEAR_AREA_HEIGHT = CLEAR_AREA_WIDTH + 2,
-    CLEAR_AREA_SIZE = CLEAR_AREA_HEIGHT + 2,
-  };
-
-/* The offsets of the fields of a copy-area message.  */
-enum
-  {
-    COPY_AREA_FRAME = 0,
-    COPY_AREA_X = COPY_AREA_FRAME + 4,
-    COPY_AREA_Y = COPY_AREA_X + 2,
-    COPY_AREA_WIDTH = COPY_AREA_Y + 2,
-    COPY_AREA_HEIGHT = COPY_AREA_WIDTH + 2,
-    COPY_AREA_TO_X = COPY_AREA_HEIGHT + 2,
-    COPY_AREA_TO_Y = COPY_AREA_TO_X + 2,
-    COPY_AREA_SIZE = COPY_AREA_TO_Y + 2,
-  };
-
-/* The codecs, indexed by enum rd_type.  */
-static const struct codec codecs[] =
-  {
-    [RD_HELLO] = { 1 + 2, no_extra_size, put_hello, get_hello },
-    [RD_DRAW_GLYPHS] = { 1 + DRAW_GLYPHS_HEAD, draw_glyphs_extra_size,
-			 put_draw_glyphs, get_draw_glyphs },
-    [RD_CLEAR_AREA] = { 1 + CLEAR_AREA_SIZE, no_extra_size,
-			put_clear_area, get_clear_area },
-    [RD_COPY_AREA] = { 1 + COPY_AREA_SIZE, no_extra_size,
-		       put_copy_area, get_copy_area },
-  };
+static size_t fixed_size (const struct rd_format *);
+static const struct rd_format *format_of_byte (unsigned int);
+static unsigned char *put_field (unsigned char *, const struct rd_field *,
+				 const struct rd_message *);
+static enum rd_status get_fields (const struct rd_format *,
+				  const unsigned char *, size_t,
+				  struct rd_message *);
+static unsigned char *put_value (unsigned char *, const struct rd_value_type *,
+				 int64_t);
+static int64_t get_value (const unsigned char *,
+			  const struct rd_value_type *);
+static const void *field_place (const struct rd_message *,
+				const struct rd_field *, int);
 
 size_t
 rd_encoded_size (const struct rd_message *message)
 {
-  const struct codec *codec = message_codec (message);
-  return LENGTH_SIZE + codec->fixed_size + codec->extra_size (message);
+  const struct rd_format *format = &rd_formats[message->type];
+  size_t size = LENGTH_SIZE + fixed_size (format);
+  for (int i = 0; i < format->nfields; i++)
+    {
+      const struct rd_field *f = &format->fields[i];
+      if (f->max_count)
+	size += rd_array_count (message, f) * f->value->size;
+    }
+  return size;
 }
 
 void
 rd_encode (const struct rd_message *message, unsigned char *buf)
 {
-  put_uint32 (buf, rd_encoded_size (message) - LENGTH_SIZE);
-  buf[LENGTH_SIZE] = message->type;
-  message_codec (message)->put (message, buf + LENGTH_SIZE + 1);
+  const struct rd_format *format = &rd_formats[message->type];
+  unsigned char *p = put_value (buf, &uint32_value,
+				rd_encoded_size (message) - LENGTH_SIZE);
+  p = put_value (p, &uint8_value, message->type);
+  for (int i = 0; i < format->nfields; i++)
+    p = put_field (p, &format->fields[i], message);
 }
 
 enum rd_status
@@ -131,7 +95,7 @@ rd_decode (const unsigned char *buf, size_t len,
 {
   if (len < LENGTH_SIZE)
     return RD_INCOMPLETE;
-  uint32_t length = get_uint32 (buf);
+  uint32_t length = get_value (buf, &uint32_value);
   if (length > RD_MAX_LENGTH)
     return RD_FRAME_TOO_LONG;
   if (length < 1)
@@ -140,173 +104,177 @@ rd_decode (const unsigned char *buf, size_t len,
     return RD_INCOMPLETE;
 
   unsigned int type = buf[LENGTH_SIZE];
-  const struct codec *codec = codec_of (type);
-  if (!codec)
-    return RD_UNKNOWN_TYPE;
-  if (length < codec->fixed_size)
+  const struct rd_format *format = format_of_byte (type);
+  if (!format)
+    {
+      *used = LENGTH_SIZE + length;
+      return RD_UNKNOWN_TYPE;
+    }
+  if (length < fixed_size (format))
     return RD_BAD_LENGTH;
   if (len - LENGTH_SIZE < length)
     return RD_INCOMPLETE;
 
   message->type = type;
-  enum rd_status status = codec->get (buf + LENGTH_SIZE + 1, length - 1,
-				      message);
+  enum rd_status status = get_fields (format, buf + LENGTH_SIZE + 1,
+				      length - 1, message);
   if (status == RD_OK)
     *used = LENGTH_SIZE + length;
   return status;
 }
 
-/* Return the codec of MESSAGE.  The type of MESSAGE must be valid.  */
-static const struct codec *
-message_codec (const struct rd_message *message)
+int
+rd_array_count (const struct rd_message *message, const struct rd_field *f)
 {
-  const struct codec *codec = codec_of (message->type);
-  if (!codec)
-    abort ();
-  return codec;
+  return *(const uint16_t *) ((const char *) message + f->count_offset);
 }
 
-/* Return the codec of TYPE, or NULL if TYPE is not a message type.  */
-static const struct codec *
-codec_of (unsigned int type)
+void
+rd_set_array_count (struct rd_message *message, const struct rd_field *f,
+		    int count)
 {
-  if (type < sizeof codecs / sizeof *codecs && codecs[type].put)
-    return &codecs[type];
+  *(uint16_t *) ((char *) message + f->count_offset) = count;
+}
+
+int64_t
+rd_field_value (const struct rd_message *message, const struct rd_field *f,
+		int index)
+{
+  return f->value->load (field_place (message, f, index));
+}
+
+void
+rd_set_field_value (struct rd_message *message, const struct rd_field *f,
+		    int index, int64_t value)
+{
+  f->value->store ((void *) field_place (message, f, index), value);
+}
+
+/* Return the size of the type byte and the bytes that each message of
+   FORMAT has.  The elements of an array are not in this size, but the
+   number of elements is.  */
+static size_t
+fixed_size (const struct rd_format *format)
+{
+  size_t size = 1;
+  for (int i = 0; i < format->nfields; i++)
+    {
+      const struct rd_field *f = &format->fields[i];
+      size += f->max_count ? uint16_value.size : f->value->size;
+    }
+  return size;
+}
+
+/* Return the format of the type byte TYPE, or NULL if TYPE is not a
+   message type.  */
+static const struct rd_format *
+format_of_byte (unsigned int type)
+{
+  if (RD_TYPE_NONE < type && type < RD_TYPE_LIMIT)
+    return &rd_formats[type];
   return NULL;
 }
 
-static size_t
-no_extra_size (const struct rd_message *message)
+/* Write the field F of MESSAGE at P, and return the end of it.  */
+static unsigned char *
+put_field (unsigned char *p, const struct rd_field *f,
+	   const struct rd_message *message)
 {
-  return 0;
+  if (!f->max_count)
+    return put_value (p, f->value, rd_field_value (message, f, 0));
+  int count = rd_array_count (message, f);
+  p = put_value (p, &uint16_value, count);
+  for (int i = 0; i < count; i++)
+    p = put_value (p, f->value, rd_field_value (message, f, i));
+  return p;
 }
 
-static void
-put_hello (const struct rd_message *message, unsigned char *fields)
-{
-  put_uint16 (fields, message->u.hello.version);
-}
-
+/* Read the fields of FORMAT from the SIZE bytes at P, which hold at
+   least the bytes of `fixed_size'.  Return RD_OK or RD_BAD_LENGTH.  The
+   bytes after the fixed bytes are the only place for the elements of an
+   array.  */
 static enum rd_status
-get_hello (const unsigned char *fields, size_t size,
-	   struct rd_message *message)
+get_fields (const struct rd_format *format, const unsigned char *p,
+	    size_t size, struct rd_message *message)
 {
-  message->u.hello.version = get_uint16 (fields);
+  size_t spare = size + 1 - fixed_size (format);
+  for (int i = 0; i < format->nfields; i++)
+    {
+      const struct rd_field *f = &format->fields[i];
+      if (!f->max_count)
+	{
+	  rd_set_field_value (message, f, 0, get_value (p, f->value));
+	  p += f->value->size;
+	  continue;
+	}
+      int count = get_value (p, &uint16_value);
+      p += uint16_value.size;
+      if (count > f->max_count || count * f->value->size > spare)
+	return RD_BAD_LENGTH;
+      spare -= count * f->value->size;
+      rd_set_array_count (message, f, count);
+      for (int element = 0; element < count; element++)
+	{
+	  rd_set_field_value (message, f, element, get_value (p, f->value));
+	  p += f->value->size;
+	}
+    }
   return RD_OK;
 }
 
-static size_t
-draw_glyphs_extra_size (const struct rd_message *message)
+/* Write VALUE at P in the big-endian form of TYPE, and return the end
+   of it.  The conversion to uint64_t is modulo 2^64, so a negative
+   value has its two's complement bits.  */
+static unsigned char *
+put_value (unsigned char *p, const struct rd_value_type *type, int64_t value)
 {
-  return GLYPH_SIZE * message->u.draw_glyphs.nglyphs;
+  uint64_t bits = value;
+  for (size_t i = type->size; i > 0; i--)
+    {
+      p[i - 1] = bits & 0xff;
+      bits >>= 8;
+    }
+  return p + type->size;
 }
 
-static void
-put_draw_glyphs (const struct rd_message *message, unsigned char *fields)
+/* Read the big-endian value of TYPE at P.  A value above the limit of
+   TYPE is the bit pattern of a negative value.  */
+static int64_t
+get_value (const unsigned char *p, const struct rd_value_type *type)
 {
-  const struct rd_draw_glyphs *m = &message->u.draw_glyphs;
-  put_uint32 (fields + DRAW_GLYPHS_FRAME, m->frame);
-  put_uint16 (fields + DRAW_GLYPHS_X, m->x);
-  put_uint16 (fields + DRAW_GLYPHS_Y, m->y);
-  put_uint16 (fields + DRAW_GLYPHS_COUNT, m->nglyphs);
-  for (int i = 0; i < m->nglyphs; i++)
-    put_uint32 (fields + DRAW_GLYPHS_HEAD + GLYPH_SIZE * i, m->glyphs[i]);
+  int64_t bits = 0;
+  for (size_t i = 0; i < type->size; i++)
+    bits = (bits << 8) | p[i];
+  return bits <= type->max ? bits : bits - (type->max - type->min + 1);
 }
 
-static enum rd_status
-get_draw_glyphs (const unsigned char *fields, size_t size,
-		 struct rd_message *message)
+/* Return the place of the element INDEX of F in MESSAGE.  */
+static const void *
+field_place (const struct rd_message *message, const struct rd_field *f,
+	     int index)
 {
-  struct rd_draw_glyphs *m = &message->u.draw_glyphs;
-  m->nglyphs = get_uint16 (fields + DRAW_GLYPHS_COUNT);
-  if (m->nglyphs > RD_MAX_GLYPHS
-      || size < DRAW_GLYPHS_HEAD + GLYPH_SIZE * m->nglyphs)
-    return RD_BAD_LENGTH;
-  m->frame = get_uint32 (fields + DRAW_GLYPHS_FRAME);
-  m->x = get_uint16 (fields + DRAW_GLYPHS_X);
-  m->y = get_uint16 (fields + DRAW_GLYPHS_Y);
-  for (int i = 0; i < m->nglyphs; i++)
-    m->glyphs[i] = get_uint32 (fields + DRAW_GLYPHS_HEAD + GLYPH_SIZE * i);
-  return RD_OK;
+  return (const char *) message + f->offset + index * f->value->size;
 }
 
-static void
-put_clear_area (const struct rd_message *message, unsigned char *fields)
-{
-  const struct rd_clear_area *m = &message->u.clear_area;
-  put_uint32 (fields + CLEAR_AREA_FRAME, m->frame);
-  put_uint16 (fields + CLEAR_AREA_X, m->x);
-  put_uint16 (fields + CLEAR_AREA_Y, m->y);
-  put_uint16 (fields + CLEAR_AREA_WIDTH, m->width);
-  put_uint16 (fields + CLEAR_AREA_HEIGHT, m->height);
-}
+/* Define the load and store functions of the C type TYPE##_t, and its
+   row of the value types.  */
+#define VALUE_TYPE(TYPE, MIN, MAX)					\
+  static int64_t							\
+  load_##TYPE (const void *place)					\
+  {									\
+    return *(const TYPE##_t *) place;					\
+  }									\
+									\
+  static void								\
+  store_##TYPE (void *place, int64_t value)				\
+  {									\
+    *(TYPE##_t *) place = value;					\
+  }									\
+									\
+  static const struct rd_value_type TYPE##_value =			\
+    { sizeof (TYPE##_t), MIN, MAX, load_##TYPE, store_##TYPE }
 
-static enum rd_status
-get_clear_area (const unsigned char *fields, size_t size,
-		struct rd_message *message)
-{
-  struct rd_clear_area *m = &message->u.clear_area;
-  m->frame = get_uint32 (fields + CLEAR_AREA_FRAME);
-  m->x = get_uint16 (fields + CLEAR_AREA_X);
-  m->y = get_uint16 (fields + CLEAR_AREA_Y);
-  m->width = get_uint16 (fields + CLEAR_AREA_WIDTH);
-  m->height = get_uint16 (fields + CLEAR_AREA_HEIGHT);
-  return RD_OK;
-}
-
-static void
-put_copy_area (const struct rd_message *message, unsigned char *fields)
-{
-  const struct rd_copy_area *m = &message->u.copy_area;
-  put_uint32 (fields + COPY_AREA_FRAME, m->frame);
-  put_uint16 (fields + COPY_AREA_X, m->x);
-  put_uint16 (fields + COPY_AREA_Y, m->y);
-  put_uint16 (fields + COPY_AREA_WIDTH, m->width);
-  put_uint16 (fields + COPY_AREA_HEIGHT, m->height);
-  put_uint16 (fields + COPY_AREA_TO_X, m->to_x);
-  put_uint16 (fields + COPY_AREA_TO_Y, m->to_y);
-}
-
-static enum rd_status
-get_copy_area (const unsigned char *fields, size_t size,
-	       struct rd_message *message)
-{
-  struct rd_copy_area *m = &message->u.copy_area;
-  m->frame = get_uint32 (fields + COPY_AREA_FRAME);
-  m->x = get_uint16 (fields + COPY_AREA_X);
-  m->y = get_uint16 (fields + COPY_AREA_Y);
-  m->width = get_uint16 (fields + COPY_AREA_WIDTH);
-  m->height = get_uint16 (fields + COPY_AREA_HEIGHT);
-  m->to_x = get_uint16 (fields + COPY_AREA_TO_X);
-  m->to_y = get_uint16 (fields + COPY_AREA_TO_Y);
-  return RD_OK;
-}
-
-static void
-put_uint16 (unsigned char *p, uint16_t n)
-{
-  p[0] = n >> 8;
-  p[1] = n;
-}
-
-static void
-put_uint32 (unsigned char *p, uint32_t n)
-{
-  p[0] = n >> 24;
-  p[1] = n >> 16;
-  p[2] = n >> 8;
-  p[3] = n;
-}
-
-static uint16_t
-get_uint16 (const unsigned char *p)
-{
-  return ((uint16_t) p[0] << 8) | (uint16_t) p[1];
-}
-
-static uint32_t
-get_uint32 (const unsigned char *p)
-{
-  return (((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16)
-	  | ((uint32_t) p[2] << 8) | (uint32_t) p[3]);
-}
+VALUE_TYPE (uint8, 0, UINT8_MAX);
+VALUE_TYPE (uint16, 0, UINT16_MAX);
+VALUE_TYPE (uint32, 0, UINT32_MAX);
+VALUE_TYPE (int32, INT32_MIN, INT32_MAX);

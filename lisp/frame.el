@@ -2827,7 +2827,7 @@ with DISPLAY.  To get information for each physical monitor, use
 `display-monitor-attributes-list'."
   (let ((frame-type (framep-on-display display)))
     (cond
-     ((memq frame-type '(x w32 ns haiku pgtk android))
+     ((memq frame-type '(x w32 ns haiku pgtk android remote))
       (x-display-pixel-height display))
      (t
       (tty-display-pixel-height display)))))
@@ -2848,7 +2848,7 @@ with DISPLAY.  To get information for each physical monitor, use
 `display-monitor-attributes-list'."
   (let ((frame-type (framep-on-display display)))
     (cond
-     ((memq frame-type '(x w32 ns haiku pgtk android))
+     ((memq frame-type '(x w32 ns haiku pgtk android remote))
       (x-display-pixel-width display))
      (t
       (tty-display-pixel-width display)))))

@@ -22,7 +22,12 @@
 ;; A small library for property tests of the remote display code.
 ;; ERT has no generators, so this file supplies them.  The generators
 ;; use their own seeded random state, so a failure is reproducible
-;; and the tests do not change the random state of other tests.
+;; and the tests do not change the random state of other tests.  A
+;; loop of trials can run in another Emacs: `rd-gen-report' gives its
+;; result as a plist, and `rd-gen-check-report' gives that result to
+;; ERT.  If that Emacs crashes, it gives no result, so `rd-gen-report'
+;; can also keep the name of the current trial in a file, and
+;; `rd-gen-last-trial' reads it.
 
 ;;; Code:
 
@@ -35,15 +40,86 @@
 (defvar rd-gen--random-state nil
   "The random state of the generators.")
 
+(defvar rd-gen--finished-trials 0
+  "The number of trials that the last `rd-gen-for-all' finished.")
+
+(defvar rd-gen--current-trial nil
+  "The name of the trial that runs now, or nil.")
+
+(defvar rd-gen--trial-file nil
+  "The file that holds the name of the current trial, or nil.")
+
 (defun rd-gen-for-all (generate check)
   "Call CHECK with `rd-gen-trials' values from GENERATE.
 Use a fixed seed.  The trial and the value that failed are in the
-ERT message."
-  (setq rd-gen--random-state (cl-make-random-state 1))
-  (dotimes (trial rd-gen-trials)
-    (let ((value (funcall generate)))
-      (ert-info ((format "%d: %S" trial value) :prefix "Trial: ")
-        (funcall check value)))))
+ERT message.  It is a failure if no trial finishes, because then the
+loop tests nothing."
+  (let ((rd-gen--random-state (cl-make-random-state 1)))
+    (setq rd-gen--finished-trials 0)
+    (dotimes (trial rd-gen-trials)
+      (rd-gen--set-current-trial (number-to-string trial))
+      (ert-info (rd-gen--current-trial :prefix "Trial: ")
+        (let ((value (funcall generate)))
+          (rd-gen--set-current-trial (format "%d: %S" trial value))
+          (ert-info (rd-gen--current-trial :prefix "Trial: ")
+            (funcall check value))))
+      (rd-gen--set-current-trial nil)
+      (cl-incf rd-gen--finished-trials)))
+  (should (> rd-gen--finished-trials 0)))
+
+(defun rd-gen--set-current-trial (name)
+  "Make NAME the name of the current trial.
+NAME is nil if no trial runs.  The file of the trial must survive a
+crash of this Emacs, not a crash of the machine, so no fsync is
+necessary.  The file holds the printed form of NAME, because a coding
+system changes raw bytes that have the form of a UTF-8 character, and
+the printed form of a string has escapes for raw bytes."
+  (setq rd-gen--current-trial name)
+  (when rd-gen--trial-file
+    (if name
+        (let ((coding-system-for-write 'utf-8-emacs-unix)
+              (write-region-inhibit-fsync t))
+          (write-region (prin1-to-string name) nil
+                        rd-gen--trial-file nil 'silent))
+      (delete-file rd-gen--trial-file))))
+
+(defun rd-gen-report (function &optional trial-file)
+  "Call FUNCTION, which runs `rd-gen-for-all', and return a plist.
+:trials is the number of trials that finished.  After a failure,
+:failure is the printed condition, and :trial names the trial that
+failed, or is nil if the failure is not in a trial.  Both are strings,
+so another Emacs can read the plist, whatever the values of the trials
+are.  If TRIAL-FILE is non-nil, keep the name of the current trial in
+that file, for `rd-gen-last-trial'."
+  (let ((rd-gen--finished-trials 0)
+        (rd-gen--current-trial nil)
+        (rd-gen--trial-file trial-file))
+    (condition-case failure
+        (progn
+          (funcall function)
+          (list :trials rd-gen--finished-trials))
+      (error (list :trials rd-gen--finished-trials
+                   :trial rd-gen--current-trial
+                   :failure (format "%S" failure))))))
+
+(defun rd-gen-last-trial (trial-file)
+  "Return the name of the trial that TRIAL-FILE holds, or nil.
+TRIAL-FILE is as for `rd-gen-report'.  It holds a name while a trial
+runs, so this name remains after a crash in the trial."
+  (when (file-exists-p trial-file)
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8-emacs-unix))
+        (insert-file-contents trial-file))
+      (read (current-buffer)))))
+
+(defun rd-gen-check-report (report)
+  "Fail the current ERT test if REPORT has a failure or no finished trial.
+REPORT is a value of `rd-gen-report'.  The ERT message names the trial."
+  (let ((failure (plist-get report :failure)))
+    (when failure
+      (ert-info ((or (plist-get report :trial) "none") :prefix "Trial: ")
+        (ert-fail failure))))
+  (should (> (plist-get report :trials) 0)))
 
 (defun rd-gen-random (limit)
   "Return a random integer from 0 to LIMIT - 1."
@@ -64,9 +140,14 @@ ERT message."
   "Return a random 32-bit unsigned integer, often a boundary value."
   (rd-gen-integer 0 #xffffffff))
 
-(defun rd-gen-int16 ()
-  "Return a random 16-bit signed integer, often a boundary value."
-  (rd-gen-integer (- #x8000) #x7fff))
+(defun rd-gen-int32 ()
+  "Return a random signed 32-bit integer, often at a limit of a width.
+The limits of 8, 16, and 32 bits find a field that is too narrow."
+  (rd-gen-element (list (- (ash 1 31)) (1- (ash 1 31))
+                        -65536 -32769 -32768 -256 -1 0 1 255
+                        32767 32768 65535 65536
+                        (- (rd-gen-uint32) (ash 1 31))
+                        (- (rd-gen-uint32) (ash 1 31)))))
 
 (defun rd-gen-element (list)
   "Return a random element of LIST."

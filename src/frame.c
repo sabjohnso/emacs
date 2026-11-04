@@ -4173,6 +4173,8 @@ static const struct frame_parm_table frame_parms[] =
   {"buried-buffer-list",	SYMBOL_INDEX (Qburied_buffer_list)},
 };
 
+int const frame_parm_count = countof (frame_parms);
+
 /* This list must be in the same order as frame_parm_table above, and
    both lists must have the same number of elements.  */
 enum x_frame_parameter

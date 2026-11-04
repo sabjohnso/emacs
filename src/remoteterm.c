@@ -45,6 +45,7 @@ static Lisp_Object remote_display_name_list;
 /* The color names of etc/rgb.txt, as (NAME . PIXEL) pairs.  */
 static Lisp_Object remote_color_map;
 
+static int remote_largest_frame_size (Lisp_Object, bool);
 static struct remote_display_info *remote_open_session (Lisp_Object);
 static struct remote_display_info *remote_session_by_name (Lisp_Object);
 static struct terminal *remote_create_terminal (struct remote_display_info *,
@@ -55,17 +56,45 @@ static Lisp_Object remote_frame_session_arg (Lisp_Object);
 static struct frame *remote_make_frame_on (struct remote_display_info *,
 					   Lisp_Object);
 static void remote_assign_frame_id (struct frame *);
+static bool remote_frame_id_used_p (struct remote_display_info *, uint32_t);
 static uint32_t remote_frame_id (struct frame *);
 static void remote_init_frame_font (struct frame *, Lisp_Object);
 static void remote_default_frame_parameters (struct frame *, Lisp_Object);
 static void remote_finish_frame (struct frame *, Lisp_Object);
+static void remote_free_frame_resources (struct frame *);
 static void remote_delete_terminal (struct terminal *);
 static bool remote_defined_color (struct frame *, const char *,
 				  Emacs_Color *, bool, bool);
+static void remote_set_cursor_type (struct frame *, Lisp_Object, Lisp_Object);
 static struct redisplay_interface remote_redisplay_interface;
 static void remote_send (struct remote_display_info *,
 			 const struct rd_message *);
-static void remote_send_glyphs (struct glyph_string *, int, int, int);
+static void remote_flush_frame (struct frame *);
+static void remote_clear_glyph_string (struct glyph_string *);
+static Emacs_Rectangle remote_glyph_clip (struct glyph_string *);
+static Emacs_Rectangle remote_intersection (Emacs_Rectangle, Emacs_Rectangle);
+static int remote_foreground_x (struct glyph_string *);
+static void remote_draw_chars (struct glyph_string *);
+static void remote_draw_composition (struct glyph_string *);
+static void remote_draw_static_composition (struct glyph_string *);
+static void remote_draw_automatic_composition (struct glyph_string *);
+static void remote_send_glyphs (struct glyph_string *, int, int, int, int);
+static void remote_clear_frame_area (struct frame *, int, int, int, int);
+static void remote_send_cursor (struct window *, struct glyph_row *,
+				enum text_cursor_kinds, int);
+static int remote_clip_copy (int, int, int *, int *, int);
+static bool remote_clip_to_row (struct window *, struct glyph_row *,
+				Emacs_Rectangle *);
+static enum rd_cursor_kind remote_cursor_kind (enum text_cursor_kinds);
+static bool remote_empty_area_p (int, int);
+static void remote_row_bounds (struct window *, struct glyph_row *,
+			       int *, int *);
+static void remote_fringe_visible_rows (struct window *, struct glyph_row *,
+					const struct draw_fringe_bitmap_params *,
+					int *, int *);
+static bool remote_fringe_fits_p (const struct draw_fringe_bitmap_params *,
+				  int, int);
+static int remote_fringe_rows_above (const struct draw_fringe_bitmap_params *);
 
 
 /***********************************************************************
@@ -170,12 +199,50 @@ TERMINAL is ignored.  */)
   return make_fixnum (1 << 24);
 }
 
+DEFUN ("x-display-pixel-width", Fx_display_pixel_width,
+       Sx_display_pixel_width, 0, 1, 0,
+       doc: /* Return the width in pixels of the session TERMINAL.
+A session has no screen of its own, so the value is the width of the
+widest frame of the session.  */)
+  (Lisp_Object terminal)
+{
+  return make_fixnum (remote_largest_frame_size (terminal, true));
+}
+
+DEFUN ("x-display-pixel-height", Fx_display_pixel_height,
+       Sx_display_pixel_height, 0, 1, 0,
+       doc: /* Return the height in pixels of the session TERMINAL.
+A session has no screen of its own, so the value is the height of the
+tallest frame of the session.  */)
+  (Lisp_Object terminal)
+{
+  return make_fixnum (remote_largest_frame_size (terminal, false));
+}
+
 DEFUN ("x-hide-tip", Fx_hide_tip, Sx_hide_tip, 0, 0, 0,
        doc: /* Hide the current tooltip window.
 Remote frames have no tooltips yet, so return nil.  */)
   (void)
 {
   return Qnil;
+}
+
+/* Return the largest pixel width of the frames of the session TERMINAL
+   if WIDTH_P, and otherwise their largest pixel height.  */
+static int
+remote_largest_frame_size (Lisp_Object terminal, bool width_p)
+{
+  struct remote_display_info *dpyinfo = check_x_display_info (terminal);
+  int size = 0;
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+      if (FRAME_REMOTE_P (f) && FRAME_DISPLAY_INFO (f) == dpyinfo)
+	size = max (size, (width_p ? FRAME_PIXEL_WIDTH (f)
+			   : FRAME_PIXEL_HEIGHT (f)));
+    }
+  return size;
 }
 
 /* Return the session for OBJECT: a terminal, a frame, the name of a
@@ -266,7 +333,7 @@ remote_delete_terminal (struct terminal *terminal)
 	}
   remote_display_name_list = Fdelq (dpyinfo->name_list_element,
 				    remote_display_name_list);
-  xfree (dpyinfo->output);
+  remote_set_sink (dpyinfo, NULL);
   xfree (dpyinfo->bitmaps);
   xfree (dpyinfo);
   terminal->display_info.remote = NULL;
@@ -278,35 +345,12 @@ remote_delete_terminal (struct terminal *terminal)
 				Output
  ***********************************************************************/
 
-/* The tests attach a recording client to a session, and take the
-   bytes that the session sends.  */
-
-DEFUN ("remote-display--record", Fremote_display__record,
-       Sremote_display__record, 1, 1, 0,
-       doc: /* Attach a new recording client to the session DISPLAY.
-Discard the bytes that the last client did not take.  The session
-keeps the bytes that it sends, until a call of
-`remote-display--take-output' takes them.  */)
-  (Lisp_Object display)
+/* A sink of a session.  Only this file knows the contents.  */
+struct remote_sink
 {
-  struct remote_display_info *dpyinfo = check_x_display_info (display);
-  dpyinfo->attached = true;
-  dpyinfo->output_used = 0;
-  return Qnil;
-}
-
-DEFUN ("remote-display--take-output", Fremote_display__take_output,
-       Sremote_display__take_output, 1, 1, 0,
-       doc: /* Return and remove the bytes that the session DISPLAY sent.
-The value is a unibyte string of encoded messages.  */)
-  (Lisp_Object display)
-{
-  struct remote_display_info *dpyinfo = check_x_display_info (display);
-  Lisp_Object bytes = make_unibyte_string ((char *) dpyinfo->output,
-					   dpyinfo->output_used);
-  dpyinfo->output_used = 0;
-  return bytes;
-}
+  const struct remote_sink_ops *ops;
+  void *data;
+};
 
 /* Send MESSAGE to the client of DPYINFO.  Do nothing if no client is
    attached.  */
@@ -314,17 +358,63 @@ static void
 remote_send (struct remote_display_info *dpyinfo,
 	     const struct rd_message *message)
 {
-  if (!dpyinfo->attached)
+  struct remote_sink *sink = dpyinfo->sink;
+  if (!sink)
     return;
+  USE_SAFE_ALLOCA;
   ptrdiff_t size = rd_encoded_size (message);
-  ptrdiff_t needed = dpyinfo->output_used + size - dpyinfo->output_size;
-  if (needed > 0)
-    dpyinfo->output = xpalloc (dpyinfo->output, &dpyinfo->output_size,
-			       needed, -1, 1);
-  rd_encode (message, dpyinfo->output + dpyinfo->output_used);
-  dpyinfo->output_used += size;
+  unsigned char *bytes = SAFE_ALLOCA (size);
+  rd_encode (message, bytes);
+  sink->ops->write (sink->data, bytes, size);
+  SAFE_FREE ();
 }
 
+/* Tell the sink of F that the messages so far form a whole, and must
+   go to the client.  This is the update_end_hook, and the flush_display
+   hook of the redisplay interface.  Both are necessary: redisplay calls
+   the second one only for the selected frame, and it calls it for
+   messages outside an update.  */
+static void
+remote_flush_frame (struct frame *f)
+{
+  struct remote_sink *sink = FRAME_DISPLAY_INFO (f)->sink;
+  if (sink)
+    sink->ops->flush (sink->data);
+}
+
+/* Return a new sink with the operations OPS and the data DATA.  */
+struct remote_sink *
+remote_make_sink (const struct remote_sink_ops *ops, void *data)
+{
+  struct remote_sink *sink = xmalloc (sizeof *sink);
+  sink->ops = ops;
+  sink->data = data;
+  return sink;
+}
+
+/* Return the data of the sink of DPYINFO if the sink has the operations
+   OPS, and otherwise NULL.  */
+void *
+remote_sink_data (struct remote_display_info *dpyinfo,
+		  const struct remote_sink_ops *ops)
+{
+  struct remote_sink *sink = dpyinfo->sink;
+  return sink && sink->ops == ops ? sink->data : NULL;
+}
+
+/* Free the sink of DPYINFO if it has one, and give DPYINFO the sink
+   SINK.  If SINK is NULL, DPYINFO has no client after this call.  */
+void
+remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
+{
+  struct remote_sink *old = dpyinfo->sink;
+  dpyinfo->sink = sink;
+  if (old)
+    {
+      old->ops->free (old->data);
+      xfree (old);
+    }
+}
 
 /***********************************************************************
 				Colors
@@ -425,6 +515,13 @@ remote_set_background_color (struct frame *f, Lisp_Object arg,
 				Frames
  ***********************************************************************/
 
+/* The handler of the `cursor-type' frame parameter.  */
+static void
+remote_set_cursor_type (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
+{
+  set_frame_cursor_types (f, arg);
+}
+
 /* The handlers of frame parameters, in the order of frame_parms in
    frame.c.  NULL means that the parameter has no effect yet.  */
 static frame_parm_handler remote_frame_parm_handlers[] =
@@ -435,7 +532,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     NULL, /* border color */
     gui_set_border_width,
     NULL, /* cursor color */
-    NULL, /* cursor type */
+    remote_set_cursor_type,
     gui_set_font,
     remote_set_foreground_color,
     NULL, /* icon name */
@@ -492,7 +589,6 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     NULL,
     NULL,
     NULL,
-    NULL,
   };
 
 static void
@@ -503,9 +599,12 @@ remote_unwind_create_frame (Lisp_Object frame)
     return;
   if (NILP (Fmemq (frame, Vframe_list)))
     {
-      /* The frame is not complete.  Free it.  */
-      xfree (f->output_data.remote);
-      f->output_data.remote = NULL;
+      /* The frame is not complete, so `delete_frame' does not run.
+	 Free what it frees.  */
+      remote_free_frame_resources (f);
+      free_glyphs (f);
+      free_font_driver_list (f);
+      xfree (f->decode_mode_spec_buffer);
     }
 }
 
@@ -561,12 +660,32 @@ remote_make_frame_on (struct remote_display_info *dpyinfo, Lisp_Object parms)
   return f;
 }
 
-/* Give F its font drivers and its default font.  */
-/* Give F the next frame ID of its session.  */
+/* Give F the next frame ID of its session.  The counter wraps at the
+   end of the range.  Skip 0, because the generic code reads a frame
+   with the ID 0 as a frame with no window.  Skip the IDs of the live
+   frames, because the client knows a frame by its ID.  */
 static void
 remote_assign_frame_id (struct frame *f)
 {
-  FRAME_NATIVE_WINDOW (f) = ++FRAME_DISPLAY_INFO (f)->last_frame_id;
+  struct remote_display_info *dpyinfo = FRAME_DISPLAY_INFO (f);
+  do
+    dpyinfo->last_frame_id++;
+  while (!dpyinfo->last_frame_id
+	 || remote_frame_id_used_p (dpyinfo, dpyinfo->last_frame_id));
+  FRAME_NATIVE_WINDOW (f) = dpyinfo->last_frame_id;
+}
+
+/* Return true if a live frame of DPYINFO has the frame ID ID.  */
+static bool
+remote_frame_id_used_p (struct remote_display_info *dpyinfo, uint32_t id)
+{
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    if (FRAME_REMOTE_P (XFRAME (frame))
+	&& FRAME_DISPLAY_INFO (XFRAME (frame)) == dpyinfo
+	&& remote_frame_id (XFRAME (frame)) == id)
+      return true;
+  return false;
 }
 
 /* Return the ID by which the client knows F.  */
@@ -576,6 +695,7 @@ remote_frame_id (struct frame *f)
   return FRAME_NATIVE_WINDOW (f);
 }
 
+/* Give F its font drivers and its default font.  */
 static void
 remote_init_frame_font (struct frame *f, Lisp_Object parms)
 {
@@ -746,8 +866,26 @@ remote_frame_visible_invisible (struct frame *f, bool visible)
 static void
 remote_delete_frame (struct frame *f)
 {
+  remote_free_frame_resources (f);
+}
+
+/* Free the data of F that the generic code does not free, and remove
+   F from its session.  */
+static void
+remote_free_frame_resources (struct frame *f)
+{
+  struct remote_display_info *dpyinfo = FRAME_DISPLAY_INFO (f);
+  block_input ();
+  free_frame_faces (f);
+  if (dpyinfo->focus_frame == f)
+    dpyinfo->focus_frame = NULL;
+  if (dpyinfo->highlight_frame == f)
+    dpyinfo->highlight_frame = NULL;
+  if (dpyinfo->mouse_highlight.mouse_face_mouse_frame == f)
+    reset_mouse_highlight (&dpyinfo->mouse_highlight);
   xfree (f->output_data.remote);
   f->output_data.remote = NULL;
+  unblock_input ();
 }
 
 
@@ -801,57 +939,278 @@ remote_menu_show (struct frame *f, int x, int y, int menuflags,
 }
 
 /* Copy the pixels of RUN in W from their current position to their
-   desired position.  */
+   desired position.  A copy-area message has no clip, so send only the
+   rows that stay in the text area of W.  */
 static void
 remote_scroll_run (struct window *w, struct run *run)
 {
   int x, y, width, height;
   window_box (w, ANY_AREA, &x, &y, &width, &height);
+  int from_y = WINDOW_TO_FRAME_PIXEL_Y (w, run->current_y);
+  int to_y = WINDOW_TO_FRAME_PIXEL_Y (w, run->desired_y);
+  int rows = remote_clip_copy (y, y + height, &from_y, &to_y, run->height);
+  if (remote_empty_area_p (width, rows))
+    return;
   struct frame *f = XFRAME (w->frame);
+
+  /* Erase the cursor, so that the copy does not move it.  Redisplay
+     draws it again at the end of the update of W.  */
+  gui_clear_cursor (w);
+
   struct rd_message message =
     {
       .type = RD_COPY_AREA,
-      .u.copy_area = { .frame = remote_frame_id (f), .x = x,
-		       .y = WINDOW_TO_FRAME_PIXEL_Y (w, run->current_y),
-		       .width = width, .height = run->height, .to_x = x,
-		       .to_y = WINDOW_TO_FRAME_PIXEL_Y (w, run->desired_y) },
+      .u.copy_area = { .frame = remote_frame_id (f), .x = x, .y = from_y,
+		       .width = width, .height = rows, .to_x = x,
+		       .to_y = to_y },
     };
   remote_send (FRAME_DISPLAY_INFO (f), &message);
 }
 
+/* Return the number of the HEIGHT rows from *FROM that can go to *TO in
+   a text area from TOP to the row before BOTTOM, and move *FROM and *TO
+   to the first of those rows.  The return value is 0 or less if no row
+   can go.
+
+   The rows above TOP at the destination must go.  After a change of
+   the header line, a row cut at the top keeps its visible height and
+   changes its position, so redisplay can move a row that starts above
+   the window.  The source of the rows that stay needs no clip at the
+   top, because they were text before the change, and redisplay draws
+   the header line after the copy.
+
+   The callers in redisplay give a run that ends at BOTTOM or above it,
+   because they compute the run from the same `window_text_bottom_y'.
+   A row below BOTTOM is the mode line or another window, and a copy has
+   no clip, so this function does not trust the caller.  It stops
+   the source and the destination at BOTTOM, as `pgtk_scroll_run' does.
+
+   The values of a run are not limited, so compute in a wider type.  */
+static int
+remote_clip_copy (int top, int bottom, int *from, int *to, int height)
+{
+  intmax_t above = max (0, (intmax_t) top - *to);
+  intmax_t source = *from + above;
+  intmax_t destination = *to + above;
+  intmax_t rows = min (height - above, bottom - max (source, destination));
+  if (rows <= 0)
+    return 0;
+  *from = source;
+  *to = destination;
+  return rows;
+}
+
+/* Mark DESIRED_ROW of W so that its fringes are drawn again.  The row
+   of a new or a deleted window can have the same position and the same
+   bitmap as the row before it, so the fringe code cannot find that the
+   client shows something else there.  A remote frame has no internal
+   border, so there is no border to clear.  */
 static void
 remote_after_update_window_line (struct window *w,
 				 struct glyph_row *desired_row)
 {
+  desired_row->redraw_fringe_bitmaps_p = true;
 }
 
+/* Clear the fringe area of P if it has one, and send the rows of the
+   bitmap of P that are visible in ROW.  The message has no clip, and
+   the client draws all of its rows.  So a bitmap on a line visible in
+   part, or a bitmap taller than ROW, must lose its other rows here.
+   The fringe code keeps the bitmap in the width of the fringe.  */
 static void
 remote_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
 			   struct draw_fringe_bitmap_params *p)
 {
+  struct frame *f = XFRAME (w->frame);
+  if (p->bx >= 0 && !p->overlay_p)
+    remote_clear_frame_area (f, p->bx, p->by, p->nx, p->ny);
+  int first, end;
+  remote_fringe_visible_rows (w, row, p, &first, &end);
+  if (!remote_fringe_fits_p (p, first, end))
+    return;
+
+  /* Do not initialize the message: that fills all rows, and the
+     encoder reads only NROWS of them.  */
+  struct rd_message message;
+  message.type = RD_DRAW_FRINGE;
+  struct rd_draw_fringe *m = &message.u.draw_fringe;
+  m->frame = remote_frame_id (f);
+  m->x = p->x;
+  m->y = p->y + first;
+  m->width = p->wd;
+  m->overlay = p->overlay_p;
+  m->cursor = p->cursor_p;
+  m->nrows = end - first;
+
+  /* A fringe that is narrower than the bitmap shows the left pixels of
+     the bitmap, and bit 0 of a row of the message is the rightmost
+     pixel that the client shows.  */
+  int right_pixels = p->bitmap_wd - p->wd;
+  for (int i = 0; i < m->nrows; i++)
+    m->rows[i] = p->bits[p->dh + first + i] >> right_pixels;
+  remote_send (FRAME_DISPLAY_INFO (f), &message);
 }
 
-/* Send the glyph codes of S.  A message holds at most RD_MAX_GLYPHS
-   glyphs, so send a long glyph string in parts.  */
+/* Set *FIRST and *END to the first row of P to send, and to the row
+   after the last one.  The range is empty if no row of P is visible
+   in ROW of W.  */
+static void
+remote_fringe_visible_rows (struct window *w, struct glyph_row *row,
+			    const struct draw_fringe_bitmap_params *p,
+			    int *first, int *end)
+{
+  int top, bottom;
+  remote_row_bounds (w, row, &top, &bottom);
+  *first = max (remote_fringe_rows_above (p), top - p->y);
+  *end = min (p->h, bottom - p->y);
+}
+
+/* Return true if a draw-fringe message can hold the rows of P from
+   FIRST to the row before END.  */
+static bool
+remote_fringe_fits_p (const struct draw_fringe_bitmap_params *p,
+		      int first, int end)
+{
+  return (0 < p->wd && p->wd <= UINT16_MAX
+	  && first < end && end - first <= RD_MAX_FRINGE_ROWS);
+}
+
+/* Return the number of rows of P above the first row of its bitmap.
+   A periodic bitmap on a line that starts above the frame has a
+   negative row offset, and the fringe code adds the same number of
+   rows to its height.  Those rows have no pixels.  */
+static int
+remote_fringe_rows_above (const struct draw_fringe_bitmap_params *p)
+{
+  return max (0, -p->dh);
+}
+
+/* Clear the area of S, and send its glyphs if the protocol can show
+   them.  A client draws only the glyphs of a message, so the clear
+   erases a cursor or older text under S.  The protocol has no message
+   for an image or a glyphless character, so the client shows the
+   background there.  */
 static void
 remote_draw_glyph_string (struct glyph_string *s)
 {
-  if (!FRAME_DISPLAY_INFO (s->f)->attached
-      || s->first_glyph->type != CHAR_GLYPH)
-    return;
+  /* A string for the overhang of a neighbor draws over pixels that are
+     correct, so it must not clear them.  */
+  if (!s->for_overlaps)
+    remote_clear_glyph_string (s);
+  if (s->first_glyph->type == CHAR_GLYPH)
+    remote_draw_chars (s);
+  else if (s->first_glyph->type == COMPOSITE_GLYPH)
+    remote_draw_composition (s);
+}
+
+/* Fill the part of the background of S that is visible in its row.  */
+static void
+remote_clear_glyph_string (struct glyph_string *s)
+{
+  Emacs_Rectangle area = { s->x, s->y, s->background_width, s->height };
+  Emacs_Rectangle visible = remote_intersection (remote_glyph_clip (s), area);
+  remote_clear_frame_area (s->f, visible.x, visible.y,
+			   visible.width, visible.height);
+}
+
+/* Return the rectangle of the pixels that S can change.  */
+static Emacs_Rectangle
+remote_glyph_clip (struct glyph_string *s)
+{
+  NativeRectangle native_clip;
+  Emacs_Rectangle clip;
+  get_glyph_string_clip_rect (s, &native_clip);
+  CONVERT_TO_EMACS_RECT (clip, native_clip);
+  return clip;
+}
+
+/* Return the part of A inside B.  Its size is 0 if they have no common
+   pixels, and each user of the result rejects that size.  */
+static Emacs_Rectangle
+remote_intersection (Emacs_Rectangle a, Emacs_Rectangle b)
+{
+  int left = max (a.x, b.x);
+  int top = max (a.y, b.y);
+  int right = min (a.x + (int) a.width, b.x + (int) b.width);
+  int bottom = min (a.y + (int) a.height, b.y + (int) b.height);
+  return (Emacs_Rectangle) { left, top, max (right - left, 0),
+			     max (bottom - top, 0) };
+}
+
+/* Send the glyph codes of S, a string of characters.  A message holds
+   at most RD_MAX_GLYPHS glyphs, so send a long glyph string in
+   parts.  The width of the first glyph holds the left line of a box,
+   so the sum of the widths gives the start of the next part.  */
+static void
+remote_draw_chars (struct glyph_string *s)
+{
   int x = s->x;
   for (int start = 0; start < s->nchars; start += RD_MAX_GLYPHS)
     {
       int n = min (s->nchars - start, RD_MAX_GLYPHS);
-      remote_send_glyphs (s, start, n, x);
+      remote_send_glyphs (s, start, n,
+			  start ? x : remote_foreground_x (s), s->ybase);
       for (int i = start; i < start + n; i++)
 	x += s->first_glyph[i].pixel_width;
     }
 }
 
-/* Send the N glyph codes of S from index START, drawn at X.  */
+/* Return the x position of the first glyph of S.  The left line of a
+   box is part of S, and the glyphs start after it.  A negative width
+   means that the line is inside the glyphs.  */
+static int
+remote_foreground_x (struct glyph_string *s)
+{
+  if (s->face->box != FACE_NO_BOX && s->first_glyph->left_box_line_p)
+    return s->x + max (s->face->box_vertical_line_width, 0);
+  return s->x;
+}
+
+/* Send the glyphs of the composition S.  Each glyph has its own
+   position, so each one has its own message.  */
 static void
-remote_send_glyphs (struct glyph_string *s, int start, int n, int x)
+remote_draw_composition (struct glyph_string *s)
+{
+  if (s->first_glyph->u.cmp.automatic)
+    remote_draw_automatic_composition (s);
+  else
+    remote_draw_static_composition (s);
+}
+
+/* Send the components of S at their offsets in the composition.  A
+   TAB is padding, and has no glyph code.  */
+static void
+remote_draw_static_composition (struct glyph_string *s)
+{
+  int x = remote_foreground_x (s);
+  for (int i = s->cmp_from; i < s->cmp_to; i++)
+    if (COMPOSITION_GLYPH (s->cmp, i) != '\t')
+      remote_send_glyphs (s, i, 1, x + s->cmp->offsets[i * 2],
+			  s->ybase - s->cmp->offsets[i * 2 + 1]);
+}
+
+/* Send the glyphs of S from the shaper.  An adjustment gives the
+   offset of a glyph from the pen, and the distance to move the pen.  */
+static void
+remote_draw_automatic_composition (struct glyph_string *s)
+{
+  Lisp_Object gstring = composition_gstring_from_id (s->cmp_id);
+  int x = remote_foreground_x (s);
+  for (int i = s->cmp_from; i < s->cmp_to; i++)
+    {
+      Lisp_Object glyph = LGSTRING_GLYPH (gstring, i);
+      remote_send_glyphs (s, i, 1, x + LGLYPH_XOFF (glyph),
+			  s->ybase + LGLYPH_YOFF (glyph));
+      x += (NILP (LGLYPH_ADJUSTMENT (glyph))
+	    ? LGLYPH_WIDTH (glyph) : LGLYPH_WADJUST (glyph));
+    }
+}
+
+/* Send the N glyph codes of S from index START, drawn at X, Y.  A glyph
+   can extend outside its row, and the area next to the row is ready or
+   comes later, so the message has the clip of S.  */
+static void
+remote_send_glyphs (struct glyph_string *s, int start, int n, int x, int y)
 {
   /* Do not initialize the message: that fills all RD_MAX_GLYPHS
      glyphs, and the encoder reads only N of them.  */
@@ -860,7 +1219,12 @@ remote_send_glyphs (struct glyph_string *s, int start, int n, int x)
   struct rd_draw_glyphs *m = &message.u.draw_glyphs;
   m->frame = remote_frame_id (s->f);
   m->x = x;
-  m->y = s->ybase;
+  m->y = y;
+  Emacs_Rectangle clip = remote_glyph_clip (s);
+  m->clip_x = clip.x;
+  m->clip_y = clip.y;
+  m->clip_width = clip.width;
+  m->clip_height = clip.height;
   m->nglyphs = n;
   for (int i = 0; i < n; i++)
     m->glyphs[i] = s->char2b[start + i];
@@ -877,6 +1241,8 @@ remote_define_frame_cursor (struct frame *f, Emacs_Cursor cursor)
 static void
 remote_clear_frame_area (struct frame *f, int x, int y, int width, int height)
 {
+  if (remote_empty_area_p (width, height))
+    return;
   struct rd_message message =
     {
       .type = RD_CLEAR_AREA,
@@ -886,11 +1252,132 @@ remote_clear_frame_area (struct frame *f, int x, int y, int width, int height)
   remote_send (FRAME_DISPLAY_INFO (f), &message);
 }
 
+/* Draw the cursor of W.  Redisplay erases a cursor by a draw of the
+   glyphs under it, so do nothing if ON_P is false.  */
 static void
 remote_draw_window_cursor (struct window *w, struct glyph_row *glyph_row,
 			   int x, int y, enum text_cursor_kinds cursor_type,
 			   int cursor_width, bool on_p, bool active_p)
 {
+  if (!on_p)
+    return;
+  w->phys_cursor_type = cursor_type;
+  w->phys_cursor_on_p = true;
+  if (glyph_row->exact_window_width_line_p
+      && (glyph_row->reversed_p
+	  ? w->phys_cursor.hpos < 0
+	  : w->phys_cursor.hpos >= glyph_row->used[TEXT_AREA]))
+    {
+      glyph_row->cursor_in_fringe_p = true;
+      draw_fringe_bitmap (w, glyph_row, glyph_row->reversed_p);
+    }
+  else if (cursor_type == NO_CURSOR)
+    w->phys_cursor_width = 0;
+  else
+    remote_send_cursor (w, glyph_row, cursor_type, cursor_width);
+}
+
+/* Send the rectangle of a cursor of CURSOR_TYPE and CURSOR_WIDTH on
+   the cursor glyph of ROW in W.  A box covers the glyph, a bar covers
+   the height of ROW, and an hbar is at the bottom of ROW.  A cursor
+   on a right-to-left glyph is at the right edge of the glyph.  */
+static void
+remote_send_cursor (struct window *w, struct glyph_row *row,
+		    enum text_cursor_kinds cursor_type, int cursor_width)
+{
+  struct glyph *glyph = get_phys_cursor_glyph (w);
+  if (!glyph)
+    return;
+  struct frame *f = XFRAME (w->frame);
+  int x, y, height;
+  get_phys_cursor_geometry (w, row, glyph, &x, &y, &height);
+  if (cursor_type == BAR_CURSOR)
+    {
+      w->phys_cursor_width = min (glyph->pixel_width, cursor_width);
+      height = row->height;
+    }
+  else if (cursor_type == HBAR_CURSOR)
+    {
+      height = cursor_width;
+      y = WINDOW_TO_FRAME_PIXEL_Y (w, (w->phys_cursor.y + row->height
+				       - height));
+    }
+  if ((glyph->resolved_level & 1) != 0)
+    x = (WINDOW_TEXT_TO_FRAME_PIXEL_X (w, w->phys_cursor.x)
+	 + glyph->pixel_width - w->phys_cursor_width);
+
+  Emacs_Rectangle cursor = { x, y, w->phys_cursor_width, height };
+  if (!remote_clip_to_row (w, row, &cursor))
+    return;
+  struct rd_message message =
+    {
+      .type = RD_DRAW_CURSOR,
+      .u.draw_cursor = { .frame = remote_frame_id (f), .x = cursor.x,
+			 .y = cursor.y, .width = cursor.width,
+			 .height = cursor.height,
+			 .kind = remote_cursor_kind (cursor_type) },
+    };
+  remote_send (FRAME_DISPLAY_INFO (f), &message);
+}
+
+/* Reduce RECT to the visible part of ROW in the text area of W.  A
+   draw-cursor message has no clip, so a rectangle must not go outside
+   the row.
+   Return false if no part of RECT is visible.  */
+static bool
+remote_clip_to_row (struct window *w, struct glyph_row *row,
+		    Emacs_Rectangle *rect)
+{
+  int window_x, window_width, top, bottom;
+  window_box (w, TEXT_AREA, &window_x, 0, &window_width, 0);
+  remote_row_bounds (w, row, &top, &bottom);
+  Emacs_Rectangle clip = { window_x, top, window_width, bottom - top };
+  *rect = remote_intersection (clip, *rect);
+  return !remote_empty_area_p (rect->width, rect->height);
+}
+
+/* Set *TOP and *BOTTOM to the frame row of the top of the visible part
+   of ROW in W, and to the row after its bottom.  */
+static void
+remote_row_bounds (struct window *w, struct glyph_row *row,
+		   int *top, int *bottom)
+{
+  int window_y;
+  window_box (w, TEXT_AREA, 0, &window_y, 0, 0);
+  *top = max (WINDOW_TO_FRAME_PIXEL_Y (w, row->y), window_y);
+  *bottom = *top + row->visible_height;
+}
+
+/* Each int position fits in a field of the protocol.  */
+verify (INT32_MIN <= INT_MIN && INT_MAX <= INT32_MAX);
+
+/* Return true if a rectangle with the size WIDTH, HEIGHT has no
+   pixels.  Redisplay can compute a size of 0 or less.  Send no message
+   for that rectangle, because the conversion to an unsigned field of
+   the protocol would make a negative size very large.  */
+static bool
+remote_empty_area_p (int width, int height)
+{
+  return width <= 0 || height <= 0;
+}
+
+/* Return the protocol kind of the visible cursor type CURSOR_TYPE.  */
+static enum rd_cursor_kind
+remote_cursor_kind (enum text_cursor_kinds cursor_type)
+{
+  switch (cursor_type)
+    {
+    case FILLED_BOX_CURSOR:
+      return RD_CURSOR_BOX;
+    case HOLLOW_BOX_CURSOR:
+      return RD_CURSOR_HOLLOW_BOX;
+    case BAR_CURSOR:
+      return RD_CURSOR_BAR;
+    case HBAR_CURSOR:
+      return RD_CURSOR_HBAR;
+    default:
+      emacs_abort ();
+    }
 }
 
 static void
@@ -914,7 +1401,7 @@ static struct redisplay_interface remote_redisplay_interface =
     remote_after_update_window_line,
     NULL, /* update_window_begin */
     NULL, /* update_window_end */
-    NULL, /* flush_display */
+    remote_flush_frame,
     gui_clear_window_mouse_face,
     gui_get_glyph_overhangs,
     gui_fix_overlapping_area,
@@ -944,6 +1431,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   dpyinfo->terminal = terminal;
   terminal->name = xlispstrdup (name);
   terminal->kboard = allocate_kboard (Qremote);
+  terminal->kboard->reference_count++;
 
   terminal->defined_color_hook = remote_defined_color;
   terminal->query_colors = remote_query_colors;
@@ -954,7 +1442,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->menu_show_hook = remote_menu_show;
   terminal->read_socket_hook = remote_read_socket;
   terminal->update_begin_hook = remote_no_op_frame;
-  terminal->update_end_hook = remote_no_op_frame;
+  terminal->update_end_hook = remote_flush_frame;
   terminal->clear_frame_hook = remote_no_op_frame;
   terminal->frame_up_to_date_hook = remote_no_op_frame;
   terminal->delete_frame_hook = remote_delete_frame;
@@ -968,6 +1456,14 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
 void
 syms_of_remoteterm (void)
 {
+  /* The rows of frame_parms depend on the configuration, so only
+     frame.c knows their number, and the compiler cannot compare it.
+     This check stops Emacs when it starts, so it also stops the dump
+     step of the build.  */
+  if (countof (remote_frame_parm_handlers) != frame_parm_count)
+    fatal ("remote_frame_parm_handlers has %d elements, not %d",
+	   (int) countof (remote_frame_parm_handlers), frame_parm_count);
+
   remote_display_name_list = Qnil;
   staticpro (&remote_display_name_list);
   remote_color_map = Qnil;
@@ -986,12 +1482,12 @@ syms_of_remoteterm (void)
   defsubr (&Sx_open_connection);
   defsubr (&Sx_close_connection);
   defsubr (&Sx_display_list);
-  defsubr (&Sremote_display__record);
-  defsubr (&Sremote_display__take_output);
   defsubr (&Sx_create_frame);
   defsubr (&Sxw_display_color_p);
   defsubr (&Sx_display_grayscale_p);
   defsubr (&Sx_hide_tip);
+  defsubr (&Sx_display_pixel_width);
+  defsubr (&Sx_display_pixel_height);
   defsubr (&Sxw_color_defined_p);
   defsubr (&Sxw_color_values);
   defsubr (&Sx_display_color_cells);

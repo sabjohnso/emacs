@@ -30,6 +30,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "termchar.h"
 #elif defined HAVE_REMOTE_DISPLAY
 #include "remoteterm.h"
+/* The remote display backend sends glyph codes to its client, and
+   the client draws them.  So the backend never calls ftcrfont_draw,
+   and these names only let its body compile.  */
+#define pgtk_begin_cr_clip(f) ((void) (f), emacs_abort (), (cairo_t *) NULL)
+#define pgtk_set_cr_source_with_color(f, color, respect_alpha) emacs_abort ()
+#define pgtk_end_cr_clip(f) emacs_abort ()
 #else
 #include "pgtkterm.h"
 #endif
@@ -541,11 +547,6 @@ static int
 ftcrfont_draw (struct glyph_string *s,
                int from, int to, int x, int y, bool with_background)
 {
-#ifdef HAVE_REMOTE_DISPLAY
-  /* The remote display backend sends glyph codes to its client, and
-     the client draws them.  The backend never calls this function.  */
-  emacs_abort ();
-#else
   struct frame *f = s->f;
   struct font_info *ftcrfont_info = (struct font_info *) s->font;
   cairo_t *cr;
@@ -646,7 +647,6 @@ ftcrfont_draw (struct glyph_string *s,
   unblock_input ();
 
   return len;
-#endif /* !HAVE_REMOTE_DISPLAY */
 }
 
 #ifdef HAVE_PGTK

@@ -648,6 +648,10 @@ OPTION_DEFAULT_OFF([xwidgets],
 OPTION_DEFAULT_OFF([remote-display],
   [enable the protocol that shows frames on a remote display client])
 
+AC_ARG_ENABLE([remote-display-tests],
+  [AS_HELP_STRING([--enable-remote-display-tests],
+    [compile the test clients of the remote display backend])])
+
 OPTION_DEFAULT_OFF([be-app],
   [enable use of Haiku's Application Kit as a window system])
 
@@ -4362,6 +4366,11 @@ if test "$window_system" = "remote"; then
   REMOTE_DISPLAY_OBJ="remotefns.o rdproto.o remoteterm.o"
   AC_DEFINE([HAVE_REMOTE_DISPLAY], [1],
     [Define to 1 if the remote display protocol is the window system.])
+  if test "${enable_remote_display_tests}" = "yes"; then
+    REMOTE_DISPLAY_OBJ="$REMOTE_DISPLAY_OBJ remotetest.o"
+    AC_DEFINE([HAVE_REMOTE_DISPLAY_TESTS], [1],
+      [Define to 1 to compile the test clients of the remote display backend.])
+  fi
 fi
 AC_SUBST([REMOTE_DISPLAY_OBJ])
 

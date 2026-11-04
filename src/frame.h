@@ -1512,6 +1512,10 @@ window_system_available (struct frame *f)
 
 extern WINDOW_SYSTEM_RETURN void check_window_system (struct frame *);
 struct frame *decode_tty_frame (Lisp_Object frame);
+/* The number of frame parameters.  The table of frame parameter
+   handlers of each terminal type has this number of elements.  */
+extern int const frame_parm_count;
+
 extern void frame_make_pointer_invisible (struct frame *);
 extern void frame_make_pointer_visible (struct frame *);
 extern struct frame *root_frame (struct frame *f);

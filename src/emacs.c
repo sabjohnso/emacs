@@ -2428,6 +2428,9 @@ Using an Emacs configured with --with-x-toolkit=lucid does not have this problem
       syms_of_remoteterm ();
       syms_of_fontset ();
 #endif /* HAVE_REMOTE_DISPLAY */
+#ifdef HAVE_REMOTE_DISPLAY_TESTS
+      syms_of_remotetest ();
+#endif
 #ifdef HAVE_HAIKU
       syms_of_haikuterm ();
       syms_of_haikufns ();
