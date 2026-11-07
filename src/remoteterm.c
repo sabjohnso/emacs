@@ -105,6 +105,8 @@ static void remote_clear_frame_area (struct frame *, int, int, int, int);
 static uint32_t remote_font_id (Lisp_Object);
 static Lisp_Object remote_font_entry (struct font *);
 static Lisp_Object remote_font_hash (struct font *);
+static Lisp_Object remote_font_identity (struct font *, Lisp_Object,
+					 Lisp_Object, Lisp_Object);
 static void remote_ensure_font_defined (struct remote_display_info *,
 					Lisp_Object);
 static bool remote_font_defined_p (struct remote_display_info *, uint32_t);
@@ -1361,9 +1363,7 @@ remote_ensure_font_defined (struct remote_display_info *dpyinfo,
     remote_define_font (dpyinfo, entry);
 }
 
-/* Return the entry of FONT, and make it if FONT has none.  A font
-   with no hash does not share its entry, because the client cannot
-   know that two such fonts are the same.  */
+/* Return the entry of FONT, and make it if FONT has none.  */
 static Lisp_Object
 remote_font_entry (struct font *font)
 {
@@ -1373,32 +1373,44 @@ remote_font_entry (struct font *font)
   if (!NILP (entry))
     return entry;
 
-  Lisp_Object identity = list3 (remote_font_hash (font),
-				make_int (ftcrfont_face_index (font)),
-				make_int (font->pixel_size));
-  bool shared = SCHARS (XCAR (identity)) > 0;
-  if (shared)
-    entry = Fgethash (identity, remote_font_identities, Qnil);
+  Lisp_Object hash = remote_font_hash (font);
+  Lisp_Object index = make_int (ftcrfont_face_index (font));
+  Lisp_Object size = make_int (font->pixel_size);
+  Lisp_Object identity = remote_font_identity (font, hash, index, size);
+  entry = Fgethash (identity, remote_font_identities, Qnil);
   if (NILP (entry))
     {
       entry = CALLN (Fvector, make_fixnum (++remote_last_font_id),
-		     XCAR (identity), XCAR (XCDR (identity)),
-		     XCAR (XCDR (XCDR (identity))));
-      if (shared)
-	Fputhash (identity, entry, remote_font_identities);
+		     NILP (hash) ? empty_unibyte_string : hash, index, size);
+      Fputhash (identity, entry, remote_font_identities);
     }
   Fputhash (font_object, entry, remote_fonts);
   return entry;
 }
 
-/* Return the hash of the file of FONT as a unibyte string.  The string
-   is empty if the file cannot be read.  */
+/* Return the identity of FONT, with its HASH, INDEX, and SIZE.  Two
+   fonts with the same identity have the same ID.  The client knows a
+   font by the hash of its file.  If HASH is nil, the file name of FONT
+   takes its place, so two such fonts are the same only if they have
+   the same file.  The two kinds of identity have different lengths, so
+   they are never equal.  */
+static Lisp_Object
+remote_font_identity (struct font *font, Lisp_Object hash,
+		      Lisp_Object index, Lisp_Object size)
+{
+  if (NILP (hash))
+    return list4 (Qnil, font->props[FONT_FILE_INDEX], index, size);
+  return list3 (hash, index, size);
+}
+
+/* Return the hash of the file of FONT as a unibyte string, or nil if
+   the file cannot be read.  */
 static Lisp_Object
 remote_font_hash (struct font *font)
 {
   unsigned char hash[RD_HASH_SIZE];
   if (!remote_file_hash (font->props[FONT_FILE_INDEX], hash))
-    return empty_unibyte_string;
+    return Qnil;
   return make_unibyte_string ((char *) hash, RD_HASH_SIZE);
 }
 

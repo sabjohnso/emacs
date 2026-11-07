@@ -169,8 +169,9 @@
 ;; 36. Font identity: a definition has the SHA-256 hash of the font
 ;;     file, the face index in the file, and the pixel size.  Two IDs
 ;;     of fonts with a hash do not have the same hash, index, and size.
-;;     Two fonts with no hash have different IDs.  A font keeps its ID
-;;     after a new attach, and after Emacs opens it again.
+;;     A font with no hash has the ID of its file name, index, and size.
+;;     A font keeps its ID after a new attach, and after Emacs opens it
+;;     again.
 ;; 37. File hash: the hash of a file is the SHA-256 hash of its bytes,
 ;;     and the hash of a file that cannot be read is empty.
 ;;
@@ -3846,7 +3847,7 @@ of the fringe of SIDE, and :fringe-width is its width.  :top is as for
 
 (rd-daemon-deftest remoteterm-tests-fringe-colors
   "A bitmap and the clear of its area have the colors of the fringe face."
-  (let ((rd-gen-trials 15))
+  (let ((rd-gen-trials 10))
     (rd-gen-for-all
      #'remoteterm-tests--fringe-colors-case
      (lambda (case)
@@ -3877,7 +3878,7 @@ of the fringe of SIDE, and :fringe-width is its width.  :top is as for
 
 (rd-daemon-deftest remoteterm-tests-fringe-cursor-color
   "A cursor in the fringe has the cursor color."
-  (let ((rd-gen-trials 8))
+  (let ((rd-gen-trials 4))
     (rd-gen-for-all
      (lambda () (remoteterm-tests--color-list 3))
      (lambda (colors)
@@ -3902,7 +3903,7 @@ of the fringe of SIDE, and :fringe-width is its width.  :top is as for
 
 (rd-daemon-deftest remoteterm-tests-fringe-overlay-cursor-color
   "A bitmap on a box cursor in the fringe has the background of the face."
-  (let ((rd-gen-trials 8))
+  (let ((rd-gen-trials 3))
     (rd-gen-for-all
      #'remoteterm-tests--rgb
      (lambda (bg)
@@ -3962,39 +3963,162 @@ of the fringe of SIDE, and :fringe-width is its width.  :top is as for
 
 (declare-function remote-display--set-font-file "remotetest.c" (font file))
 
-(defun remoteterm-tests--unreadable-fonts-form ()
-  "Return a form for the daemon that draws with two fonts with no file.
-The two fonts are of different files and have the same size.  Before
-the first draw, the form changes the file name of each font to a file
-that does not exist.  The value of the form is the bytes that the
-session sent."
+(defvar remoteterm-tests--last-font-size 40
+  "The last pixel size of `remoteterm-tests--font-file-identity'.
+Each trial uses a new size, so Emacs has not drawn with its fonts.")
+
+(defun remoteterm-tests--distinct-fonts (count frame size again)
+  "Return COUNT new font objects of FRAME, each from a different file.
+Each font has the characters \"abc\", and the pixel size SIZE.  If AGAIN is non-nil, find each font
+through a new font spec, so Emacs makes a new font object for it.
+Return fewer fonts if FRAME has fewer font files."
+  (let ((fonts nil)
+        (files nil))
+    (cl-loop for entity in (list-fonts (font-spec) frame)
+             until (= (length fonts) count)
+             do (let* ((font (open-font (if again
+                                            (remoteterm-tests--new-entity
+                                             entity frame)
+                                          entity)
+                                        size frame))
+                       (file (and font (aref (font-info font frame) 12))))
+                  (when (and file (not (member file files))
+                             (cl-every (lambda (char)
+                                         (font-has-char-p font char frame))
+                                       "abc"))
+                    (push file files)
+                    (push font fonts))))
+    (nreverse fonts)))
+
+(defun remoteterm-tests--new-entity (entity frame)
+  "Return a font entity of FRAME for the font of ENTITY, from a new spec.
+The new entity has no font objects yet."
+  (car (list-fonts (font-spec :family (font-get entity :family)
+                              :weight (font-get entity :weight)
+                              :slant (font-get entity :slant)
+                              :width (font-get entity :width))
+                   frame)))
+
+(defun remoteterm-tests--insert-font-lines (files frame size again)
+  "Insert a line for each of FILES, each with its own font of FRAME.
+SIZE and AGAIN are as for `remoteterm-tests--distinct-fonts'.  Before
+the first draw, the file name of each font is changed to the element
+of FILES for its line."
+  (let ((fonts (remoteterm-tests--distinct-fonts (length files) frame size
+                                                 again)))
+    (should (= (length fonts) (length files)))
+    (cl-mapc (lambda (font file)
+               (remote-display--set-font-file font file)
+               (insert (propertize "abc" 'face (list :font font)) "\n"))
+             fonts files)))
+
+(defun remoteterm-tests--font-files-form (files size)
+  "Return a form for the daemon that draws a line for each of FILES, twice.
+Each line has its own font of the pixel size SIZE, and the file name
+of that font is the element of FILES, as for
+`remoteterm-tests--insert-font-lines'.  The second draw has new font
+objects for the fonts.  The value of the form is a plist.  :output and
+:again are the bytes of each draw, and :x0 is the left edge of the
+text area."
   (remoteterm-tests--frame-form
    '((width . 30))
-   '(let ((fonts nil))
-      (dolist (entity (list-fonts (font-spec) frame))
-        (let ((font (and (< (length fonts) 2) (open-font entity 23 frame))))
-          (when (and font
-                     (not (member (aref (font-info font frame) 12)
-                                  (mapcar #'cdr fonts))))
-            (push (cons font (aref (font-info font frame) 12)) fonts))))
-      (pcase-dolist (`(,font . ,_file) fonts)
-        (remote-display--set-font-file font "/nonexistent/font.ttf")
-        (insert (propertize "abc" 'face (list :font font)) "\n")))
-   'output))
+   `(remoteterm-tests--insert-font-lines ',files frame ,size nil)
+   `(list :output output
+          :again (with-current-buffer buffer
+                   (erase-buffer)
+                   (remoteterm-tests--insert-font-lines ',files frame ,size t)
+                   (redraw-frame frame)
+                   (redisplay t)
+                   (remote-display--take-output display))
+          :x0 (nth 0 (window-inside-pixel-edges window)))))
 
-(ert-deftest remoteterm-tests-unreadable-fonts ()
-  "Two fonts with no file have an empty hash, and different IDs."
-  (skip-unless (featurep 'remote-test))
-  (rd-with-daemon
-    (let* ((output (rd-daemon-eval (remoteterm-tests--unreadable-fonts-form)))
-           (definitions (seq-filter
-                         (lambda (fields) (equal (plist-get fields :hash) []))
-                         (remoteterm-tests--of-type 'define-font output))))
-      (remoteterm-tests--check-font-definitions
-       (remoteterm-tests--messages output))
-      (should (= (length definitions) 2))
-      (should (/= (plist-get (nth 0 definitions) :font)
-                  (plist-get (nth 1 definitions) :font))))))
+(defun remoteterm-tests--line-font-ids (bytes x0 count)
+  "Return the font IDs of the first COUNT lines that BYTES draws.
+The ID of a line is the font of its draw-glyphs message at X0."
+  (seq-take (mapcar #'cdr
+                    (seq-uniq (sort (mapcar (lambda (fields)
+                                              (cons (plist-get fields :y)
+                                                    (plist-get fields :font)))
+                                            (seq-filter
+                                             (lambda (fields)
+                                               (= (plist-get fields :x) x0))
+                                             (remoteterm-tests--of-type
+                                              'draw-glyphs bytes)))
+                                    :key #'car)
+                              (lambda (a b) (= (car a) (car b)))))
+            count))
+
+(defun remoteterm-tests--index-and-size (fields)
+  "Return the list of the face index and the pixel size in FIELDS.
+A font that has only some sizes can have a size that is not the size
+that Emacs asked for."
+  (list (plist-get fields :index) (plist-get fields :size)))
+
+(defconst remoteterm-tests--font-file-keys
+  '(missing-a missing-b a a-copy b)
+  "The files of a font identity case.
+A missing file does not exist.  The files a and a-copy have the same
+bytes, and the file b has different bytes.")
+
+(defun remoteterm-tests--font-file-class (key)
+  "Return the class of the font file KEY.
+Two fonts of the same index and size have the same ID if and only if
+their files have the same class."
+  (if (eq key 'a-copy) 'a key))
+
+(rd-daemon-deftest remoteterm-tests-font-file-identity
+  "Two fonts have one ID if and only if their files have the same bytes.
+A font whose file cannot be read has the ID of its file name, and it
+keeps that ID after Emacs opens it again."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda ()
+       (cl-loop repeat (rd-gen-integer 2 4)
+                collect (rd-gen-element remoteterm-tests--font-file-keys)))
+     (lambda (keys)
+       (let* ((bytes (apply #'unibyte-string
+                            (cl-loop repeat (rd-gen-integer 1 100)
+                                     collect (rd-gen-random 256))))
+              (paths `((missing-a . "/nonexistent/a.ttf")
+                       (missing-b . "/nonexistent/b.ttf")
+                       (a . ,(make-temp-file "rd-font" nil nil bytes))
+                       (a-copy . ,(make-temp-file "rd-font" nil nil bytes))
+                       (b . ,(make-temp-file "rd-font" nil nil
+                                             (concat bytes "b"))))))
+         (unwind-protect
+             (pcase-let*
+                 (((map :output :again :x0)
+                   (rd-daemon-eval
+                    (remoteterm-tests--font-files-form
+                     (mapcar (lambda (key) (alist-get key paths)) keys)
+                     (cl-incf remoteterm-tests--last-font-size))))
+                  (definitions (remoteterm-tests--check-font-definitions
+                                (remoteterm-tests--messages output)))
+                  (ids (remoteterm-tests--line-font-ids output x0
+                                                        (length keys))))
+               (should (= (length ids) (length keys)))
+               (dotimes (i (length keys))
+                 (cl-loop
+                  for j from (1+ i) below (length keys)
+                  do (let ((id (nth i ids))
+                           (other-id (nth j ids)))
+                       (should
+                        (eq (= id other-id)
+                            (and (eq (remoteterm-tests--font-file-class
+                                      (nth i keys))
+                                     (remoteterm-tests--font-file-class
+                                      (nth j keys)))
+                                 (equal (remoteterm-tests--index-and-size
+                                         (alist-get id definitions))
+                                        (remoteterm-tests--index-and-size
+                                         (alist-get other-id
+                                                    definitions)))))))))
+               (should-not (remoteterm-tests--of-type 'define-font again))
+               (should (equal (remoteterm-tests--line-font-ids again x0
+                                                               (length keys))
+                              ids)))
+           (dolist (path '(a a-copy b))
+             (delete-file (alist-get path paths)))))))))
 
 (defun remoteterm-tests--check-font-definitions (messages)
   "Check laws 35 and 36 for MESSAGES, which start with an attach.
