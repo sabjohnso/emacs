@@ -98,6 +98,12 @@ struct remote_display_info
      knows a frame by its ID.  */
   uint32_t last_frame_id;
 
+  /* FONT_DEFINED[ID] is true if the client attached now has the
+     definition of the font ID.  The array has FONT_DEFINED_SIZE
+     elements, and an ID outside it has no definition.  */
+  bool *font_defined;
+  ptrdiff_t font_defined_size;
+
   /* The sink of the client that receives the messages of this
      session.  The session owns the sink.  A client is attached if
      and only if this is not NULL.  While it is NULL, the session sends
@@ -164,6 +170,10 @@ struct remote_output
 #define BLACK_PIX_DEFAULT(f) 0
 #define WHITE_PIX_DEFAULT(f) 0xffffff
 
+/* Defined in ftcrfont.c.  The remote backend has only the fonts of
+   that driver.  */
+extern long ftcrfont_face_index (struct font *);
+
 /* Defined in remoteterm.c.  */
 extern struct remote_sink *remote_make_sink (const struct remote_sink_ops *,
 					     void *);
@@ -171,6 +181,7 @@ extern void remote_set_sink (struct remote_display_info *,
 			     struct remote_sink *);
 extern void *remote_sink_data (struct remote_display_info *,
 			       const struct remote_sink_ops *);
+extern bool remote_file_hash (Lisp_Object, unsigned char *);
 extern void syms_of_remoteterm (void);
 
 /* Defined in remotetest.c.  */

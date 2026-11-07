@@ -299,6 +299,7 @@ of at most half of the largest int.  */)
       .dh = check_integer_range (offset, -RD_MAX_FRINGE_ROWS,
 				 RD_MAX_FRINGE_ROWS),
       .y = remote_half_int (y),
+      .face = FACE_FROM_ID (f, DEFAULT_FACE_ID),
     };
   FRAME_RIF (f)->draw_fringe_bitmap (w, &row, &p);
   return Qnil;
@@ -354,6 +355,23 @@ whether the cursor is on.  */)
   return list5 (make_int (w->phys_cursor.hpos), make_int (w->phys_cursor.vpos),
 		make_int (w->phys_cursor_type), make_int (w->phys_cursor_width),
 		w->phys_cursor_on_p ? Qt : Qnil);
+}
+
+DEFUN ("remote-display--file-hash", Fremote_display__file_hash,
+       Sremote_display__file_hash, 1, 1, 0,
+       doc: /* Return the hash that a define-font message gives for FILE.
+The value is a vector of bytes, and it is empty if FILE cannot be
+read.  */)
+  (Lisp_Object file)
+{
+  CHECK_STRING (file);
+  unsigned char hash[RD_HASH_SIZE];
+  if (!remote_file_hash (file, hash))
+    return make_nil_vector (0);
+  Lisp_Object bytes = make_nil_vector (RD_HASH_SIZE);
+  for (int i = 0; i < RD_HASH_SIZE; i++)
+    ASET (bytes, i, make_fixnum (hash[i]));
+  return bytes;
 }
 
 DEFUN ("remote-display--set-last-frame-id", Fremote_display__set_last_frame_id,
@@ -485,6 +503,7 @@ syms_of_remotetest (void)
   DEFSYM (Qremote_test, "remote-test");
 
   defsubr (&Sremote_display__record);
+  defsubr (&Sremote_display__file_hash);
   defsubr (&Sremote_display__count);
   defsubr (&Sremote_display__detach);
   defsubr (&Sremote_display__take_output);

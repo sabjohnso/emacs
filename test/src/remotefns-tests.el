@@ -54,33 +54,41 @@
 ;; (hello :version V)
 ;;     The first message of each side of a connection.
 ;; (draw-glyphs :frame F :x X :y Y :clip-x CX :clip-y CY :clip-width CW
-;;              :clip-height CH :glyphs [CODE...])
-;;     Draw the glyphs with the codes CODE of the font of the frame at
-;;     the pixel position X, Y of the baseline.  The client changes
-;;     only the pixels in the rectangle at CX, CY with the size CW, CH.
+;;              :clip-height CH :color C :font ID :glyphs [CODE...])
+;;     Draw the glyphs with the codes CODE of the font ID at the pixel
+;;     position X, Y of the baseline, in the color C.  The
+;;     client changes only the pixels in the rectangle at CX, CY with
+;;     the size CW, CH.
 ;;     The number of glyphs is at most `remote-display--max-glyphs'.
-;; (clear-area :frame F :x X :y Y :width W :height H)
+;; (clear-area :frame F :x X :y Y :width W :height H :color C)
 ;;     Fill the rectangle of the frame at the pixel position X, Y with
-;;     the size W, H with the background color of the frame.
+;;     the size W, H with the color C.
 ;; (copy-area :frame F :x X :y Y :width W :height H :to-x TX :to-y TY)
 ;;     Copy the rectangle of the frame at X, Y with the size W, H to
 ;;     the position TX, TY of the same frame.
-;; (draw-cursor :frame F :x X :y Y :width W :height H :kind K)
-;;     Draw the cursor of kind K in the rectangle at X, Y with the
-;;     size W, H.  The kinds are 0 for a filled box, 1 for a hollow
+;; (draw-cursor :frame F :x X :y Y :width W :height H :kind K :color C)
+;;     Draw the cursor of kind K in the color C in the rectangle at X,
+;;     Y with the size W, H.  The kinds are 0 for a filled box, 1 for a hollow
 ;;     box, 2 for a bar, and 3 for a horizontal bar.  A client ignores
 ;;     a kind that it does not know.
 ;; (draw-fringe :frame F :x X :y Y :width W :overlay O :cursor C
-;;              :rows [BITS...])
+;;              :foreground FG :background BG :rows [BITS...])
 ;;     Draw a fringe bitmap of W pixels width at X, Y.  Each element
-;;     of the vector is one row of pixels.  If O is not 0, draw on the
-;;     pixels that are there.  If C is not 0, the bitmap is the cursor
-;;     in the fringe.  The number of rows is at most
-;;     `remote-display--max-fringe-rows'.
+;;     of the vector is one row of pixels.  A bit that is 1 has the
+;;     color FG, and a bit that is 0 has the color BG.  If O is not 0,
+;;     draw only the bits that are 1, on the pixels that are there.
+;;     If C is not 0, the bitmap is the cursor in the fringe.  The
+;;     number of rows is at most `remote-display--max-fringe-rows'.
+;; (define-font :font ID :index I :size S :hash [BYTE...])
+;;     The font ID of the session is the face I of the font file with
+;;     the SHA-256 hash BYTE..., at the size of S pixels.  The hash has
+;;     `remote-display--hash-size' bytes.
 ;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
-;; 16 bits, because a row of a fringe bitmap has 16 bits.
+;; 16 bits, because a row of a fringe bitmap has 16 bits.  Each color
+;; is an unsigned 32-bit integer #xRRGGBB.  The server sets the high 8
+;; bits to 0, and a client ignores them.
 
 ;;; Code:
 
@@ -93,6 +101,7 @@
             (file-name-directory (macroexp-file-name)))))
 
 (defvar remote-display--max-glyphs)
+(defvar remote-display--hash-size)
 (defvar remote-display--max-fringe-rows)
 (defvar remote-display--message-formats)
 
@@ -107,12 +116,13 @@
     (clear-area . remotefns-tests--clear-area)
     (copy-area . remotefns-tests--copy-area)
     (draw-cursor . remotefns-tests--draw-cursor)
-    (draw-fringe . remotefns-tests--draw-fringe))
+    (draw-fringe . remotefns-tests--draw-fringe)
+    (define-font . remotefns-tests--define-font))
   "The message types, each with the function that generates a message.")
 
-(defconst remotefns-tests--clip
-  '(:clip-x 0 :clip-y 0 :clip-width 0 :clip-height 0)
-  "The clip fields of a `draw-glyphs' message where the clip has no effect.")
+(defconst remotefns-tests--clip-and-color
+  '(:clip-x 0 :clip-y 0 :clip-width 0 :clip-height 0 :color 0 :font 0)
+  "The fields of a `draw-glyphs' message between the position and the glyphs.")
 
 (defun remotefns-tests--message ()
   "Return a random valid message."
@@ -132,6 +142,8 @@
         :clip-y (rd-gen-int32)
         :clip-width (rd-gen-uint32)
         :clip-height (rd-gen-uint32)
+        :color (rd-gen-uint32)
+        :font (rd-gen-uint32)
         :glyphs (let ((count (rd-gen-integer
                               0 (rd-gen-element
                                  (list 8 remote-display--max-glyphs)))))
@@ -144,7 +156,8 @@
         :x (rd-gen-int32)
         :y (rd-gen-int32)
         :width (rd-gen-uint32)
-        :height (rd-gen-uint32)))
+        :height (rd-gen-uint32)
+        :color (rd-gen-uint32)))
 
 (defun remotefns-tests--copy-area ()
   "Return a random `copy-area' message."
@@ -165,7 +178,8 @@
         :y (rd-gen-int32)
         :width (rd-gen-uint32)
         :height (rd-gen-uint32)
-        :kind (rd-gen-integer 0 255)))
+        :kind (rd-gen-integer 0 255)
+        :color (rd-gen-uint32)))
 
 (defun remotefns-tests--draw-fringe ()
   "Return a random `draw-fringe' message."
@@ -176,11 +190,23 @@
         :width (rd-gen-uint16)
         :overlay (rd-gen-integer 0 255)
         :cursor (rd-gen-integer 0 255)
+        :foreground (rd-gen-uint32)
+        :background (rd-gen-uint32)
         :rows (let ((count (rd-gen-element
                             (list 0 1 remote-display--max-fringe-rows
                                   (rd-gen-integer
                                    0 remote-display--max-fringe-rows)))))
                 (vconcat (cl-loop repeat count collect (rd-gen-uint16))))))
+
+(defun remotefns-tests--define-font ()
+  "Return a random `define-font' message."
+  (list 'define-font
+        :font (rd-gen-uint32)
+        :index (rd-gen-uint32)
+        :size (rd-gen-uint32)
+        :hash (vconcat (cl-loop repeat (rd-gen-integer
+                                        0 remote-display--hash-size)
+                                collect (rd-gen-integer 0 255)))))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -297,24 +323,54 @@
 
 (ert-deftest remotefns-tests-draw-glyphs-wire-format ()
   (skip-unless (featurep 'remote-display))
-  ;; Length 39, type 2, frame 1, x -1, y 2, clip-x -2, clip-y 3,
-  ;; clip-width 4, clip-height 5, 2 glyphs, the glyph codes.
+  ;; Length 47, type 2, frame 1, x -1, y 2, clip-x -2, clip-y 3,
+  ;; clip-width 4, clip-height 5, color #x0a0b0c, font 6, 2 glyphs, the
+  ;; glyph codes.
   (should (equal (remote-display--encode
                   '(draw-glyphs :frame 1 :x -1 :y 2 :clip-x -2 :clip-y 3
-                                :clip-width 4 :clip-height 5
-                                :glyphs [65 #x01020304]))
-                 (unibyte-string 0 0 0 39 2 0 0 0 1 #xff #xff #xff #xff
+                                :clip-width 4 :clip-height 5 :color #x0a0b0c
+                                :font 6 :glyphs [65 #x01020304]))
+                 (unibyte-string 0 0 0 47 2 0 0 0 1 #xff #xff #xff #xff
                                  0 0 0 2 #xff #xff #xff #xfe 0 0 0 3
-                                 0 0 0 4 0 0 0 5
+                                 0 0 0 4 0 0 0 5 0 #x0a #x0b #x0c 0 0 0 6
                                  0 2 0 0 0 65 1 2 3 4))))
+
+(ert-deftest remotefns-tests-define-font-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 18, type 7, font 1, index 2, size #x0102, 3 hash bytes.
+  (should (equal (remote-display--encode
+                  '(define-font :font 1 :index 2 :size #x0102
+                                :hash [#xab 0 #xff]))
+                 (unibyte-string 0 0 0 18 7 0 0 0 1 0 0 0 2 0 0 1 2
+                                 0 3 #xab 0 #xff))))
+
+(ert-deftest remotefns-tests-hash-limits ()
+  "A hash has at most `remote-display--hash-size' bytes."
+  (skip-unless (featurep 'remote-display))
+  (should (= remote-display--hash-size 32))
+  (should-error (remote-display--encode
+                 `(define-font :font 0 :index 0 :size 0
+                               :hash ,(make-vector 33 0)))
+                :type 'args-out-of-range)
+  (should-error (remote-display--encode
+                 '(define-font :font 0 :index 0 :size 0 :hash [256]))
+                :type 'args-out-of-range)
+  ;; A frame that says it has one hash byte too many.
+  (should (equal (remotefns-tests--decode-error
+                  (concat (unibyte-string 0 0 0 48 7 0 0 0 0 0 0 0 0
+                                          0 0 0 0 0 33)
+                          (make-string 33 0)))
+                 '(bad-length))))
 
 (ert-deftest remotefns-tests-clear-area-wire-format ()
   (skip-unless (featurep 'remote-display))
-  ;; Length 21, type 3, frame 1, x -1, y 2, width 3, height #x0405.
+  ;; Length 25, type 3, frame 1, x -1, y 2, width 3, height #x0405,
+  ;; color #x0d0e0f.
   (should (equal (remote-display--encode
-                  '(clear-area :frame 1 :x -1 :y 2 :width 3 :height #x0405))
-                 (unibyte-string 0 0 0 21 3 0 0 0 1 #xff #xff #xff #xff
-                                 0 0 0 2 0 0 0 3 0 0 4 5))))
+                  '(clear-area :frame 1 :x -1 :y 2 :width 3 :height #x0405
+                               :color #x0d0e0f))
+                 (unibyte-string 0 0 0 25 3 0 0 0 1 #xff #xff #xff #xff
+                                 0 0 0 2 0 0 0 3 0 0 4 5 0 #x0d #x0e #x0f))))
 
 (ert-deftest remotefns-tests-copy-area-wire-format ()
   (skip-unless (featurep 'remote-display))
@@ -329,54 +385,59 @@
 
 (ert-deftest remotefns-tests-draw-cursor-wire-format ()
   (skip-unless (featurep 'remote-display))
-  ;; Length 22, type 5, frame 1, x -1, y 2, width 3, height 4, kind 2.
+  ;; Length 26, type 5, frame 1, x -1, y 2, width 3, height 4, kind 2,
+  ;; color #x102030.
   (should (equal (remote-display--encode
                   '(draw-cursor :frame 1 :x -1 :y 2 :width 3 :height 4
-                                :kind 2))
-                 (unibyte-string 0 0 0 22 5 0 0 0 1 #xff #xff #xff #xff
-                                 0 0 0 2 0 0 0 3 0 0 0 4 2))))
+                                :kind 2 :color #x102030))
+                 (unibyte-string 0 0 0 26 5 0 0 0 1 #xff #xff #xff #xff
+                                 0 0 0 2 0 0 0 3 0 0 0 4 2
+                                 0 #x10 #x20 #x30))))
 
 (ert-deftest remotefns-tests-draw-fringe-wire-format ()
   (skip-unless (featurep 'remote-display))
-  ;; Length 23, type 6, frame 1, x -1, y 2, width 8, overlay 1,
-  ;; cursor 0, 2 rows, the rows.
+  ;; Length 31, type 6, frame 1, x -1, y 2, width 8, overlay 1,
+  ;; cursor 0, foreground #x112233, background #x445566, 2 rows, the
+  ;; rows.
   (should (equal (remote-display--encode
                   '(draw-fringe :frame 1 :x -1 :y 2 :width 8 :overlay 1
-                                :cursor 0 :rows [#x0102 #xff]))
-                 (unibyte-string 0 0 0 23 6 0 0 0 1 #xff #xff #xff #xff
-                                 0 0 0 2 0 8 1 0 0 2 1 2 0 #xff))))
+                                :cursor 0 :foreground #x112233
+                                :background #x445566 :rows [#x0102 #xff]))
+                 (unibyte-string 0 0 0 31 6 0 0 0 1 #xff #xff #xff #xff
+                                 0 0 0 2 0 8 1 0 0 #x11 #x22 #x33
+                                 0 #x44 #x55 #x66 0 2 1 2 0 #xff))))
 
 (ert-deftest remotefns-tests-byte-order-of-each-value ()
   "All bytes of a value are in big-endian order, not only the low bytes."
   (skip-unless (featurep 'remote-display))
-  ;; Length 21, type 3, frame, x, y, width, height.
+  ;; Length 25, type 3, frame, x, y, width, height, color.
   (should (equal (remote-display--encode
                   `(clear-area :frame #x01020304 :x #x12345678
                                :y ,(- (ash 1 31)) :width #x05060708
-                               :height #xf1f2f3f4))
-                 (unibyte-string 0 0 0 21 3 1 2 3 4 #x12 #x34 #x56 #x78
+                               :height #xf1f2f3f4 :color #xf5f6f7f8))
+                 (unibyte-string 0 0 0 25 3 1 2 3 4 #x12 #x34 #x56 #x78
                                  #x80 0 0 0 5 6 7 8
-                                 #xf1 #xf2 #xf3 #xf4))))
+                                 #xf1 #xf2 #xf3 #xf4 #xf5 #xf6 #xf7 #xf8))))
 
 (ert-deftest remotefns-tests-too-many-fringe-rows ()
   (skip-unless (featurep 'remote-display))
   (should-error (remote-display--encode
                  `(draw-fringe :frame 0 :x 0 :y 0 :width 0 :overlay 0 :cursor 0
-                               :rows ,(make-vector
+                               :foreground 0 :background 0 :rows ,(make-vector
                                        (1+ remote-display--max-fringe-rows)
                                        0)))
                 :type 'args-out-of-range)
   (should-error (remote-display--encode
                  '(draw-fringe :frame 0 :x 0 :y 0 :width 0 :overlay 0 :cursor 0
-                               :rows [#x10000]))
+                               :foreground 0 :background 0 :rows [#x10000]))
                 :type 'args-out-of-range)
   ;; A frame that says it has one row too many.
   (let ((count (1+ remote-display--max-fringe-rows)))
     (should (equal (remotefns-tests--decode-error
-                    (concat (unibyte-string 0 0 (ash (+ 19 (* 2 count)) -8)
-                                            (logand (+ 19 (* 2 count)) #xff)
+                    (concat (unibyte-string 0 0 (ash (+ 27 (* 2 count)) -8)
+                                            (logand (+ 27 (* 2 count)) #xff)
                                             6 0 0 0 0 0 0 0 0 0 0 0 0
-                                            0 0 0 0
+                                            0 0 0 0 0 0 0 0 0 0 0 0
                                             (ash count -8) (logand count #xff))
                             (make-string (* 2 count) 0)))
                    '(bad-length)))))
@@ -384,18 +445,20 @@
 (ert-deftest remotefns-tests-too-many-glyphs ()
   (skip-unless (featurep 'remote-display))
   (should-error (remote-display--encode
-                 `(draw-glyphs :frame 0 :x 0 :y 0 ,@remotefns-tests--clip
+                 `(draw-glyphs :frame 0 :x 0 :y 0
+                               ,@remotefns-tests--clip-and-color
                                :glyphs ,(make-vector
                                          (1+ remote-display--max-glyphs) 0)))
                 :type 'args-out-of-range)
   ;; A frame with one glyph too many.
   (let ((count (1+ remote-display--max-glyphs)))
     (should (equal (remotefns-tests--decode-error
-                    (concat (unibyte-string 0 0 (ash (+ 31 (* 4 count)) -8)
-                                            (logand (+ 31 (* 4 count)) #xff)
+                    (concat (unibyte-string 0 0 (ash (+ 39 (* 4 count)) -8)
+                                            (logand (+ 39 (* 4 count)) #xff)
                                             2 0 0 0 0 0 0 0 0 0 0 0 0
                                             0 0 0 0 0 0 0 0
-                                            0 0 0 0 0 0 0 0
+                                            0 0 0 0 0 0 0 0 0 0 0 0
+                                            0 0 0 0
                                             (ash count -8) (logand count #xff))
                             (make-string (* 4 count) 0)))
                    '(bad-length)))))
@@ -403,12 +466,13 @@
 (ert-deftest remotefns-tests-glyph-out-of-range ()
   (skip-unless (featurep 'remote-display))
   (should-error (remote-display--encode
-                 `(draw-glyphs :frame 0 :x 0 :y 0 ,@remotefns-tests--clip
+                 `(draw-glyphs :frame 0 :x 0 :y 0
+                               ,@remotefns-tests--clip-and-color
                                :glyphs [#x100000000]))
                 :type 'args-out-of-range)
   (should-error (remote-display--encode
                  `(draw-glyphs :frame 0 :x #x80000000 :y 0
-                               ,@remotefns-tests--clip :glyphs []))
+                               ,@remotefns-tests--clip-and-color :glyphs []))
                 :type 'args-out-of-range)
   (should-error (remote-display--encode
                  '(clear-area :frame 0 :x 0 :y 0 :width -1 :height 0))
@@ -430,23 +494,26 @@
                                                     :overlay :cursor)
                                                 1)
                                     :count 1)
-                                 :rows []))
+                                 :foreground 0 :background 0 :rows []))
                   :type 'args-out-of-range)))
 
 (ert-deftest remotefns-tests-limits ()
   "The Lisp limits are the limits of the codec, and are constant."
   (skip-unless (featurep 'remote-display))
-  (let ((glyphs `(draw-glyphs :frame 0 :x 0 :y 0 ,@remotefns-tests--clip
+  (let ((glyphs `(draw-glyphs :frame 0 :x 0 :y 0
+                              ,@remotefns-tests--clip-and-color
                               :glyphs ,(make-vector remote-display--max-glyphs
                                                     0)))
         (rows `(draw-fringe :frame 0 :x 0 :y 0 :width 0 :overlay 0 :cursor 0
+                            :foreground 0 :background 0
                             :rows ,(make-vector remote-display--max-fringe-rows
                                                 0))))
     (dolist (message (list glyphs rows))
       (should (equal (car (remote-display--decode
                            (remote-display--encode message)))
                      message))))
-  (dolist (limit '(remote-display--max-glyphs remote-display--max-fringe-rows))
+  (dolist (limit '(remote-display--max-glyphs remote-display--max-fringe-rows
+                   remote-display--hash-size))
     (should-error (set limit 1) :type 'setting-constant)))
 
 (ert-deftest remotefns-tests-encode-is-unibyte ()
@@ -469,11 +536,12 @@
   (skip-unless (featurep 'remote-display))
   (let ((low (- (ash 1 31))) (high (1- (ash 1 31))))
     (should (equal (remote-display--decode
-                    (unibyte-string 0 0 0 21 3 0 0 0 1
+                    (unibyte-string 0 0 0 25 3 0 0 0 1
                                     #x80 0 0 0 #x7f #xff #xff #xff
-                                    0 0 0 0 0 0 0 0))
-                   `((clear-area :frame 1 :x ,low :y ,high :width 0 :height 0)
-                     . 25)))
+                                    0 0 0 0 0 0 0 0 0 0 0 0))
+                   `((clear-area :frame 1 :x ,low :y ,high :width 0 :height 0
+                                 :color 0)
+                     . 29)))
     (dolist (value (list (1- low) (1+ high) (ash 1 70) (- (ash 1 70))))
       (should-error (remote-display--encode
                      `(clear-area :frame 0 :x ,value :y 0 :width 0 :height 0))
@@ -486,9 +554,9 @@
     (should (equal (car (remote-display--decode
                          (remote-display--encode
                           `(clear-area :frame 0 :x 0 :y 0
-                                       :width ,high :height ,high))))
+                                       :width ,high :height ,high :color 0))))
                    `(clear-area :frame 0 :x 0 :y 0
-                                :width ,high :height ,high)))
+                                :width ,high :height ,high :color 0)))
     (dolist (value (list -1 (1+ high) (ash 1 70) (- (ash 1 70))))
       (should-error (remote-display--encode
                      `(clear-area :frame 0 :x 0 :y 0 :width ,value :height 0))
@@ -528,19 +596,22 @@ All other scalar fields are unsigned, with 32 bits or less.")
   (skip-unless (featurep 'remote-display))
   (should-error (remote-display--encode
                  '(draw-fringe :frame 0 :x 0 :y 0 :width #x10000
-                               :overlay 0 :cursor 0 :rows []))
+                               :overlay 0 :cursor 0 :foreground 0 :background 0
+                               :rows []))
                 :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-bignum-elements ()
   "A bignum in a vector of a message is out of range."
   (skip-unless (featurep 'remote-display))
   (should-error (remote-display--encode
-                 `(draw-glyphs :frame 0 :x 0 :y 0 ,@remotefns-tests--clip
+                 `(draw-glyphs :frame 0 :x 0 :y 0
+                               ,@remotefns-tests--clip-and-color
                                :glyphs [,(ash 1 70)]))
                 :type 'args-out-of-range)
   (should-error (remote-display--encode
                  `(draw-fringe :frame 0 :x 0 :y 0 :width 0 :overlay 0
-                               :cursor 0 :rows [,(ash 1 70)]))
+                               :cursor 0 :foreground 0 :background 0
+                               :rows [,(ash 1 70)]))
                 :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-field-wrong-type ()
@@ -550,7 +621,8 @@ All other scalar fields are unsigned, with 32 bits or less.")
                  '(clear-area :frame 0 :x 1.5 :y 0 :width 0 :height 0))
                 :type 'wrong-type-argument)
   (should-error (remote-display--encode
-                 `(draw-glyphs :frame 0 :x 0 :y 0 ,@remotefns-tests--clip
+                 `(draw-glyphs :frame 0 :x 0 :y 0
+                               ,@remotefns-tests--clip-and-color
                                :glyphs [a]))
                 :type 'wrong-type-argument))
 
@@ -558,10 +630,12 @@ All other scalar fields are unsigned, with 32 bits or less.")
   "An array field that is not a vector is `wrong-type-argument'."
   (skip-unless (featurep 'remote-display))
   (should-error (remote-display--encode
-                 `(draw-glyphs :frame 0 :x 0 :y 0 ,@remotefns-tests--clip))
+                 `(draw-glyphs :frame 0 :x 0 :y 0
+                               ,@remotefns-tests--clip-and-color))
                 :type 'wrong-type-argument)
   (should-error (remote-display--encode
-                 `(draw-glyphs :frame 0 :x 0 :y 0 ,@remotefns-tests--clip
+                 `(draw-glyphs :frame 0 :x 0 :y 0
+                               ,@remotefns-tests--clip-and-color
                                :glyphs 5))
                 :type 'wrong-type-argument))
 
@@ -642,14 +716,14 @@ All other scalar fields are unsigned, with 32 bits or less.")
                  '(bad-length)))
   ;; A draw-fringe frame with 2 rows and the bytes of only 1.
   (should (equal (remotefns-tests--decode-error
-                  (unibyte-string 0 0 0 21 6 0 0 0 1 0 0 0 0 0 0 0 0
-                                  0 8 0 0 0 2 0 1))
+                  (unibyte-string 0 0 0 29 6 0 0 0 1 0 0 0 0 0 0 0 0
+                                  0 8 0 0 0 0 0 0 0 0 0 0 0 2 0 1))
                  '(bad-length)))
   ;; A draw-glyphs frame with 2 glyphs and the bytes of only 1.
   (should (equal (remotefns-tests--decode-error
-                  (unibyte-string 0 0 0 35 2 0 0 0 1 0 0 0 0 0 0 0 0
+                  (unibyte-string 0 0 0 43 2 0 0 0 1 0 0 0 0 0 0 0 0
                                   0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
-                                  0 2 0 0 0 65))
+                                  0 0 0 0 0 0 0 0 0 2 0 0 0 65))
                  '(bad-length))))
 
 (ert-deftest remotefns-tests-frame-too-long ()

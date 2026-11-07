@@ -29,7 +29,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    Each field is big-endian, and a signed field is two's complement.
    An array is its number of elements, 2 bytes, and then its elements.
    Positions and sizes of pixels have 32 bits, so the size of a frame
-   does not limit them.  LENGTH is at most RD_MAX_LENGTH.
+   does not limit them.  A color is 32 bits 0xRRGGBB.  The sender sets
+   the high 8 bits to 0, and a receiver ignores them.  LENGTH is at
+   most RD_MAX_LENGTH.
 
    A later version of the protocol can append fields to a message
    type.  A decoder reads the fields that it knows, and ignores the
@@ -57,6 +59,10 @@ enum { RD_MAX_GLYPHS = 512 };
    The height of a fringe bitmap of Emacs has 8 bits.  */
 enum { RD_MAX_FRINGE_ROWS = 255 };
 
+/* The number of bytes of a SHA-256 hash, which identifies a font
+   file.  */
+enum { RD_HASH_SIZE = 32 };
+
 /* The kinds of cursor.  A client ignores a kind that it does not
    know.  */
 enum rd_cursor_kind
@@ -77,7 +83,8 @@ enum rd_cursor_kind
   MESSAGE (CLEAR_AREA, clear_area, RD_CLEAR_AREA_FIELDS)		\
   MESSAGE (COPY_AREA, copy_area, RD_COPY_AREA_FIELDS)			\
   MESSAGE (DRAW_CURSOR, draw_cursor, RD_DRAW_CURSOR_FIELDS)		\
-  MESSAGE (DRAW_FRINGE, draw_fringe, RD_DRAW_FRINGE_FIELDS)
+  MESSAGE (DRAW_FRINGE, draw_fringe, RD_DRAW_FRINGE_FIELDS)		\
+  MESSAGE (DEFINE_FONT, define_font, RD_DEFINE_FONT_FIELDS)
 
 /* Each list gives the fields of a message in the order of the wire.
    FIELD (M, TYPE, NAME) is a member NAME of the C type TYPE_t.
@@ -90,8 +97,8 @@ enum rd_cursor_kind
 #define RD_HELLO_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint16, version)
 
-/* Draw glyphs of the frame font.  X and Y are the pixel position of
-   the start of the baseline.  Each glyph code is a glyph index of
+/* Draw glyphs of the font FONT in COLOR.  X and Y are the pixel
+   position of the start of the baseline.  Each glyph code is a glyph index of
    the font, not a character.  A client changes only the pixels inside
    the rectangle at CLIP_X, CLIP_Y with the size CLIP_WIDTH,
    CLIP_HEIGHT, because a glyph can extend outside a line that is
@@ -106,16 +113,19 @@ enum rd_cursor_kind
   FIELD (M, int32, clip_y)						\
   FIELD (M, uint32, clip_width)						\
   FIELD (M, uint32, clip_height)					\
+  FIELD (M, uint32, color)						\
+  FIELD (M, uint32, font)						\
   ARRAY (M, uint32, glyphs, nglyphs, RD_MAX_GLYPHS)
 
-/* Fill a rectangle with the background color of the frame.  X and Y
-   are the pixel position of the top left corner.  */
+/* Fill a rectangle with COLOR.  X and Y are the pixel position of the
+   top left corner.  */
 #define RD_CLEAR_AREA_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint32, frame)						\
   FIELD (M, int32, x)							\
   FIELD (M, int32, y)							\
   FIELD (M, uint32, width)						\
-  FIELD (M, uint32, height)
+  FIELD (M, uint32, height)						\
+  FIELD (M, uint32, color)
 
 /* Copy the rectangle at X, Y with the size WIDTH, HEIGHT to the
    position TO_X, TO_Y of the same frame.  The rectangles can
@@ -129,8 +139,8 @@ enum rd_cursor_kind
   FIELD (M, int32, to_x)						\
   FIELD (M, int32, to_y)
 
-/* Draw a cursor of the rd_cursor_kind KIND in the rectangle at X, Y
-   with the size WIDTH, HEIGHT.  The server erases a cursor: it clears
+/* Draw a cursor of the rd_cursor_kind KIND in COLOR in the rectangle
+   at X, Y with the size WIDTH, HEIGHT.  The server erases a cursor: it clears
    the area under the cursor, and draws its glyphs again.  */
 #define RD_DRAW_CURSOR_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint32, frame)						\
@@ -138,14 +148,17 @@ enum rd_cursor_kind
   FIELD (M, int32, y)							\
   FIELD (M, uint32, width)						\
   FIELD (M, uint32, height)						\
-  FIELD (M, uint8, kind)
+  FIELD (M, uint8, kind)						\
+  FIELD (M, uint32, color)
 
 /* Draw a fringe bitmap at X, Y.  The message holds the rows of the
    bitmap, so a client needs no table of bitmaps when it connects
    again.  In each element of ROWS, the bits from 0 to WIDTH - 1 are
    the pixels, and bit 0 is the rightmost pixel, so WIDTH has 16 bits
-   and not the 32 bits of the other sizes.  If OVERLAY is not
-   zero, draw on the pixels that are there.  If CURSOR is not zero,
+   and not the 32 bits of the other sizes.  A bit that is 1 has the
+   color FOREGROUND, and a bit that is 0 has the color BACKGROUND.  If
+   OVERLAY is not zero, draw only the bits that are 1, on the pixels
+   that are there.  If CURSOR is not zero,
    the bitmap is the cursor.  */
 #define RD_DRAW_FRINGE_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint32, frame)						\
@@ -154,7 +167,22 @@ enum rd_cursor_kind
   FIELD (M, uint16, width)						\
   FIELD (M, uint8, overlay)						\
   FIELD (M, uint8, cursor)						\
+  FIELD (M, uint32, foreground)						\
+  FIELD (M, uint32, background)						\
   ARRAY (M, uint16, rows, nrows, RD_MAX_FRINGE_ROWS)
+
+/* Give the font ID FONT to the face INDEX of the font
+   file whose SHA-256 hash is HASH, at the size of SIZE pixels.  A
+   session sends this before the first draw-glyphs message with FONT
+   after each attach of a client, so a client that connects again
+   needs no state from an earlier connection.  An ID keeps its font
+   for the life of the server.  A hash with fewer than RD_HASH_SIZE
+   bytes means that the server could not read the file.  */
+#define RD_DEFINE_FONT_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, font)						\
+  FIELD (M, uint32, index)						\
+  FIELD (M, uint32, size)						\
+  ARRAY (M, uint8, hash, nhash, RD_HASH_SIZE)
 
 /* The value 0 is not a message type.  */
 #define RD_TYPE_ENUMERATOR(ENUM, NAME, FIELDS) RD_##ENUM,

@@ -36,6 +36,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "remoteterm.h"
 #include "rdproto.h"
 
+#include <fcntl.h>
+#include "sha256.h"
+
 struct remote_display_info *x_display_list;
 
 /* The name_list_element of each session.  The garbage collector
@@ -44,6 +47,25 @@ static Lisp_Object remote_display_name_list;
 
 /* The color names of etc/rgb.txt, as (NAME . PIXEL) pairs.  */
 static Lisp_Object remote_color_map;
+
+/* The fonts of all sessions.  A font has one ID for the life of the
+   server process, so each session and each attach of a client use the same
+   ID.  REMOTE_FONTS maps a font object to its entry, and it is weak,
+   so it does not keep a closed font.  REMOTE_FONT_IDENTITIES maps the
+   identity (HASH INDEX SIZE) of a font to its entry, so two font
+   objects of the same font have one ID.  An entry is the vector
+   [ID HASH INDEX SIZE].  HASH is a unibyte string.  */
+static Lisp_Object remote_fonts;
+static Lisp_Object remote_font_identities;
+static uint32_t remote_last_font_id;
+
+/* The two colors of a draw: the color of the glyphs, and the color of
+   the area under them.  */
+struct remote_colors
+{
+  unsigned long foreground;
+  unsigned long background;
+};
 
 static int remote_largest_frame_size (Lisp_Object, bool);
 static struct remote_display_info *remote_open_session (Lisp_Object);
@@ -80,7 +102,24 @@ static void remote_draw_static_composition (struct glyph_string *);
 static void remote_draw_automatic_composition (struct glyph_string *);
 static void remote_send_glyphs (struct glyph_string *, int, int, int, int);
 static void remote_clear_frame_area (struct frame *, int, int, int, int);
-static void remote_send_cursor (struct window *, struct glyph_row *,
+static uint32_t remote_font_id (Lisp_Object);
+static Lisp_Object remote_font_entry (struct font *);
+static Lisp_Object remote_font_hash (struct font *);
+static void remote_ensure_font_defined (struct remote_display_info *,
+					Lisp_Object);
+static bool remote_font_defined_p (struct remote_display_info *, uint32_t);
+static void remote_define_font (struct remote_display_info *, Lisp_Object);
+static void remote_fill_area (struct frame *, int, int, int, int,
+			      unsigned long);
+static struct remote_colors remote_glyph_string_colors (struct glyph_string *);
+static struct remote_colors remote_cursor_colors (struct frame *,
+						  struct face *);
+static unsigned long remote_cursor_color (struct frame *, struct glyph *,
+					  enum text_cursor_kinds);
+static unsigned long
+remote_fringe_foreground (struct frame *,
+			  const struct draw_fringe_bitmap_params *);
+static bool remote_send_cursor (struct window *, struct glyph_row *,
 				enum text_cursor_kinds, int);
 static int remote_clip_copy (int, int, int *, int *, int);
 static bool remote_clip_to_row (struct window *, struct glyph_row *,
@@ -334,6 +373,7 @@ remote_delete_terminal (struct terminal *terminal)
   remote_display_name_list = Fdelq (dpyinfo->name_list_element,
 				    remote_display_name_list);
   remote_set_sink (dpyinfo, NULL);
+  xfree (dpyinfo->font_defined);
   xfree (dpyinfo->bitmaps);
   xfree (dpyinfo);
   terminal->display_info.remote = NULL;
@@ -409,6 +449,10 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
 {
   struct remote_sink *old = dpyinfo->sink;
   dpyinfo->sink = sink;
+
+  /* A new client has no font definitions.  */
+  if (dpyinfo->font_defined)
+    memset (dpyinfo->font_defined, 0, dpyinfo->font_defined_size);
   if (old)
     {
       old->ops->free (old->data);
@@ -510,6 +554,21 @@ remote_set_background_color (struct frame *f, Lisp_Object arg,
   update_face_from_frame_parameter (f, Qbackground_color, arg);
 }
 
+/* The handler of the `cursor-color' frame parameter.  A cursor in the
+   background color is not visible, so use the foreground color for
+   it.  The glyph under a box has the background color.  */
+static void
+remote_set_cursor_color (struct frame *f, Lisp_Object arg,
+			 Lisp_Object oldval)
+{
+  unsigned long pixel = remote_decode_color (f, arg, BLACK_PIX_DEFAULT (f));
+  if (pixel == FRAME_BACKGROUND_PIXEL (f))
+    pixel = FRAME_FOREGROUND_PIXEL (f);
+  FRAME_REMOTE_OUTPUT (f)->cursor_color = pixel;
+  FRAME_REMOTE_OUTPUT (f)->cursor_foreground_color
+    = FRAME_BACKGROUND_PIXEL (f);
+}
+
 
 /***********************************************************************
 				Frames
@@ -531,7 +590,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     remote_set_background_color,
     NULL, /* border color */
     gui_set_border_width,
-    NULL, /* cursor color */
+    remote_set_cursor_color,
     remote_set_cursor_type,
     gui_set_font,
     remote_set_foreground_color,
@@ -1023,7 +1082,7 @@ remote_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
 {
   struct frame *f = XFRAME (w->frame);
   if (p->bx >= 0 && !p->overlay_p)
-    remote_clear_frame_area (f, p->bx, p->by, p->nx, p->ny);
+    remote_fill_area (f, p->bx, p->by, p->nx, p->ny, p->face->background);
   int first, end;
   remote_fringe_visible_rows (w, row, p, &first, &end);
   if (!remote_fringe_fits_p (p, first, end))
@@ -1040,6 +1099,8 @@ remote_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
   m->width = p->wd;
   m->overlay = p->overlay_p;
   m->cursor = p->cursor_p;
+  m->foreground = remote_fringe_foreground (f, p);
+  m->background = p->face->background;
   m->nrows = end - first;
 
   /* A fringe that is narrower than the bitmap shows the left pixels of
@@ -1075,6 +1136,19 @@ remote_fringe_fits_p (const struct draw_fringe_bitmap_params *p,
 	  && first < end && end - first <= RD_MAX_FRINGE_ROWS);
 }
 
+/* Return the color of the bits of P that are 1.  A cursor in the
+   fringe has the cursor color, and an overlay cursor has the
+   background of the face, as in pgtk_draw_fringe_bitmap.  */
+static unsigned long
+remote_fringe_foreground (struct frame *f,
+			  const struct draw_fringe_bitmap_params *p)
+{
+  if (!p->cursor_p)
+    return p->face->foreground;
+  return (p->overlay_p ? p->face->background
+	  : FRAME_REMOTE_OUTPUT (f)->cursor_color);
+}
+
 /* Return the number of rows of P above the first row of its bitmap.
    A periodic bitmap on a line that starts above the frame has a
    negative row offset, and the fringe code adds the same number of
@@ -1094,8 +1168,9 @@ static void
 remote_draw_glyph_string (struct glyph_string *s)
 {
   /* A string for the overhang of a neighbor draws over pixels that are
-     correct, so it must not clear them.  */
-  if (!s->for_overlaps)
+     correct, so it must not clear them.  A string under a box cursor
+     must not clear the box.  */
+  if (!s->for_overlaps && s->hl != DRAW_CURSOR)
     remote_clear_glyph_string (s);
   if (s->first_glyph->type == CHAR_GLYPH)
     remote_draw_chars (s);
@@ -1109,8 +1184,42 @@ remote_clear_glyph_string (struct glyph_string *s)
 {
   Emacs_Rectangle area = { s->x, s->y, s->background_width, s->height };
   Emacs_Rectangle visible = remote_intersection (remote_glyph_clip (s), area);
-  remote_clear_frame_area (s->f, visible.x, visible.y,
-			   visible.width, visible.height);
+  remote_fill_area (s->f, visible.x, visible.y, visible.width, visible.height,
+		    remote_glyph_string_colors (s).background);
+}
+
+/* Return the colors of S for its highlight, as in
+   pgtk_set_glyph_string_gc.  */
+static struct remote_colors
+remote_glyph_string_colors (struct glyph_string *s)
+{
+  prepare_face_for_display (s->f, s->face);
+  if (s->hl == DRAW_CURSOR)
+    return remote_cursor_colors (s->f, s->face);
+  return (struct remote_colors) { s->face->foreground, s->face->background };
+}
+
+/* Return the colors of a box cursor on a glyph of FACE, as in the
+   merge of pgtk_set_cursor_gc.  The background is the color of the
+   box, and the foreground is the color of the glyph.  The two colors
+   differ, also if the face has the cursor color.  The fast path of
+   pgtk for the default face gives the same colors, so it is not
+   here.  */
+static struct remote_colors
+remote_cursor_colors (struct frame *f, struct face *face)
+{
+  struct remote_output *output = FRAME_REMOTE_OUTPUT (f);
+  unsigned long background = output->cursor_color;
+  unsigned long foreground = face->background;
+  if (foreground == background)
+    foreground = face->foreground;
+  if (foreground == background)
+    foreground = output->cursor_foreground_color;
+  /* A box with the colors of the face is not visible, so use the
+     reverse video of the face.  */
+  if (background == face->background && foreground == face->foreground)
+    return (struct remote_colors) { face->background, face->foreground };
+  return (struct remote_colors) { foreground, background };
 }
 
 /* Return the rectangle of the pixels that S can change.  */
@@ -1225,10 +1334,128 @@ remote_send_glyphs (struct glyph_string *s, int start, int n, int x, int y)
   m->clip_y = clip.y;
   m->clip_width = clip.width;
   m->clip_height = clip.height;
+  m->color = remote_glyph_string_colors (s).foreground;
+  Lisp_Object font = remote_font_entry (s->font);
+  remote_ensure_font_defined (FRAME_DISPLAY_INFO (s->f), font);
+  m->font = remote_font_id (font);
   m->nglyphs = n;
   for (int i = 0; i < n; i++)
     m->glyphs[i] = s->char2b[start + i];
   remote_send (FRAME_DISPLAY_INFO (s->f), &message);
+}
+
+/* Return the font ID of the font ENTRY.  */
+static uint32_t
+remote_font_id (Lisp_Object entry)
+{
+  return XFIXNAT (AREF (entry, 0));
+}
+
+/* Send the definition of the font ENTRY to the client of DPYINFO if
+   the client does not have it.  */
+static void
+remote_ensure_font_defined (struct remote_display_info *dpyinfo,
+			    Lisp_Object entry)
+{
+  if (!remote_font_defined_p (dpyinfo, remote_font_id (entry)))
+    remote_define_font (dpyinfo, entry);
+}
+
+/* Return the entry of FONT, and make it if FONT has none.  */
+static Lisp_Object
+remote_font_entry (struct font *font)
+{
+  Lisp_Object font_object;
+  XSETFONT (font_object, font);
+  Lisp_Object entry = Fgethash (font_object, remote_fonts, Qnil);
+  if (!NILP (entry))
+    return entry;
+
+  Lisp_Object identity = list3 (remote_font_hash (font),
+				make_int (ftcrfont_face_index (font)),
+				make_int (font->pixel_size));
+  entry = Fgethash (identity, remote_font_identities, Qnil);
+  if (NILP (entry))
+    {
+      entry = CALLN (Fvector, make_fixnum (++remote_last_font_id),
+		     XCAR (identity), XCAR (XCDR (identity)),
+		     XCAR (XCDR (XCDR (identity))));
+      Fputhash (identity, entry, remote_font_identities);
+    }
+  Fputhash (font_object, entry, remote_fonts);
+  return entry;
+}
+
+/* Return the hash of the file of FONT as a unibyte string.  The string
+   is empty if the file cannot be read.  */
+static Lisp_Object
+remote_font_hash (struct font *font)
+{
+  unsigned char hash[RD_HASH_SIZE];
+  if (!remote_file_hash (font->props[FONT_FILE_INDEX], hash))
+    return empty_unibyte_string;
+  return make_unibyte_string ((char *) hash, RD_HASH_SIZE);
+}
+
+/* Set HASH to the SHA-256 hash of the bytes of FILE, and return true.
+   Return false if FILE is not a string or cannot be read.  */
+bool
+remote_file_hash (Lisp_Object file, unsigned char *hash)
+{
+  if (!STRINGP (file))
+    return false;
+  int fd = emacs_open (SSDATA (ENCODE_FILE (file)), O_RDONLY, 0);
+  if (fd < 0)
+    return false;
+  struct sha256_ctx ctx;
+  sha256_init_ctx (&ctx);
+  char buffer[16 * 1024];
+  ptrdiff_t n;
+  while ((n = emacs_read (fd, buffer, sizeof buffer)) > 0)
+    sha256_process_bytes (buffer, n, &ctx);
+  emacs_close (fd);
+  if (n < 0)
+    return false;
+  sha256_finish_ctx (&ctx, hash);
+  return true;
+}
+
+/* Return true if the client of DPYINFO has the definition of the font
+   ID.  */
+static bool
+remote_font_defined_p (struct remote_display_info *dpyinfo, uint32_t id)
+{
+  return id < dpyinfo->font_defined_size && dpyinfo->font_defined[id];
+}
+
+/* Send the definition of the font of ENTRY to the client of DPYINFO,
+   and record that the client has it.  An attach clears the record, so
+   the record of a session with no client has no effect.  */
+static void
+remote_define_font (struct remote_display_info *dpyinfo, Lisp_Object entry)
+{
+  uint32_t id = remote_font_id (entry);
+  Lisp_Object hash = AREF (entry, 1);
+  struct rd_message message =
+    {
+      .type = RD_DEFINE_FONT,
+      .u.define_font = { .font = id, .index = XFIXNUM (AREF (entry, 2)),
+			 .size = XFIXNUM (AREF (entry, 3)),
+			 .nhash = SBYTES (hash) },
+    };
+  memcpy (message.u.define_font.hash, SDATA (hash), SBYTES (hash));
+  remote_send (dpyinfo, &message);
+
+  if (dpyinfo->font_defined_size <= id)
+    {
+      ptrdiff_t old_size = dpyinfo->font_defined_size;
+      dpyinfo->font_defined
+	= xpalloc (dpyinfo->font_defined, &dpyinfo->font_defined_size,
+		   id + 1 - old_size, -1, sizeof *dpyinfo->font_defined);
+      memset (dpyinfo->font_defined + old_size, 0,
+	      dpyinfo->font_defined_size - old_size);
+    }
+  dpyinfo->font_defined[id] = true;
 }
 
 static void
@@ -1241,13 +1468,22 @@ remote_define_frame_cursor (struct frame *f, Emacs_Cursor cursor)
 static void
 remote_clear_frame_area (struct frame *f, int x, int y, int width, int height)
 {
+  remote_fill_area (f, x, y, width, height, FRAME_BACKGROUND_PIXEL (f));
+}
+
+/* Fill the rectangle at X, Y with the size WIDTH, HEIGHT of F with
+   COLOR.  */
+static void
+remote_fill_area (struct frame *f, int x, int y, int width, int height,
+		  unsigned long color)
+{
   if (remote_empty_area_p (width, height))
     return;
   struct rd_message message =
     {
       .type = RD_CLEAR_AREA,
       .u.clear_area = { .frame = remote_frame_id (f), .x = x, .y = y,
-			.width = width, .height = height },
+			.width = width, .height = height, .color = color },
     };
   remote_send (FRAME_DISPLAY_INFO (f), &message);
 }
@@ -1273,21 +1509,24 @@ remote_draw_window_cursor (struct window *w, struct glyph_row *glyph_row,
     }
   else if (cursor_type == NO_CURSOR)
     w->phys_cursor_width = 0;
-  else
-    remote_send_cursor (w, glyph_row, cursor_type, cursor_width);
+  else if (remote_send_cursor (w, glyph_row, cursor_type, cursor_width)
+	   && cursor_type == FILLED_BOX_CURSOR)
+    /* A box hides the glyph under it, so draw the glyph again.  */
+    draw_phys_cursor_glyph (w, glyph_row, DRAW_CURSOR);
 }
 
 /* Send the rectangle of a cursor of CURSOR_TYPE and CURSOR_WIDTH on
    the cursor glyph of ROW in W.  A box covers the glyph, a bar covers
    the height of ROW, and an hbar is at the bottom of ROW.  A cursor
-   on a right-to-left glyph is at the right edge of the glyph.  */
-static void
+   on a right-to-left glyph is at the right edge of the glyph.  Return
+   true if a message went to the client.  */
+static bool
 remote_send_cursor (struct window *w, struct glyph_row *row,
 		    enum text_cursor_kinds cursor_type, int cursor_width)
 {
   struct glyph *glyph = get_phys_cursor_glyph (w);
   if (!glyph)
-    return;
+    return false;
   struct frame *f = XFRAME (w->frame);
   int x, y, height;
   get_phys_cursor_geometry (w, row, glyph, &x, &y, &height);
@@ -1308,16 +1547,40 @@ remote_send_cursor (struct window *w, struct glyph_row *row,
 
   Emacs_Rectangle cursor = { x, y, w->phys_cursor_width, height };
   if (!remote_clip_to_row (w, row, &cursor))
-    return;
+    return false;
   struct rd_message message =
     {
       .type = RD_DRAW_CURSOR,
       .u.draw_cursor = { .frame = remote_frame_id (f), .x = cursor.x,
 			 .y = cursor.y, .width = cursor.width,
 			 .height = cursor.height,
-			 .kind = remote_cursor_kind (cursor_type) },
+			 .kind = remote_cursor_kind (cursor_type),
+			 .color = remote_cursor_color (f, glyph, cursor_type) },
     };
   remote_send (FRAME_DISPLAY_INFO (f), &message);
+  return true;
+}
+
+/* Return the color of a cursor of CURSOR_TYPE on GLYPH of F.  A bar on
+   a face with the cursor color as its background has the foreground of
+   the face, as in pgtk_draw_bar_cursor.  */
+static unsigned long
+remote_cursor_color (struct frame *f, struct glyph *glyph,
+		     enum text_cursor_kinds cursor_type)
+{
+  struct face *face = FACE_FROM_ID (f, glyph->face_id);
+  unsigned long color = FRAME_REMOTE_OUTPUT (f)->cursor_color;
+  switch (cursor_type)
+    {
+    case FILLED_BOX_CURSOR:
+      prepare_face_for_display (f, face);
+      return remote_cursor_colors (f, face).background;
+    case BAR_CURSOR:
+    case HBAR_CURSOR:
+      return face->background == color ? face->foreground : color;
+    default:
+      return color;
+    }
 }
 
 /* Reduce RECT to the visible part of ROW in the text area of W.  A
@@ -1468,6 +1731,10 @@ syms_of_remoteterm (void)
   staticpro (&remote_display_name_list);
   remote_color_map = Qnil;
   staticpro (&remote_color_map);
+  remote_fonts = CALLN (Fmake_hash_table, QCtest, Qeq, QCweakness, Qkey);
+  staticpro (&remote_fonts);
+  remote_font_identities = CALLN (Fmake_hash_table, QCtest, Qequal);
+  staticpro (&remote_font_identities);
 
   DEFVAR_BOOL ("x-use-underline-position-properties",
 	       x_use_underline_position_properties,

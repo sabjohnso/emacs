@@ -264,6 +264,11 @@ syms_of_remotefns (void)
   Vremote_display__max_fringe_rows = make_fixnum (RD_MAX_FRINGE_ROWS);
   make_symbol_constant (intern_c_string ("remote-display--max-fringe-rows"));
 
+  DEFVAR_LISP ("remote-display--hash-size", Vremote_display__hash_size,
+	       doc: /* The number of bytes of the hash of a font file.  */);
+  Vremote_display__hash_size = make_fixnum (RD_HASH_SIZE);
+  make_symbol_constant (intern_c_string ("remote-display--hash-size"));
+
   /* The list for Lisp is a copy, so a change of it does not change
      the conversion of messages.  */
   Lisp_Object formats = Qnil;

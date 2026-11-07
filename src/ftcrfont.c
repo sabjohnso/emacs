@@ -768,6 +768,21 @@ struct font_driver const ftcrfont_driver =
 struct font_driver ftcrhbfont_driver;
 #endif	/* HAVE_HARFBUZZ */
 
+#ifdef HAVE_REMOTE_DISPLAY
+/* Return the face index of FONT in its file, as FreeType gives it.
+   For a named instance of a variable font, the bits above 16 give the
+   instance.  */
+long
+ftcrfont_face_index (struct font *font)
+{
+  cairo_scaled_font_t *scaled = ((struct font_info *) font)->cr_scaled_font;
+  FT_Face face = cairo_ft_scaled_font_lock_face (scaled);
+  long index = face->face_index;
+  cairo_ft_scaled_font_unlock_face (scaled);
+  return index;
+}
+#endif
+
 void
 syms_of_ftcrfont (void)
 {
