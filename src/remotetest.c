@@ -39,6 +39,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "keyboard.h"
 #include "termhooks.h"
 #include "window.h"
+#include "font.h"
 #include "remoteterm.h"
 #include "rdproto.h"
 
@@ -361,10 +362,9 @@ DEFUN ("remote-display--file-hash", Fremote_display__file_hash,
        Sremote_display__file_hash, 1, 1, 0,
        doc: /* Return the hash that a define-font message gives for FILE.
 The value is a vector of bytes, and it is empty if FILE cannot be
-read.  */)
+read or is not a string.  */)
   (Lisp_Object file)
 {
-  CHECK_STRING (file);
   unsigned char hash[RD_HASH_SIZE];
   if (!remote_file_hash (file, hash))
     return make_nil_vector (0);
@@ -372,6 +372,18 @@ read.  */)
   for (int i = 0; i < RD_HASH_SIZE; i++)
     ASET (bytes, i, make_fixnum (hash[i]));
   return bytes;
+}
+
+DEFUN ("remote-display--set-font-file", Fremote_display__set_font_file,
+       Sremote_display__set_font_file, 2, 2, 0,
+       doc: /* Set the file name of the font object FONT to FILE.
+Return FILE.  The tests use this to get a font whose file the server
+cannot read.  */)
+  (Lisp_Object font, Lisp_Object file)
+{
+  CHECK_FONT_OBJECT (font);
+  ASET (font, FONT_FILE_INDEX, file);
+  return file;
 }
 
 DEFUN ("remote-display--set-last-frame-id", Fremote_display__set_last_frame_id,
@@ -504,6 +516,7 @@ syms_of_remotetest (void)
 
   defsubr (&Sremote_display__record);
   defsubr (&Sremote_display__file_hash);
+  defsubr (&Sremote_display__set_font_file);
   defsubr (&Sremote_display__count);
   defsubr (&Sremote_display__detach);
   defsubr (&Sremote_display__take_output);

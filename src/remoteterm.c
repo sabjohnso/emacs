@@ -1361,7 +1361,9 @@ remote_ensure_font_defined (struct remote_display_info *dpyinfo,
     remote_define_font (dpyinfo, entry);
 }
 
-/* Return the entry of FONT, and make it if FONT has none.  */
+/* Return the entry of FONT, and make it if FONT has none.  A font
+   with no hash does not share its entry, because the client cannot
+   know that two such fonts are the same.  */
 static Lisp_Object
 remote_font_entry (struct font *font)
 {
@@ -1374,13 +1376,16 @@ remote_font_entry (struct font *font)
   Lisp_Object identity = list3 (remote_font_hash (font),
 				make_int (ftcrfont_face_index (font)),
 				make_int (font->pixel_size));
-  entry = Fgethash (identity, remote_font_identities, Qnil);
+  bool shared = SCHARS (XCAR (identity)) > 0;
+  if (shared)
+    entry = Fgethash (identity, remote_font_identities, Qnil);
   if (NILP (entry))
     {
       entry = CALLN (Fvector, make_fixnum (++remote_last_font_id),
 		     XCAR (identity), XCAR (XCDR (identity)),
 		     XCAR (XCDR (XCDR (identity))));
-      Fputhash (identity, entry, remote_font_identities);
+      if (shared)
+	Fputhash (identity, entry, remote_font_identities);
     }
   Fputhash (font_object, entry, remote_fonts);
   return entry;

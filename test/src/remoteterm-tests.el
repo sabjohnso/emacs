@@ -165,11 +165,12 @@
 ;; 35. Font definitions: after each attach, a define-font message for
 ;;     a font comes before the first draw-glyphs message with that
 ;;     font, and no font has two definitions.  The frames of a session
-;;     share the definitions.
+;;     have the same definitions.
 ;; 36. Font identity: a definition has the SHA-256 hash of the font
-;;     file, the face index in the file, and the pixel size.  Two fonts
-;;     of different sizes have different IDs.  A font keeps its ID after
-;;     a new attach, and after Emacs opens it again.
+;;     file, the face index in the file, and the pixel size.  Two IDs
+;;     of fonts with a hash do not have the same hash, index, and size.
+;;     Two fonts with no hash have different IDs.  A font keeps its ID
+;;     after a new attach, and after Emacs opens it again.
 ;; 37. File hash: the hash of a file is the SHA-256 hash of its bytes,
 ;;     and the hash of a file that cannot be read is empty.
 ;;
@@ -3620,16 +3621,22 @@ as for `remoteterm-tests--geometry-form'."
                                                            output))))
          (should (cl-every (lambda (color) (< color #x1000000))
                            (remoteterm-tests--colors output)))
-         (dolist (fields glyphs)
-           (cond
-            ((and (= (plist-get fields :y) (+ top ascent))
-                  (< (plist-get fields :x) text-end))
-             (should (= (plist-get fields :color)
-                        (remoteterm-tests--rgb-pixel fg))))
-            ((and (= (plist-get fields :y) (+ top line-height ascent))
-                  (= (plist-get fields :x) x0))
-             (should (= (plist-get fields :color)
-                        (remoteterm-tests--rgb-pixel frame-fg))))))
+         (cl-flet ((text-p (fields)
+                     (and (= (plist-get fields :y) (+ top ascent))
+                          (< (plist-get fields :x) text-end)))
+                   (z-p (fields)
+                     (and (= (plist-get fields :y) (+ top line-height ascent))
+                          (= (plist-get fields :x) x0))))
+           (should (seq-some #'text-p glyphs))
+           (should (seq-some #'z-p glyphs))
+           (dolist (fields glyphs)
+             (cond
+              ((text-p fields)
+               (should (= (plist-get fields :color)
+                          (remoteterm-tests--rgb-pixel fg))))
+              ((z-p fields)
+               (should (= (plist-get fields :color)
+                          (remoteterm-tests--rgb-pixel frame-fg)))))))
          (should (seq-some (lambda (fields)
                              (and (< (plist-get fields :x) text-end)
                                   (= (plist-get fields :color)
@@ -3644,8 +3651,46 @@ as for `remoteterm-tests--geometry-form'."
 
 (defun remoteterm-tests--cursor-colors-case ()
   "Return random arguments for `remoteterm-tests--cursor-colors-form'.
-The cursor color is often a color of the frame."
-  (cons (remoteterm-tests--cursor-type) (remoteterm-tests--color-list 3)))
+The cursor color is often a color of the frame or of the face.  The
+glyph under the cursor has the default face, or a face with random
+colors."
+  (pcase-let* ((`(,frame-fg ,frame-bg ,cursor)
+                (remoteterm-tests--color-list 3))
+               (face-bg (rd-gen-element
+                         (list cursor frame-bg (remoteterm-tests--rgb))))
+               (face-fg (rd-gen-element
+                         (list cursor face-bg (remoteterm-tests--rgb)))))
+    (list (remoteterm-tests--cursor-type) frame-fg frame-bg cursor
+          (and (/= (rd-gen-random 4) 0)
+               (list :foreground (remoteterm-tests--rgb-string face-fg)
+                     :background (remoteterm-tests--rgb-string face-bg))))))
+
+(defun remoteterm-tests--expected-cursor-colors (type frame-fg frame-bg cursor
+                                                      face)
+  "Return the colors of a cursor, as `pgtk_set_cursor_gc' gives them.
+TYPE, FRAME-FG, FRAME-BG, CURSOR, and FACE are as for
+`remoteterm-tests--cursor-colors-form'.  The value is the list of the
+arguments BOX-COLOR, GLYPH-COLOR, and LINE-COLOR of
+`remoteterm-tests--check-cursor-colors'."
+  (let* ((pixel (lambda (color)
+                  (if (stringp color)
+                      (string-to-number (substring color 1) 16)
+                    (remoteterm-tests--rgb-pixel color))))
+         (color (funcall pixel (if (equal cursor frame-bg) frame-fg cursor)))
+         (face-fg (funcall pixel (or (plist-get face :foreground) frame-fg)))
+         (frame-bg (funcall pixel frame-bg))
+         (face-bg (if face (funcall pixel (plist-get face :background))
+                    frame-bg))
+         (glyph (cond ((/= face-bg color) face-bg)
+                      ((/= face-fg color) face-fg)
+                      (t frame-bg)))
+         (line (if (= face-bg color) face-fg color)))
+    (cond ((not (eq type 'box)) (list color nil line))
+          ;; A box with the colors of the face is not visible, so it has
+          ;; the reverse video of the face.
+          ((and (= color face-bg) (= glyph face-fg))
+           (list face-fg face-bg line))
+          (t (list color glyph line)))))
 
 (defun remoteterm-tests--cursor-colors-form (type frame-fg frame-bg cursor
                                                  &optional face)
@@ -3722,19 +3767,15 @@ with a default of BOX-COLOR."
 
 (rd-daemon-deftest remoteterm-tests-cursor-colors
   "A cursor has the cursor color, and a box shows the glyph under it."
-  (let ((rd-gen-trials 30))
+  (let ((rd-gen-trials 40))
     (rd-gen-for-all
      #'remoteterm-tests--cursor-colors-case
      (lambda (case)
-       (pcase-let* ((`(,_type ,frame-fg ,frame-bg ,cursor) case)
-                    ((map :output :code :geometry)
-                     (rd-daemon-eval
-                      (apply #'remoteterm-tests--cursor-colors-form case)))
-                    (color (remoteterm-tests--rgb-pixel
-                            (if (equal cursor frame-bg) frame-fg cursor))))
-         (remoteterm-tests--check-cursor-colors
-          output code geometry color
-          (remoteterm-tests--rgb-pixel frame-bg)))))))
+       (pcase-let (((map :output :code :geometry)
+                    (rd-daemon-eval
+                     (apply #'remoteterm-tests--cursor-colors-form case))))
+         (apply #'remoteterm-tests--check-cursor-colors output code geometry
+                (apply #'remoteterm-tests--expected-cursor-colors case)))))))
 
 (defconst remoteterm-tests--cursor-on-face-cases
   '(;; A box swaps the colors, so it differs from the text.
@@ -3762,40 +3803,63 @@ Each case is (FACE BOX-COLOR GLYPH-COLOR LINE-COLOR), as for
             (apply #'remoteterm-tests--check-cursor-colors
                    output code geometry colors)))))))
 
-(defun remoteterm-tests--fringe-colors-form (fg bg)
-  "Return a form for the daemon that draws a bitmap, and removes it.
-The `fringe' face of the frame has the foreground FG and the background
-BG, each a list of three 8-bit components.  The value of the form is as
-for `remoteterm-tests--fringe-form'."
+;; The bitmaps of a fringe colors test.  They have different shapes.
+(defconst remoteterm-tests--color-bitmaps
+  '(right-arrow left-arrow up-arrow down-arrow right-triangle))
+
+(defun remoteterm-tests--fringe-colors-case ()
+  "Return random arguments for `remoteterm-tests--fringe-colors-form'.
+The two colors are often equal."
+  (append (list (rd-gen-element '(left-fringe right-fringe))
+                (rd-gen-element remoteterm-tests--color-bitmaps))
+          (remoteterm-tests--color-list 2)))
+
+(defun remoteterm-tests--fringe-colors-form (side bitmap fg bg)
+  "Return a form for the daemon that draws BITMAP in a fringe, and removes it.
+SIDE is `left-fringe' or `right-fringe'.  The `fringe' face of the
+frame has the foreground FG and the background BG, each a list of three
+8-bit components.  The value of the form is a plist.  :draw-output and
+:remove-output are the bytes of each draw.  :fringe-x is the left edge
+of the fringe of SIDE, and :fringe-width is its width.  :top is as for
+`remoteterm-tests--geometry-form'."
   (remoteterm-tests--frame-form
    '((width . 40))
    `(progn
       (set-face-attribute 'fringe frame
                           :foreground ,(remoteterm-tests--rgb-string fg)
                           :background ,(remoteterm-tests--rgb-string bg))
-      (insert (propertize "x" 'display '(left-fringe right-arrow)) "abc\n"))
+      (insert (propertize "x" 'display '(,side ,bitmap)) "abc\n"))
    `(progn
       (with-current-buffer buffer
         (remove-text-properties 1 2 '(display nil)))
       (redisplay t)
-      (list :draw-output output
-            :remove-output (remote-display--take-output display)
-            :geometry ,(remoteterm-tests--geometry-form)
-            :fringe (car (window-fringes window))))))
+      (let ((edges (window-inside-pixel-edges window)))
+        (list :draw-output output
+              :remove-output (remote-display--take-output display)
+              :top (nth 1 edges)
+              :fringe-width ,(if (eq side 'left-fringe)
+                                 '(car (window-fringes window))
+                               '(cadr (window-fringes window)))
+              :fringe-x ,(if (eq side 'left-fringe)
+                             '(- (nth 0 edges) (car (window-fringes window)))
+                           '(nth 2 edges)))))))
 
 (rd-daemon-deftest remoteterm-tests-fringe-colors
   "A bitmap and the clear of its area have the colors of the fringe face."
-  (let ((rd-gen-trials 10))
+  (let ((rd-gen-trials 15))
     (rd-gen-for-all
-     (lambda () (list (remoteterm-tests--rgb) (remoteterm-tests--rgb)))
-     (lambda (colors)
-       (pcase-let* ((`(,fg ,bg) colors)
-                    ((map :draw-output :remove-output :fringe
-                          (:geometry (map :x0 :top)))
+     #'remoteterm-tests--fringe-colors-case
+     (lambda (case)
+       (pcase-let* ((`(,_side ,_bitmap ,fg ,bg) case)
+                    ((map :draw-output :remove-output :top :fringe-x
+                          :fringe-width)
                      (rd-daemon-eval
-                      (apply #'remoteterm-tests--fringe-colors-form colors)))
+                      (apply #'remoteterm-tests--fringe-colors-form case)))
+                    ;; The bitmap is at the center of the fringe and of
+                    ;; the line, so find it by its fringe.
                     (bitmap (seq-find (lambda (fields)
-                                        (< (plist-get fields :x) x0))
+                                        (<= fringe-x (plist-get fields :x)
+                                            (+ fringe-x fringe-width -1)))
                                       (remoteterm-tests--fringes
                                        draw-output))))
          (should bitmap)
@@ -3804,44 +3868,61 @@ for `remoteterm-tests--fringe-form'."
          (should (= (plist-get bitmap :background)
                     (remoteterm-tests--rgb-pixel bg)))
          (should (seq-some (lambda (fields)
-                             (and (= (plist-get fields :x) (- x0 fringe))
+                             (and (= (plist-get fields :x) fringe-x)
                                   (= (plist-get fields :y) top)
                                   (= (plist-get fields :color)
                                      (remoteterm-tests--rgb-pixel bg))))
                            (remoteterm-tests--of-type 'clear-area
                                                       remove-output))))))))
 
-(ert-deftest remoteterm-tests-fringe-cursor-color ()
+(rd-daemon-deftest remoteterm-tests-fringe-cursor-color
   "A cursor in the fringe has the cursor color."
-  (skip-unless (featurep 'remote-test))
-  (rd-with-daemon
-    (pcase-let* (((map :first-output)
-                  (rd-daemon-eval
-                   (remoteterm-tests--full-line-form
-                    'left-to-right '(point-max) nil
-                    '(set-frame-parameter frame 'cursor-color "#a0b0c0"))))
-                 (fields (remoteterm-tests--fringe-cursor first-output)))
-      (should fields)
-      (should (= (plist-get fields :foreground) #xa0b0c0)))))
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda () (remoteterm-tests--color-list 3))
+     (lambda (colors)
+       (pcase-let* ((`(,fg ,bg ,cursor) colors)
+                    ((map :first-output)
+                     (rd-daemon-eval
+                      (remoteterm-tests--full-line-form
+                       'left-to-right '(point-max) nil
+                       `(modify-frame-parameters
+                         frame
+                         '((foreground-color
+                            . ,(remoteterm-tests--rgb-string fg))
+                           (background-color
+                            . ,(remoteterm-tests--rgb-string bg))
+                           (cursor-color
+                            . ,(remoteterm-tests--rgb-string cursor)))))))
+                    (fields (remoteterm-tests--fringe-cursor first-output)))
+         (should fields)
+         (should (= (plist-get fields :foreground)
+                    (remoteterm-tests--rgb-pixel
+                     (if (equal cursor bg) fg cursor)))))))))
 
-(ert-deftest remoteterm-tests-fringe-overlay-cursor-color ()
+(rd-daemon-deftest remoteterm-tests-fringe-overlay-cursor-color
   "A bitmap on a box cursor in the fringe has the background of the face."
-  (skip-unless (featurep 'remote-test))
-  (rd-with-daemon
-    (pcase-let* (((map :first-output)
-                  (rd-daemon-eval
-                   (remoteterm-tests--full-line-form
-                    'left-to-right '(point-max) nil
-                    '(progn
-                       (setq indicate-buffer-boundaries 'right)
-                       (set-face-attribute 'fringe frame
-                                           :background "#0a0b0c")))))
-                 (fields (seq-find (lambda (fields)
-                                     (and (= (plist-get fields :cursor) 1)
-                                          (= (plist-get fields :overlay) 1)))
-                                   (remoteterm-tests--fringes first-output))))
-      (should fields)
-      (should (= (plist-get fields :foreground) #x0a0b0c)))))
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     #'remoteterm-tests--rgb
+     (lambda (bg)
+       (pcase-let* (((map :first-output)
+                     (rd-daemon-eval
+                      (remoteterm-tests--full-line-form
+                       'left-to-right '(point-max) nil
+                       `(progn
+                          (setq indicate-buffer-boundaries 'right)
+                          (set-face-attribute
+                           'fringe frame
+                           :background ,(remoteterm-tests--rgb-string bg))))))
+                    (fields (seq-find (lambda (fields)
+                                        (and (= (plist-get fields :cursor) 1)
+                                             (= (plist-get fields :overlay) 1)))
+                                      (remoteterm-tests--fringes
+                                       first-output))))
+         (should fields)
+         (should (= (plist-get fields :foreground)
+                    (remoteterm-tests--rgb-pixel bg))))))))
 
 ;;;; Fonts
 
@@ -3873,10 +3954,50 @@ for `remoteterm-tests--fringe-form'."
            (should (equal (remote-display--file-hash file)
                           (remoteterm-tests--sha256 file)))))
       (delete-file file))
-    (should (equal (remote-display--file-hash file) []))))
+    ;; A file that does not exist, a file that cannot be read, and a
+    ;; file name that is not a string have no hash.
+    (should (equal (remote-display--file-hash file) []))
+    (should (equal (remote-display--file-hash temporary-file-directory) []))
+    (should (equal (remote-display--file-hash nil) []))))
+
+(declare-function remote-display--set-font-file "remotetest.c" (font file))
+
+(defun remoteterm-tests--unreadable-fonts-form ()
+  "Return a form for the daemon that draws with two fonts with no file.
+The two fonts are of different files and have the same size.  Before
+the first draw, the form changes the file name of each font to a file
+that does not exist.  The value of the form is the bytes that the
+session sent."
+  (remoteterm-tests--frame-form
+   '((width . 30))
+   '(let ((fonts nil))
+      (dolist (entity (list-fonts (font-spec) frame))
+        (let ((font (and (< (length fonts) 2) (open-font entity 23 frame))))
+          (when (and font
+                     (not (member (aref (font-info font frame) 12)
+                                  (mapcar #'cdr fonts))))
+            (push (cons font (aref (font-info font frame) 12)) fonts))))
+      (pcase-dolist (`(,font . ,_file) fonts)
+        (remote-display--set-font-file font "/nonexistent/font.ttf")
+        (insert (propertize "abc" 'face (list :font font)) "\n")))
+   'output))
+
+(ert-deftest remoteterm-tests-unreadable-fonts ()
+  "Two fonts with no file have an empty hash, and different IDs."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (let* ((output (rd-daemon-eval (remoteterm-tests--unreadable-fonts-form)))
+           (definitions (seq-filter
+                         (lambda (fields) (equal (plist-get fields :hash) []))
+                         (remoteterm-tests--of-type 'define-font output))))
+      (remoteterm-tests--check-font-definitions
+       (remoteterm-tests--messages output))
+      (should (= (length definitions) 2))
+      (should (/= (plist-get (nth 0 definitions) :font)
+                  (plist-get (nth 1 definitions) :font))))))
 
 (defun remoteterm-tests--check-font-definitions (messages)
-  "Check law 35 for MESSAGES, which start with an attach.
+  "Check laws 35 and 36 for MESSAGES, which start with an attach.
 Return the alist of the define-font fields of each font ID."
   (let ((defined nil))
     (dolist (message messages (nreverse defined))
@@ -3884,9 +4005,23 @@ Return the alist of the define-font fields of each font ID."
         (pcase (car message)
           ('define-font
            (should-not (assq id defined))
+           ;; A file that the server can read gives one ID to a font.
+           (unless (equal (plist-get (cdr message) :hash) [])
+             (should-not (rassoc (remoteterm-tests--font-identity
+                                  (cdr message))
+                                 (mapcar (lambda (entry)
+                                           (cons (car entry)
+                                                 (remoteterm-tests--font-identity
+                                                  (cdr entry))))
+                                         defined))))
            (push (cons id (cdr message)) defined))
           ('draw-glyphs
            (should (assq id defined))))))))
+
+(defun remoteterm-tests--font-identity (fields)
+  "Return the list of the hash, the index, and the size in FIELDS."
+  (list (plist-get fields :hash) (plist-get fields :index)
+        (plist-get fields :size)))
 
 (defun remoteterm-tests--font-identity-form ()
   "Return a form for the daemon that draws text in two sizes, twice.
@@ -3974,36 +4109,75 @@ font."
       (should (> index 0))
       (should (memq index indexes)))))
 
-(ert-deftest remoteterm-tests-font-opened-again ()
-  "A font that Emacs opens again keeps its ID and its definition."
-  (skip-unless (featurep 'remote-test))
-  (rd-with-daemon
-    (pcase-let* (((map :output :again)
-                  (rd-daemon-eval
-                   (remoteterm-tests--frame-form
-                    '((width . 30))
-                    '(insert "abc")
-                    '(progn
-                       (clear-font-cache)
-                       (redraw-frame frame)
-                       (redisplay t)
-                       (list :output output
-                             :again (remote-display--take-output display))))))
-                 (definitions (remoteterm-tests--check-font-definitions
-                               (remoteterm-tests--messages output)))
-                 (messages (remoteterm-tests--messages again)))
-      (should (assq 'draw-glyphs messages))
-      (should-not (assq 'define-font messages))
-      (dolist (fields (remoteterm-tests--of-type 'draw-glyphs again))
-        (should (assq (plist-get fields :font) definitions))))))
+(defun remoteterm-tests--faces-case ()
+  "Return a random list of 1 to 4 faces, each a list of face attributes."
+  (cl-loop repeat (rd-gen-integer 1 4)
+           collect (append
+                    (list :height (rd-gen-element '(0.8 1.0 1.5 2.0)))
+                    (let ((family (rd-gen-element
+                                   '(nil "Monospace" "Sans" "Serif"))))
+                      (and family (list :family family))))))
+
+(defun remoteterm-tests--reopened-fonts-form (faces)
+  "Return a form for the daemon that draws a line in each of FACES, three times.
+The session draws once, then again after a new attach, and then again
+after Emacs opens its fonts again.  The value of the form is a plist.
+:output, :again, and :reopened are the bytes of each draw."
+  (remoteterm-tests--frame-form
+   '((width . 30))
+   `(dolist (face ',faces)
+      (insert (propertize "abc" 'face face) "\n"))
+   '(cl-flet ((draw ()
+                (redraw-frame frame)
+                (redisplay t)
+                (remote-display--take-output display)))
+      (list :output output
+            :again (progn (remote-display--record display) (draw))
+            :reopened (progn (clear-font-cache) (draw))))))
+
+(defun remoteterm-tests--line-fonts (bytes)
+  "Return the sorted list of (Y . FONT) of the draw-glyphs messages in BYTES."
+  (sort (seq-uniq (mapcar (lambda (fields)
+                            (cons (plist-get fields :y)
+                                  (plist-get fields :font)))
+                          (remoteterm-tests--of-type 'draw-glyphs bytes)))
+        :lessp (lambda (a b) (or (< (car a) (car b))
+                                 (and (= (car a) (car b))
+                                      (< (cdr a) (cdr b)))))))
+
+(defun remoteterm-tests--sorted-definitions (definitions)
+  "Return DEFINITIONS, an alist with font IDs as keys, sorted by ID."
+  (sort (copy-sequence definitions) :key #'car))
+
+(rd-daemon-deftest remoteterm-tests-font-kept
+  "A font keeps its ID after a new attach, and after Emacs opens it again."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     #'remoteterm-tests--faces-case
+     (lambda (faces)
+       (pcase-let* (((map :output :again :reopened)
+                     (rd-daemon-eval
+                      (remoteterm-tests--reopened-fonts-form faces)))
+                    (definitions (remoteterm-tests--check-font-definitions
+                                  (remoteterm-tests--messages output))))
+         (should (equal (remoteterm-tests--sorted-definitions
+                         (remoteterm-tests--check-font-definitions
+                          (remoteterm-tests--messages again)))
+                        (remoteterm-tests--sorted-definitions definitions)))
+         (should-not (remoteterm-tests--of-type 'define-font reopened))
+         (should (remoteterm-tests--of-type 'draw-glyphs reopened))
+         (should (equal (remoteterm-tests--line-fonts again)
+                        (remoteterm-tests--line-fonts output)))
+         (should (equal (remoteterm-tests--line-fonts reopened)
+                        (remoteterm-tests--line-fonts output))))))))
 
 (ert-deftest remoteterm-tests-fonts-of-frames ()
-  "The frames of a session share the definitions of their fonts."
+  "The frames of a session have the same definitions of their fonts."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
-    (let ((counts
+    (let ((definitions
            (mapcar (lambda (frames)
-                     (length
+                     (remoteterm-tests--sorted-definitions
                       (remoteterm-tests--check-font-definitions
                        (remoteterm-tests--messages
                         (plist-get
@@ -4012,7 +4186,8 @@ font."
                            (remoteterm-tests--distinct-texts frames)))
                          :output)))))
                    '(1 3))))
-      (should (= (car counts) (cadr counts))))))
+      (should (car definitions))
+      (should (equal (car definitions) (cadr definitions))))))
 
 ;;;; Frame memory and focus
 
