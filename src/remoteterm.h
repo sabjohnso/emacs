@@ -184,6 +184,9 @@ extern void *remote_sink_data (struct remote_display_info *,
 extern bool remote_file_hash (Lisp_Object, unsigned char *);
 extern void syms_of_remoteterm (void);
 
+/* Defined in remoteproc.c.  */
+extern void syms_of_remoteproc (void);
+
 /* Defined in remotetest.c.  */
 extern void syms_of_remotetest (void);
 

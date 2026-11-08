@@ -4313,6 +4313,322 @@ after Emacs opens its fonts again.  The value of the form is a plist.
       (should (car definitions))
       (should (equal (car definitions) (cadr definitions))))))
 
+;;;; Transport
+
+(rd-daemon-deftest remoteterm-tests-process-sink
+  "A network process gets the same bytes as a recording client."
+  (let ((rd-gen-trials 6))
+    (rd-gen-for-all
+     #'remoteterm-tests--process-sink-case
+     (lambda (case)
+       (pcase-let (((map :recorded :received)
+                    (rd-daemon-eval
+                     (apply #'remoteterm-tests--process-sink-form case))))
+         (should (> (length recorded) 0))
+         (should (equal received recorded)))))))
+
+;; The messages of the errors of `remote-display-attach'.
+(defconst remoteterm-tests--attach-errors
+  '((closed . "The process is not a live network connection")
+    (attached . "The process is already the client of a session")))
+
+(ert-deftest remoteterm-tests-attach-needs-connection ()
+  "A session attaches only a network connection, and not a server."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (rd-daemon-eval (remoteterm-tests--bad-attach-form))
+                   (list '(wrong-type-argument processp process)
+                         (cons 'error (alist-get 'closed
+                                                 remoteterm-tests--attach-errors))
+                         (cons 'error (alist-get 'closed
+                                                 remoteterm-tests--attach-errors)))))))
+
+(defun remoteterm-tests--bad-attach-form ()
+  "Return a form for the daemon that attaches three bad clients.
+The clients are a symbol, a pipe process, and a server.  The value of
+the form is the list of the errors."
+  `(cl-flet ((attach (process)
+               (condition-case err
+                   (progn (remote-display-attach "remote-attach" process) nil)
+                 (error (if (stringp (cadr err))
+                            (cons (car err) (cadr err))
+                          err)))))
+     (x-open-connection "remote-attach")
+     (unwind-protect
+         (list (attach 'process)
+               (let ((process (make-pipe-process :name "rd-pipe")))
+                 (prog1 (attach process) (delete-process process)))
+               ,(remoteterm-tests--socket-pair-form '(attach server)))
+       (x-close-connection "remote-attach"))))
+
+(rd-daemon-deftest remoteterm-tests-attach-sequence
+  "Each draw goes to the connection that a model of the attaches gives.
+The operations attach, detach, draw, and close two connections.  A
+refused attach keeps the client.  A process can attach again after a
+detach.  A closed connection gets no bytes, and the session gives no
+error."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     #'remoteterm-tests--attach-operations
+     (lambda (operations)
+       (pcase-let* ((`(,expected . ,errors)
+                     (remoteterm-tests--attach-model operations))
+                    ((map :received :refused :first :later)
+                     (rd-daemon-eval
+                      (remoteterm-tests--attach-sequence-form operations))))
+         (should (> (length later) 0))
+         (should (equal refused
+                        (mapcar (lambda (error)
+                                  (cons (car error)
+                                        (alist-get
+                                         (cdr error)
+                                         remoteterm-tests--attach-errors)))
+                                errors)))
+         (dolist (name '(a b))
+           (should (equal (alist-get name received)
+                          (mapconcat (lambda (draw)
+                                       (if (eq draw 'first) first later))
+                                     (alist-get name expected))))))))))
+
+(defun remoteterm-tests--attach-operations ()
+  "Return a random list of operations on the connections A and B.
+An operation is (attach NAME), (detach), (draw), (close NAME) or
+\(close-peer NAME).  close closes the connection on the side of the
+session.  close-peer closes the other end, and then draws."
+  (cl-loop repeat (rd-gen-integer 1 12)
+           collect (pcase (rd-gen-random 6)
+                     ((or 0 1) (list 'attach (rd-gen-element '(a b))))
+                     (2 '(detach))
+                     (3 '(draw))
+                     (_ (list (rd-gen-element '(close close-peer))
+                              (rd-gen-element '(a b)))))))
+
+(defun remoteterm-tests--attach-model (operations)
+  "Return the model of the draws and errors of OPERATIONS.
+The value is (EXPECTED . ERRORS).  EXPECTED is an alist from each
+connection name to the list of its draws.  A draw is `first' if it is
+the first draw after an attach, and `later' if not.  ERRORS is the
+list of (INDEX . KIND) of each refused attach, where INDEX is the
+position of the operation and KIND is a key of
+`remoteterm-tests--attach-errors'."
+  (let ((client nil) (fresh nil) (closed nil) (draws nil) (errors nil)
+        (index 0))
+    (cl-flet ((draw ()
+                (when (and client (not (memq client closed)))
+                  (push (if fresh 'first 'later) (alist-get client draws))
+                  (setq fresh nil))))
+      (dolist (operation operations)
+        (pcase operation
+          (`(attach ,name)
+           (cond ((memq name closed) (push (cons index 'closed) errors))
+                 ((eq name client) (push (cons index 'attached) errors))
+                 (t (setq client name fresh t))))
+          ('(detach) (setq client nil))
+          ('(draw) (draw))
+          (`(close ,name) (push name closed))
+          (`(close-peer ,name) (push name closed) (draw)))
+        (cl-incf index)))
+    (cons (mapcar (lambda (name)
+                    (cons name (reverse (alist-get name draws))))
+                  '(a b))
+          (nreverse errors))))
+
+(defun remoteterm-tests--attach-sequence-form (operations)
+  "Return a form for the daemon that does OPERATIONS on a session.
+The value of the form is a plist.  :received is an alist from each
+connection name to the bytes that it got.  :refused is the list of
+\(INDEX . MESSAGE) of each refused attach.  :first and :later are the
+bytes of the first draw after an attach and of a later draw, from a
+recording client."
+  (remoteterm-tests--frame-form
+   '((width . 40) (height . 10))
+   '(insert "abc\ndef\n")
+   `(remoteterm-tests--run-attaches ',operations display frame)))
+
+(defun remoteterm-tests--run-attaches (operations display frame)
+  "Do OPERATIONS on the session DISPLAY, which shows FRAME.
+The value is as for `remoteterm-tests--attach-sequence-form'.  Each
+draw is small, so the connections take all the bytes with no read
+until the end."
+  (cl-flet ((draw ()
+              (redraw-frame frame)
+              (redisplay t)
+              (remote-display--take-output display)))
+    (remote-display--record display)
+    (let ((first (draw))
+          (later (draw))
+          (refused nil)
+          (index 0))
+      (remote-display--detach display)
+      (remoteterm-tests--with-connections
+       '(a b)
+       (lambda (connections)
+         (cl-flet ((side (name key) (plist-get (alist-get name connections) key))
+                   (redraw () (redraw-frame frame) (redisplay t)))
+           (dolist (operation operations)
+             (pcase operation
+               (`(attach ,name)
+                (condition-case err
+                    (remote-display-attach display (side name :server-side))
+                  (error (push (cons index (cadr err)) refused))))
+               ('(detach) (remote-display--detach display))
+               ('(draw) (redraw))
+               (`(close ,name) (delete-process (side name :server-side)))
+               (`(close-peer ,name)
+                (remoteterm-tests--drain (side name :client-side)
+                                         (side name :chunks))
+                (delete-process (side name :client-side))
+                (redraw)
+                (remoteterm-tests--wait-closed (side name :server-side))))
+             (cl-incf index))
+           (remote-display--detach display)
+           (list :received
+                 (mapcar (lambda (name)
+                           (cons name (remoteterm-tests--drain
+                                       (side name :client-side)
+                                       (side name :chunks))))
+                         '(a b))
+                 :refused (nreverse refused)
+                 :first first
+                 :later later)))))))
+
+(defun remoteterm-tests--with-connections (names function)
+  "Call FUNCTION with a connection on a local socket for each of NAMES.
+The argument of FUNCTION is an alist from each name to a plist.
+:server-side is the connection that the server accepted, :client-side
+is the other end, and :chunks is a function that gives the strings
+that the other end got, the last first."
+  (let* ((socket (make-temp-name
+                  (expand-file-name "rd-socket" temporary-file-directory)))
+         (accepted nil)
+         (server (make-network-process
+                  :name "rd-server" :server t :family 'local
+                  :service socket :coding 'binary
+                  :log (lambda (_server connection _message)
+                         (push connection accepted))))
+         (connections nil))
+    (unwind-protect
+        (progn
+          (dolist (name names)
+            (let* ((chunks (list nil))
+                   (client-side
+                    (make-network-process
+                     :name "rd-client" :family 'local
+                     :service socket :coding 'binary
+                     :filter (lambda (_process string)
+                               (push string (car chunks))))))
+              (with-timeout (10 (error "The server accepted no connection"))
+                (while (< (length accepted) (1+ (length connections)))
+                  (accept-process-output nil 0.05)))
+              (push (list name
+                          :server-side (car accepted)
+                          :client-side client-side
+                          :chunks (lambda () (car chunks)))
+                    connections)))
+          (funcall function (nreverse connections)))
+      (dolist (connection connections)
+        (delete-process (plist-get (cdr connection) :server-side))
+        (delete-process (plist-get (cdr connection) :client-side)))
+      (delete-process server)
+      (delete-file socket))))
+
+(defun remoteterm-tests--wait-closed (process)
+  "Read until Emacs sees that the other end of PROCESS is closed."
+  (with-timeout (10 (error "The connection did not close"))
+    (while (process-live-p process)
+      (accept-process-output nil 0.05))))
+
+(defun remoteterm-tests--drain (process chunks)
+  "Read from PROCESS until it gets no more bytes, and return all its bytes.
+CHUNKS is a function that gives the strings that PROCESS got, the last
+first."
+  (when (process-live-p process)
+    (while (accept-process-output process 0.1)))
+  (string-to-unibyte (apply #'concat (reverse (funcall chunks)))))
+
+(defun remoteterm-tests--process-sink-case ()
+  "Return a random list of (LINES REDRAWS).
+LINES is a list of lines of text, and REDRAWS is the number of
+redraws of the frame before the other end reads.  Half of the cases
+have many redraws, so the bytes fill the buffer of the socket, and the
+session must keep the bytes that the connection cannot take."
+  (list (cl-loop repeat (rd-gen-integer 1 30)
+                 collect (remoteterm-tests--text))
+        (if (zerop (rd-gen-random 2))
+            (rd-gen-integer 1 3)
+          (rd-gen-integer 30 60))))
+
+(defun remoteterm-tests--process-sink-form (lines redraws)
+  "Return a form for the daemon that draws LINES to two clients.
+The frame draws REDRAWS times to a recording client, and then REDRAWS
+times to a network process.  The other end of the connection reads
+only after the last draw.  The value of the form is a plist.
+:recorded is the bytes of the recording client, and :received is
+the bytes that the other end got."
+  (remoteterm-tests--frame-form
+   '((width . 80) (height . 40))
+   `(dolist (line ',lines) (insert line "\n"))
+   (remoteterm-tests--socket-pair-form
+    `(cl-flet ((draw ()
+                 (dotimes (_ ,redraws)
+                   (redraw-frame frame)
+                   (redisplay t))))
+       (unwind-protect
+           (progn
+             (remote-display--record display)
+             (draw)
+             (let ((recorded (remote-display--take-output display)))
+               (remote-display-attach display server-side)
+               (draw)
+               (remoteterm-tests--read-until client-side
+                                             (lambda () received)
+                                             (length recorded))
+               (list :recorded recorded
+                     :received (string-to-unibyte
+                                (apply #'concat (reverse received))))))
+         (remote-display--detach display))))))
+
+(defun remoteterm-tests--socket-pair-form (body)
+  "Return a form that evaluates BODY with a connection on a local socket.
+BODY can use the variables SERVER-SIDE, the connection that the server
+accepted, and CLIENT-SIDE, the other end.  The list RECEIVED has the
+strings that CLIENT-SIDE got, the last first.  The value of the form
+is the value of BODY."
+  `(let* ((socket (make-temp-name
+                   (expand-file-name "rd-socket" temporary-file-directory)))
+          (server-side nil)
+          (received nil)
+          (server (make-network-process
+                   :name "rd-server" :server t :family 'local
+                   :service socket :coding 'binary
+                   :log (lambda (_server connection _message)
+                          (setq server-side connection))))
+          (client-side (make-network-process
+                        :name "rd-client" :family 'local
+                        :service socket :coding 'binary
+                        :filter (lambda (_process string)
+                                  (push string received)))))
+     (unwind-protect
+         (progn
+           (with-timeout (10 (error "The server accepted no connection"))
+             (while (not server-side)
+               (accept-process-output nil 0.05)))
+           ,body)
+       (when server-side
+         (delete-process server-side))
+       (delete-process client-side)
+       (delete-process server)
+       (delete-file socket))))
+
+(defun remoteterm-tests--read-until (process received size)
+  "Read from PROCESS until the strings that RECEIVED gives have SIZE bytes.
+RECEIVED is a function with no arguments.  Then read once more, so
+that extra bytes also arrive.  Stop after 10 seconds."
+  (with-timeout (10)
+    (while (< (apply #'+ (mapcar #'length (funcall received))) size)
+      (accept-process-output process 0.05)))
+  (accept-process-output process 0.05))
+
 ;;;; Frame memory and focus
 
 (defconst remoteterm-tests--memory-cycles 300

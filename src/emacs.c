@@ -2426,6 +2426,7 @@ Using an Emacs configured with --with-x-toolkit=lucid does not have this problem
 #endif /* HAVE_PGTK */
 #ifdef HAVE_REMOTE_DISPLAY
       syms_of_remoteterm ();
+      syms_of_remoteproc ();
       syms_of_fontset ();
 #endif /* HAVE_REMOTE_DISPLAY */
 #ifdef HAVE_REMOTE_DISPLAY_TESTS
