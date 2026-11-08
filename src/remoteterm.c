@@ -89,8 +89,12 @@ static bool remote_defined_color (struct frame *, const char *,
 				  Emacs_Color *, bool, bool);
 static void remote_set_cursor_type (struct frame *, Lisp_Object, Lisp_Object);
 static struct redisplay_interface remote_redisplay_interface;
-static void remote_send (struct remote_display_info *,
-			 const struct rd_message *);
+static void remote_send_message (struct remote_display_info *,
+				 const struct rd_message *);
+static void remote_send_draw (struct frame *, const struct rd_message *);
+static void remote_define_frame (struct frame *);
+static void remote_undefine_frames (struct remote_display_info *);
+static void remote_send_delete_frame (struct frame *);
 static void remote_flush_frame (struct frame *);
 static void remote_clear_glyph_string (struct glyph_string *);
 static Emacs_Rectangle remote_glyph_clip (struct glyph_string *);
@@ -395,10 +399,11 @@ struct remote_sink
 };
 
 /* Send MESSAGE to the client of DPYINFO.  Do nothing if no client is
-   attached.  */
+   attached.  A draw on a frame must go through remote_send_draw
+   instead, so the client knows the frame first.  */
 static void
-remote_send (struct remote_display_info *dpyinfo,
-	     const struct rd_message *message)
+remote_send_message (struct remote_display_info *dpyinfo,
+		     const struct rd_message *message)
 {
   struct remote_sink *sink = dpyinfo->sink;
   if (!sink)
@@ -409,6 +414,67 @@ remote_send (struct remote_display_info *dpyinfo,
   rd_encode (message, bytes);
   sink->ops->write (sink->data, bytes, size);
   SAFE_FREE ();
+}
+
+/* Send MESSAGE, a draw on the frame F, to the client of F.  First
+   tell the client about F, if it does not know F or its size.  */
+static void
+remote_send_draw (struct frame *f, const struct rd_message *message)
+{
+  remote_define_frame (f);
+  remote_send_message (FRAME_DISPLAY_INFO (f), message);
+}
+
+/* Send a define-frame message for F, if the client of F does not know
+   F or its size.  With no client, the session sends nothing, and the
+   next attach marks F as unknown again.  */
+static void
+remote_define_frame (struct frame *f)
+{
+  struct remote_output *output = FRAME_REMOTE_OUTPUT (f);
+  int width = FRAME_PIXEL_WIDTH (f);
+  int height = FRAME_PIXEL_HEIGHT (f);
+  if (output->defined && output->defined_width == width
+      && output->defined_height == height)
+    return;
+  struct rd_message message =
+    {
+      .type = RD_DEFINE_FRAME,
+      .u.define_frame = { .frame = remote_frame_id (f),
+			  .width = width, .height = height },
+    };
+  remote_send_message (FRAME_DISPLAY_INFO (f), &message);
+  output->defined = true;
+  output->defined_width = width;
+  output->defined_height = height;
+}
+
+/* Send a delete-frame message for F, if the client of F knows F.  F
+   is not usable after this call.  */
+static void
+remote_send_delete_frame (struct frame *f)
+{
+  if (!FRAME_REMOTE_OUTPUT (f)->defined)
+    return;
+  struct rd_message message =
+    {
+      .type = RD_DELETE_FRAME,
+      .u.delete_frame = { .frame = remote_frame_id (f) },
+    };
+  remote_send_message (FRAME_DISPLAY_INFO (f), &message);
+}
+
+/* Mark each frame of DPYINFO as unknown to the client.  */
+static void
+remote_undefine_frames (struct remote_display_info *dpyinfo)
+{
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+      if (FRAME_REMOTE_P (f) && FRAME_DISPLAY_INFO (f) == dpyinfo)
+	FRAME_REMOTE_OUTPUT (f)->defined = false;
+    }
 }
 
 /* Tell the sink of F that the messages so far form a whole, and must
@@ -452,7 +518,8 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
   struct remote_sink *old = dpyinfo->sink;
   dpyinfo->sink = sink;
 
-  /* A new client has no font definitions.  */
+  /* A new client has no font or frame definitions.  */
+  remote_undefine_frames (dpyinfo);
   if (dpyinfo->font_defined)
     memset (dpyinfo->font_defined, 0, dpyinfo->font_defined_size);
   if (old)
@@ -927,6 +994,8 @@ remote_frame_visible_invisible (struct frame *f, bool visible)
 static void
 remote_delete_frame (struct frame *f)
 {
+  remote_send_delete_frame (f);
+  remote_flush_frame (f);
   remote_free_frame_resources (f);
 }
 
@@ -1025,7 +1094,7 @@ remote_scroll_run (struct window *w, struct run *run)
 		       .width = width, .height = rows, .to_x = x,
 		       .to_y = to_y },
     };
-  remote_send (FRAME_DISPLAY_INFO (f), &message);
+  remote_send_draw (f, &message);
 }
 
 /* Return the number of the HEIGHT rows from *FROM that can go to *TO in
@@ -1111,7 +1180,7 @@ remote_draw_fringe_bitmap (struct window *w, struct glyph_row *row,
   int right_pixels = p->bitmap_wd - p->wd;
   for (int i = 0; i < m->nrows; i++)
     m->rows[i] = p->bits[p->dh + first + i] >> right_pixels;
-  remote_send (FRAME_DISPLAY_INFO (f), &message);
+  remote_send_draw (f, &message);
 }
 
 /* Set *FIRST and *END to the first row of P to send, and to the row
@@ -1343,7 +1412,7 @@ remote_send_glyphs (struct glyph_string *s, int start, int n, int x, int y)
   m->nglyphs = n;
   for (int i = 0; i < n; i++)
     m->glyphs[i] = s->char2b[start + i];
-  remote_send (FRAME_DISPLAY_INFO (s->f), &message);
+  remote_send_draw (s->f, &message);
 }
 
 /* Return the font ID of the font ENTRY.  */
@@ -1461,7 +1530,7 @@ remote_define_font (struct remote_display_info *dpyinfo, Lisp_Object entry)
 			 .nhash = SBYTES (hash) },
     };
   memcpy (message.u.define_font.hash, SDATA (hash), SBYTES (hash));
-  remote_send (dpyinfo, &message);
+  remote_send_message (dpyinfo, &message);
 
   if (dpyinfo->font_defined_size <= id)
     {
@@ -1502,7 +1571,7 @@ remote_fill_area (struct frame *f, int x, int y, int width, int height,
       .u.clear_area = { .frame = remote_frame_id (f), .x = x, .y = y,
 			.width = width, .height = height, .color = color },
     };
-  remote_send (FRAME_DISPLAY_INFO (f), &message);
+  remote_send_draw (f, &message);
 }
 
 /* Draw the cursor of W.  Redisplay erases a cursor by a draw of the
@@ -1574,7 +1643,7 @@ remote_send_cursor (struct window *w, struct glyph_row *row,
 			 .kind = remote_cursor_kind (cursor_type),
 			 .color = remote_cursor_color (f, glyph, cursor_type) },
     };
-  remote_send (FRAME_DISPLAY_INFO (f), &message);
+  remote_send_draw (f, &message);
   return true;
 }
 

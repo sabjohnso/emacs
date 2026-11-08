@@ -451,6 +451,15 @@ OPEN-NAMES is the model: the names that are open before OPERATION."
 ;;;; Drawing
 
 (defun remoteterm-tests--messages (bytes)
+  "Return the list of messages in BYTES, without the frame messages.
+The drawing tests check draws, so this list does not have the
+define-frame and delete-frame messages.  The tests of the frame
+messages use `remoteterm-tests--all-messages'."
+  (seq-remove (lambda (message)
+                (memq (car message) '(define-frame delete-frame)))
+              (remoteterm-tests--all-messages bytes)))
+
+(defun remoteterm-tests--all-messages (bytes)
   "Return the list of messages in the unibyte string BYTES."
   (let ((messages nil)
         (start 0))
@@ -4628,6 +4637,158 @@ that extra bytes also arrive.  Stop after 10 seconds."
     (while (< (apply #'+ (mapcar #'length (funcall received))) size)
       (accept-process-output process 0.05)))
   (accept-process-output process 0.05))
+
+;;;; Frame messages
+
+(rd-daemon-deftest remoteterm-tests-frame-messages
+  "A client knows each frame before its draws, and knows its size.
+Each draw of a frame comes after a define-frame message for the frame,
+after the last attach, and the last such message has the size of the
+frame.  A define-frame message does not repeat the size that the
+client knows.  A delete-frame message comes only for a frame that has
+a definition, the session flushes it at once, and no draw of the frame
+comes after it.  After each operation, the frames with a definition
+are the frames of the session, and each definition has the size of
+its frame."
+  (let ((rd-gen-trials 30))
+    (rd-gen-for-all
+     #'remoteterm-tests--frame-operations
+     (lambda (operations)
+       (let ((steps (rd-daemon-eval
+                     `(remoteterm-tests--run-frame-operations
+                       ',operations))))
+         (should (remoteterm-tests--draws (plist-get (car steps) :bytes)))
+         (remoteterm-tests--check-frame-steps steps))))))
+
+(defun remoteterm-tests--frame-operations ()
+  "Return a random list of operations on the frames of a session.
+An operation is (make), (delete I), (resize I WIDTH HEIGHT),
+\(resize-same I), (attach), (attach-delete I) or (draw I).  I selects
+a frame of the session, if it has a frame.  WIDTH and HEIGHT are in
+pixels.  resize-same sets the size that the frame has.  attach-delete
+attaches a client, and then deletes a frame before the client knows
+it."
+  (cl-loop repeat (rd-gen-integer 1 10)
+           collect (pcase (rd-gen-random 7)
+                     (0 '(make))
+                     (1 (list 'delete (rd-gen-random 3)))
+                     (2 (list 'resize (rd-gen-random 3)
+                              (rd-gen-integer 100 900)
+                              (rd-gen-integer 80 700)))
+                     (3 '(attach))
+                     (4 (list 'attach-delete (rd-gen-random 3)))
+                     (5 (list 'resize-same (rd-gen-random 3)))
+                     (_ (list 'draw (rd-gen-random 3))))))
+
+(defun remoteterm-tests--run-frame-operations (operations)
+  "Do OPERATIONS on the frames of a new session, and return the steps.
+The session has one frame and a client at the start.  A session has
+at most three frames.  A delete does nothing to the last frame,
+because Emacs then deletes the terminal.  Each step is a plist.
+:attach is non-nil if the operation attached a new client.  :bytes is
+the bytes that the session sent for the operation and the redisplay
+after it.  :frames is the list of (ID WIDTH HEIGHT) of each frame
+after the step.  :unflushed is the list of the numbers of bytes that
+the session did not flush after each delete of the step."
+  (let ((display "remote-frames")
+        (frames nil)
+        (unflushed nil)
+        (steps nil))
+    (cl-labels
+        ((pick (index)
+           (and frames (nth (mod index (length frames)) frames)))
+         (make ()
+           (let ((frame (x-create-frame-with-faces
+                         '((display . "remote-frames")))))
+             (set-window-buffer (frame-root-window frame)
+                                (generate-new-buffer "frames"))
+             (select-frame frame)
+             (setq frames (append frames (list frame)))))
+         (forget (frame)
+           (kill-buffer (window-buffer (frame-root-window frame)))
+           (delete-frame frame))
+         (delete (index)
+           (when-let* ((frame (and (cdr frames) (pick index))))
+             (setq frames (delq frame frames))
+             (forget frame)
+             (push (remote-display--unflushed-bytes display) unflushed)))
+         (attach ()
+           (remote-display--record display)
+           (mapc #'redraw-frame frames))
+         (operate (operation)
+           (pcase operation
+             ('(make) (when (< (length frames) 3) (make)))
+             (`(delete ,index) (delete index))
+             (`(attach-delete ,index) (attach) (delete index))
+             (`(resize ,index ,width ,height)
+              (when-let* ((frame (pick index)))
+                (set-frame-size frame width height t)))
+             (`(resize-same ,index)
+              (when-let* ((frame (pick index)))
+                (set-frame-size frame (frame-pixel-width frame)
+                                (frame-pixel-height frame) t)))
+             ('(attach) (attach))
+             (`(draw ,index)
+              (when-let* ((frame (pick index)))
+                (with-current-buffer (window-buffer
+                                      (frame-root-window frame))
+                  (insert "abc\n"))))))
+         (step (operation)
+           (setq unflushed nil)
+           (operate operation)
+           (redisplay t)
+           (list :attach (memq (car operation) '(attach attach-delete))
+                 :bytes (remote-display--take-output display)
+                 :frames (mapcar (lambda (frame)
+                                   (list (remoteterm-tests--frame-id frame)
+                                         (frame-pixel-width frame)
+                                         (frame-pixel-height frame)))
+                                 frames)
+                 :unflushed unflushed)))
+      (x-open-connection display)
+      (unwind-protect
+          (progn
+            (make)
+            (dolist (operation (cons '(attach) operations))
+              (push (step operation) steps)))
+        (mapc #'forget frames)
+        (when (remoteterm-tests--terminal display)
+          (x-close-connection display))))
+    (nreverse steps)))
+
+(defun remoteterm-tests--draws (bytes)
+  "Return the messages in BYTES that draw on a frame."
+  (seq-filter (lambda (message) (plist-get (cdr message) :frame))
+              (remoteterm-tests--messages bytes)))
+
+(defun remoteterm-tests--check-frame-steps (steps)
+  "Check the laws of the frame messages in STEPS.
+STEPS is as for `remoteterm-tests--run-frame-operations'."
+  (let ((defined nil))
+    (dolist (step steps)
+      (when (plist-get step :attach)
+        (setq defined nil))
+      (should (cl-every #'zerop (plist-get step :unflushed)))
+      (dolist (message (remoteterm-tests--all-messages
+                        (plist-get step :bytes)))
+        (let* ((id (plist-get (cdr message) :frame))
+               (frame (assq id (plist-get step :frames))))
+          (pcase (car message)
+            ('define-frame
+             (let ((size (list (plist-get (cdr message) :width)
+                               (plist-get (cdr message) :height))))
+               (should-not (equal (alist-get id defined) size))
+               (setf (alist-get id defined) size)))
+            ('delete-frame
+             (should (assq id defined))
+             (setq defined (assq-delete-all id defined)))
+            (_ (when id
+                 (should (assq id defined))
+                 (when frame
+                   (should (equal (assq id defined) frame))))))))
+      (should (equal (sort (copy-sequence defined) :key #'car)
+                     (sort (copy-sequence (plist-get step :frames))
+                           :key #'car))))))
 
 ;;;; Frame memory and focus
 

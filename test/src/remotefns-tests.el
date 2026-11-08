@@ -83,6 +83,12 @@
 ;;     The font ID of the session is the face I of the font file with
 ;;     the SHA-256 hash BYTE..., at the size of S pixels.  The hash has
 ;;     `remote-display--hash-size' bytes.
+;; (define-frame :frame F :width W :height H)
+;;     The frame F exists, and it has the size W, H in pixels.  A
+;;     client opens a window for a new frame, and changes the size of
+;;     the window of a frame that it knows.
+;; (delete-frame :frame F)
+;;     The frame F does not exist now.  A client closes its window.
 ;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
@@ -117,7 +123,9 @@
     (copy-area . remotefns-tests--copy-area)
     (draw-cursor . remotefns-tests--draw-cursor)
     (draw-fringe . remotefns-tests--draw-fringe)
-    (define-font . remotefns-tests--define-font))
+    (define-font . remotefns-tests--define-font)
+    (define-frame . remotefns-tests--define-frame)
+    (delete-frame . remotefns-tests--delete-frame))
   "The message types, each with the function that generates a message.")
 
 (defconst remotefns-tests--clip-and-color
@@ -207,6 +215,17 @@
         :hash (vconcat (cl-loop repeat (rd-gen-integer
                                         0 remote-display--hash-size)
                                 collect (rd-gen-integer 0 255)))))
+
+(defun remotefns-tests--define-frame ()
+  "Return a random `define-frame' message."
+  (list 'define-frame
+        :frame (rd-gen-uint32)
+        :width (rd-gen-uint32)
+        :height (rd-gen-uint32)))
+
+(defun remotefns-tests--delete-frame ()
+  "Return a random `delete-frame' message."
+  (list 'delete-frame :frame (rd-gen-uint32)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -406,6 +425,19 @@
                  (unibyte-string 0 0 0 31 6 0 0 0 1 #xff #xff #xff #xff
                                  0 0 0 2 0 8 1 0 0 #x11 #x22 #x33
                                  0 #x44 #x55 #x66 0 2 1 2 0 #xff))))
+
+(ert-deftest remotefns-tests-define-frame-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 13, type 8, frame 1, width #x0203, height 4.
+  (should (equal (remote-display--encode
+                  '(define-frame :frame 1 :width #x0203 :height 4))
+                 (unibyte-string 0 0 0 13 8 0 0 0 1 0 0 2 3 0 0 0 4))))
+
+(ert-deftest remotefns-tests-delete-frame-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 5, type 9, frame #x01020304.
+  (should (equal (remote-display--encode '(delete-frame :frame #x01020304))
+                 (unibyte-string 0 0 0 5 9 1 2 3 4))))
 
 (ert-deftest remotefns-tests-byte-order-of-each-value ()
   "All bytes of a value are in big-endian order, not only the low bytes."

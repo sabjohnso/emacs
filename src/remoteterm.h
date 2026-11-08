@@ -146,6 +146,14 @@ struct remote_output
   /* The frame ID that the client knows.  It has the type of the
      frame field of the protocol, and it is not 0.  */
   uint32_t frame_id;
+
+  /* True if the client knows the frame: the session sent a
+     define-frame message for it after the last attach.  The message had
+     the size DEFINED_WIDTH, DEFINED_HEIGHT.  */
+  bool defined;
+  int defined_width;
+  int defined_height;
+
   Window parent_desc;
 
   struct font *font;

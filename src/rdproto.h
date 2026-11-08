@@ -84,7 +84,9 @@ enum rd_cursor_kind
   MESSAGE (COPY_AREA, copy_area, RD_COPY_AREA_FIELDS)			\
   MESSAGE (DRAW_CURSOR, draw_cursor, RD_DRAW_CURSOR_FIELDS)		\
   MESSAGE (DRAW_FRINGE, draw_fringe, RD_DRAW_FRINGE_FIELDS)		\
-  MESSAGE (DEFINE_FONT, define_font, RD_DEFINE_FONT_FIELDS)
+  MESSAGE (DEFINE_FONT, define_font, RD_DEFINE_FONT_FIELDS)		\
+  MESSAGE (DEFINE_FRAME, define_frame, RD_DEFINE_FRAME_FIELDS)		\
+  MESSAGE (DELETE_FRAME, delete_frame, RD_DELETE_FRAME_FIELDS)
 
 /* Each list gives the fields of a message in the order of the wire.
    FIELD (M, TYPE, NAME) is a member NAME of the C type TYPE_t.
@@ -183,6 +185,20 @@ enum rd_cursor_kind
   FIELD (M, uint32, index)						\
   FIELD (M, uint32, size)						\
   ARRAY (M, uint8, hash, nhash, RD_HASH_SIZE)
+
+/* The frame FRAME exists, and has the size WIDTH, HEIGHT in pixels.
+   A session sends this before the first draw of a frame after each
+   attach of a client, and again before the next draw after each change
+   of the size.  */
+#define RD_DEFINE_FRAME_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, width)						\
+  FIELD (M, uint32, height)
+
+/* The frame FRAME does not exist now.  A session sends this only for
+   a frame that it defined after the last attach of the client.  */
+#define RD_DELETE_FRAME_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)
 
 /* The value 0 is not a message type.  */
 #define RD_TYPE_ENUMERATOR(ENUM, NAME, FIELDS) RD_##ENUM,
