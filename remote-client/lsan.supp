@@ -1,0 +1,5 @@
+# Allocations that stay for the life of a process, on purpose.  The
+# leak check of "make check-sanitize" ignores them.
+
+# The global configuration of fontconfig.
+leak:libfontconfig.so

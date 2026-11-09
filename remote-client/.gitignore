@@ -1,2 +1,7 @@
 *.o
 test-render
+test-reader
+test-glyphs
+test-client
+remote-client
+test-table

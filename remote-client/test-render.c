@@ -44,6 +44,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - A message for a frame that does not exist changes no pixel.
    - Each color ignores its high 8 bits.
 
+   rc_apply reports its change: a frame that exists after a
+   define-frame is shown, a frame that does not exist after a
+   define-frame or a delete-frame is removed, and a draw in a frame
+   that exists draws the frame.  Another message changes no frame.
+
    One more law does not use the model: a second apply of a message
    that is not copy-area changes nothing.
 
@@ -117,10 +122,20 @@ struct example
   const uint32_t *pixels;
 };
 
+static cairo_font_face_t *find_no_font (void *, const uint8_t *, int,
+					uint32_t);
+
+/* This test does not draw glyphs, so its renderers have no fonts.  */
+static const struct rc_font_source no_fonts = { find_no_font, NULL, NULL };
+
 static bool run_examples (void);
 static bool run_example (const struct example *);
 static bool run_trial (uint64_t);
 static bool idempotent_p (const struct rd_message *);
+static bool check_change (struct rc_change, struct model *,
+			  const struct rd_message *, uint64_t, int);
+static struct rc_change expected_change (struct model *,
+					 const struct rd_message *);
 static bool check_frames (const struct model *, struct rc_renderer *,
 			  uint64_t, int, const struct rd_message *);
 static void write_message (const struct rd_message *);
@@ -298,7 +313,7 @@ run_examples (void)
 static bool
 run_example (const struct example *example)
 {
-  struct rc_renderer *renderer = rc_renderer_new ();
+  struct rc_renderer *renderer = rc_renderer_new (no_fonts);
   for (int i = 0; i < example->nmessages; i++)
     rc_apply (renderer, &example->messages[i]);
   struct model_frame expected = { true, example->width, example->height,
@@ -314,6 +329,14 @@ run_example (const struct example *example)
   return !problem;
 }
 
+/* The FIND function of a font source with no fonts.  */
+static cairo_font_face_t *
+find_no_font (void *data, const uint8_t *hash, int nhash, uint32_t index)
+{
+  (void) data, (void) hash, (void) nhash, (void) index;
+  return NULL;
+}
+
 /* The property.  */
 
 /* Run the trial of SEED.  Return true if it passes.  */
@@ -322,14 +345,15 @@ run_trial (uint64_t seed)
 {
   uint64_t state = seed;
   struct model model = { 0 };
-  struct rc_renderer *renderer = rc_renderer_new ();
+  struct rc_renderer *renderer = rc_renderer_new (no_fonts);
   bool passed = true;
   for (int step = 0; passed && step < STEPS; step++)
     {
       struct rd_message message = random_message (&state);
       model_apply (&model, &message);
-      rc_apply (renderer, &message);
-      passed = check_frames (&model, renderer, seed, step, &message);
+      struct rc_change change = rc_apply (renderer, &message);
+      passed = (check_change (change, &model, &message, seed, step)
+		&& check_frames (&model, renderer, seed, step, &message));
       if (passed && idempotent_p (&message))
 	{
 	  rc_apply (renderer, &message);
@@ -339,6 +363,43 @@ run_trial (uint64_t seed)
   rc_renderer_free (renderer);
   model_free (&model);
   return passed;
+}
+
+/* Return true if CHANGE is the change of MESSAGE to MODEL, which
+   applied it.  Else report the difference of the trial SEED at
+   STEP.  */
+static bool
+check_change (struct rc_change change, struct model *model,
+	      const struct rd_message *message, uint64_t seed, int step)
+{
+  struct rc_change expected = expected_change (model, message);
+  if (change.kind == expected.kind
+      && (change.kind == RC_NO_CHANGE || change.frame == expected.frame))
+    return true;
+  fprintf (stderr, "test-render: seed %llu, step %d: the change is "
+	   "%d for frame %lu, not %d for frame %lu\nafter ",
+	   (unsigned long long) seed, step, (int) change.kind,
+	   (unsigned long) change.frame, (int) expected.kind,
+	   (unsigned long) expected.frame);
+  write_message (message);
+  return false;
+}
+
+/* Return the change of MESSAGE to MODEL, which applied it.  A message
+   for a frame has the frame as its first field.  */
+static struct rc_change
+expected_change (struct model *model, const struct rd_message *message)
+{
+  const struct rd_format *format = &rd_formats[message->type];
+  if (format->nfields == 0 || strcmp (format->fields[0].name, "frame"))
+    return (struct rc_change) { .kind = RC_NO_CHANGE };
+  uint32_t frame = rd_field_value (message, &format->fields[0], 0);
+  bool exists = model_frame (model, frame) != NULL;
+  if (message->type == RD_DEFINE_FRAME || message->type == RD_DELETE_FRAME)
+    return (struct rc_change) { exists ? RC_FRAME_SHOWN : RC_FRAME_REMOVED,
+				frame };
+  return (struct rc_change) { exists ? RC_FRAME_DRAWN : RC_NO_CHANGE,
+			      frame };
 }
 
 /* Return true if a second apply of MESSAGE changes nothing.  */

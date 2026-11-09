@@ -36,15 +36,66 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    deletes the frame.  */
 enum { RC_MAX_FRAME_SIZE = 32767 };
 
+/* The largest size of a font in pixels.  A define-font message with a
+   larger size defines no font.  Cairo puts the face of a font of 65536
+   pixels or more into an error that stops each font of the face.  A
+   glyph of RC_MAX_FONT_SIZE pixels needs a glyph image of 16 MB.  */
+enum { RC_MAX_FONT_SIZE = 4096 };
+
+/* A source of the fonts that a renderer draws with.  FIND returns a
+   new reference to the Cairo font face of the face INDEX of the font
+   file whose SHA-256 hash is the NHASH bytes HASH.  It returns NULL if
+   it has no face for them.  DATA is the first argument of FIND and
+   DESTROY.  The maker of a source owns it, and frees it with
+   rc_font_source_free.  DESTROY frees DATA, and can be NULL.  */
+struct rc_font_source
+{
+  cairo_font_face_t *(*find) (void *data, const uint8_t *hash, int nhash,
+			      uint32_t index);
+  void (*destroy) (void *data);
+  void *data;
+};
+
+/* Free the data of the font source SOURCE.  */
+extern void rc_font_source_free (struct rc_font_source source);
+
 struct rc_renderer;
 
-extern struct rc_renderer *rc_renderer_new (void);
+/* Return a new renderer that gets its fonts from FONTS.  FONTS must
+   stay valid until rc_renderer_free frees the renderer.  */
+extern struct rc_renderer *rc_renderer_new (struct rc_font_source fonts);
 extern void rc_renderer_free (struct rc_renderer *renderer);
 
-/* Apply MESSAGE to the frames of RENDERER.  A message for a frame that
-   the server did not define changes nothing.  */
-extern void rc_apply (struct rc_renderer *renderer,
-		      const struct rd_message *message);
+/* The kinds of change of a frame.  */
+enum rc_change_kind
+  {
+    /* The message changed no frame.  */
+    RC_NO_CHANGE,
+    /* The frame exists after a define-frame message, with a new size
+       or as a new frame.  */
+    RC_FRAME_SHOWN,
+    /* The frame does not exist after a define-frame or a delete-frame
+       message.  */
+    RC_FRAME_REMOVED,
+    /* The message was a draw in the frame, so it can have changed
+       pixels of the frame.  */
+    RC_FRAME_DRAWN,
+  };
+
+/* The change of one message: its KIND, and the FRAME that it changed.
+   FRAME has no value for RC_NO_CHANGE.  */
+struct rc_change
+{
+  enum rc_change_kind kind;
+  uint32_t frame;
+};
+
+/* Apply MESSAGE to the frames of RENDERER, and return its change.  A
+   message for a frame that the server did not define changes nothing.
+   A draw-glyphs message for a font that the server did not define, or
+   that the font source did not find, changes no pixel.  */
+extern struct rc_change rc_apply (struct rc_renderer *renderer,
+				  const struct rd_message *message);
 
 /* Return the surface of the frame FRAME of RENDERER, or NULL if the
    server did not define the frame.  The surface has the format

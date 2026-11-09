@@ -101,7 +101,9 @@ enum rd_cursor_kind
 
 /* Draw glyphs of the font FONT in COLOR.  X and Y are the pixel
    position of the start of the baseline.  Each glyph code is a glyph index of
-   the font, not a character.  A client changes only the pixels inside
+   the font, not a character.  Each glyph after the first starts at the
+   advance of the glyph before it, rounded to a pixel, as in
+   ftcrfont_draw.  A client changes only the pixels inside
    the rectangle at CLIP_X, CLIP_Y with the size CLIP_WIDTH,
    CLIP_HEIGHT, because a glyph can extend outside a line that is
    visible in part, or outside a text area.  A client draws only

@@ -1,0 +1,75 @@
+/* The font sources of the remote display client.
+
+Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GNU Emacs.
+
+GNU Emacs is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version.
+
+GNU Emacs is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
+
+#include <config.h>
+
+#include <cairo-ft.h>
+#include <fontconfig/fontconfig.h>
+
+#include "fonts.h"
+
+static cairo_font_face_t *find_fallback (void *, const uint8_t *, int,
+					 uint32_t);
+static void destroy_fallback (void *);
+static cairo_font_face_t *match_face (const char *);
+
+struct rc_font_source
+rc_fallback_font_source_new (void)
+{
+  return (struct rc_font_source) { find_fallback, destroy_fallback,
+				   match_face ("monospace") };
+}
+
+/* The FIND function of the fallback source.  DATA is the face, or
+   NULL.  */
+static cairo_font_face_t *
+find_fallback (void *data, const uint8_t *hash, int nhash, uint32_t index)
+{
+  (void) hash, (void) nhash, (void) index;
+  cairo_font_face_t *face = data;
+  return face ? cairo_font_face_reference (face) : NULL;
+}
+
+/* The DESTROY function of the fallback source.  DATA is the face, or
+   NULL.  */
+static void
+destroy_fallback (void *data)
+{
+  cairo_font_face_destroy (data);
+}
+
+/* Return a new reference to the face of the fontconfig match of the
+   font name NAME, or NULL if fontconfig has no match.  */
+static cairo_font_face_t *
+match_face (const char *name)
+{
+  FcPattern *pattern = FcNameParse ((const FcChar8 *) name);
+  if (!pattern)
+    return NULL;
+  FcConfigSubstitute (NULL, pattern, FcMatchPattern);
+  FcDefaultSubstitute (pattern);
+  FcResult result;
+  FcPattern *match = FcFontMatch (NULL, pattern, &result);
+  FcPatternDestroy (pattern);
+  if (!match)
+    return NULL;
+  cairo_font_face_t *face = cairo_ft_font_face_create_for_pattern (match);
+  FcPatternDestroy (match);
+  return face;
+}

@@ -26,28 +26,24 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    color of the message.
 
    The client cannot continue with no memory, so a failed allocation
-   of the frame table stops the program.  */
+   stops the program.  */
 
 #include <config.h>
 
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
 #include "render.h"
+#include "table.h"
 
-/* A frame: its ID, and its surface.  */
-struct rc_frame
-{
-  uint32_t id;
-  cairo_surface_t *surface;
-};
-
-/* The frames that the server defined, in no order.  */
 struct rc_renderer
 {
-  struct rc_frame *frames;
-  int nframes;
-  int size;
+  struct rc_font_source source;
+  /* The surface of each frame that the server defined.  */
+  struct rc_table frames;
+  /* The Cairo scaled font of each font that the server defined.  */
+  struct rc_table fonts;
 };
 
 /* A rectangle with 64-bit fields.  */
@@ -56,6 +52,8 @@ struct rc_rect
   int64_t x, y, width, height;
 };
 
+static struct rc_change shown_or_removed (struct rc_renderer *, uint32_t);
+static struct rc_change drawn (cairo_surface_t *, uint32_t);
 static void define_frame (struct rc_renderer *,
 			  const struct rd_define_frame *);
 static void delete_frame (struct rc_renderer *, uint32_t);
@@ -64,6 +62,13 @@ static void copy_area (cairo_surface_t *, const struct rd_copy_area *);
 static void draw_cursor (cairo_surface_t *,
 			 const struct rd_draw_cursor *);
 static void draw_hollow_box (cairo_t *, struct rc_rect);
+static void define_font (struct rc_renderer *,
+			 const struct rd_define_font *);
+static cairo_scaled_font_t *scaled_font (cairo_font_face_t *, uint32_t);
+static void draw_glyphs (cairo_surface_t *, cairo_scaled_font_t *,
+			 const struct rd_draw_glyphs *);
+static void layout_glyphs (cairo_scaled_font_t *,
+			   const struct rd_draw_glyphs *, cairo_glyph_t *);
 static void draw_fringe (cairo_surface_t *,
 			 const struct rd_draw_fringe *);
 static void fill_fringe_bits (cairo_surface_t *,
@@ -73,8 +78,8 @@ static bool fringe_bit (uint16_t, int, int);
 static cairo_surface_t *snapshot (cairo_surface_t *, struct rc_rect);
 static cairo_surface_t *resized_copy (cairo_surface_t *, uint32_t,
 				      uint32_t);
-static struct rc_frame *find_frame (struct rc_renderer *, uint32_t);
-static struct rc_frame *add_frame (struct rc_renderer *, uint32_t);
+static void destroy_surface (void *);
+static void destroy_font (void *);
 static cairo_t *start_draw (cairo_surface_t *, uint32_t);
 static cairo_t *start_copy (cairo_surface_t *, cairo_surface_t *,
 			    int64_t, int64_t);
@@ -84,60 +89,100 @@ static struct rc_rect clip_rect (struct rc_rect, cairo_surface_t *);
 static struct rc_rect intersection (struct rc_rect, struct rc_rect);
 
 struct rc_renderer *
-rc_renderer_new (void)
+rc_renderer_new (struct rc_font_source fonts)
 {
   struct rc_renderer *renderer = calloc (1, sizeof *renderer);
   if (!renderer)
     abort ();
+  renderer->source = fonts;
   return renderer;
 }
 
 void
 rc_renderer_free (struct rc_renderer *renderer)
 {
-  for (int i = 0; i < renderer->nframes; i++)
-    cairo_surface_destroy (renderer->frames[i].surface);
-  free (renderer->frames);
+  rc_table_free (&renderer->frames, destroy_surface);
+  rc_table_free (&renderer->fonts, destroy_font);
   free (renderer);
 }
 
-void
+struct rc_change
 rc_apply (struct rc_renderer *renderer, const struct rd_message *message)
 {
   const struct rd_clear_area *clear = &message->u.clear_area;
   const struct rd_copy_area *copy = &message->u.copy_area;
   const struct rd_draw_cursor *cursor = &message->u.draw_cursor;
   const struct rd_draw_fringe *fringe = &message->u.draw_fringe;
+  const struct rd_draw_glyphs *glyphs = &message->u.draw_glyphs;
+  cairo_surface_t *surface;
   switch (message->type)
     {
     case RD_DEFINE_FRAME:
       define_frame (renderer, &message->u.define_frame);
-      break;
+      return shown_or_removed (renderer, message->u.define_frame.frame);
     case RD_DELETE_FRAME:
       delete_frame (renderer, message->u.delete_frame.frame);
-      break;
+      return (struct rc_change) { RC_FRAME_REMOVED,
+				  message->u.delete_frame.frame };
     case RD_CLEAR_AREA:
-      clear_area (rc_frame_surface (renderer, clear->frame), clear);
-      break;
+      surface = rc_frame_surface (renderer, clear->frame);
+      clear_area (surface, clear);
+      return drawn (surface, clear->frame);
     case RD_COPY_AREA:
-      copy_area (rc_frame_surface (renderer, copy->frame), copy);
-      break;
+      surface = rc_frame_surface (renderer, copy->frame);
+      copy_area (surface, copy);
+      return drawn (surface, copy->frame);
     case RD_DRAW_CURSOR:
-      draw_cursor (rc_frame_surface (renderer, cursor->frame), cursor);
-      break;
+      surface = rc_frame_surface (renderer, cursor->frame);
+      draw_cursor (surface, cursor);
+      return drawn (surface, cursor->frame);
     case RD_DRAW_FRINGE:
-      draw_fringe (rc_frame_surface (renderer, fringe->frame), fringe);
-      break;
+      surface = rc_frame_surface (renderer, fringe->frame);
+      draw_fringe (surface, fringe);
+      return drawn (surface, fringe->frame);
+    case RD_DEFINE_FONT:
+      define_font (renderer, &message->u.define_font);
+      return (struct rc_change) { .kind = RC_NO_CHANGE };
+    case RD_DRAW_GLYPHS:
+      surface = rc_frame_surface (renderer, glyphs->frame);
+      draw_glyphs (surface, rc_table_get (&renderer->fonts, glyphs->font),
+		   glyphs);
+      return drawn (surface, glyphs->frame);
     default:
-      break;
+      return (struct rc_change) { .kind = RC_NO_CHANGE };
     }
+}
+
+void
+rc_font_source_free (struct rc_font_source source)
+{
+  if (source.destroy)
+    source.destroy (source.data);
 }
 
 cairo_surface_t *
 rc_frame_surface (struct rc_renderer *renderer, uint32_t frame)
 {
-  struct rc_frame *f = find_frame (renderer, frame);
-  return f ? f->surface : NULL;
+  return rc_table_get (&renderer->frames, frame);
+}
+
+/* Return the change of a define-frame message for FRAME of
+   RENDERER.  */
+static struct rc_change
+shown_or_removed (struct rc_renderer *renderer, uint32_t frame)
+{
+  return (struct rc_change) { (rc_frame_surface (renderer, frame)
+			       ? RC_FRAME_SHOWN : RC_FRAME_REMOVED),
+			      frame };
+}
+
+/* Return the change of a draw in FRAME: RC_FRAME_DRAWN if its surface
+   SURFACE is not NULL, else RC_NO_CHANGE.  */
+static struct rc_change
+drawn (cairo_surface_t *surface, uint32_t frame)
+{
+  return (struct rc_change) { surface ? RC_FRAME_DRAWN : RC_NO_CHANGE,
+			      frame };
 }
 
 /* Make the frame of DEFINE, or give it the new size.  The pixels that
@@ -148,8 +193,7 @@ static void
 define_frame (struct rc_renderer *renderer,
 	      const struct rd_define_frame *define)
 {
-  struct rc_frame *frame = find_frame (renderer, define->frame);
-  cairo_surface_t *old = frame ? frame->surface : NULL;
+  cairo_surface_t *old = rc_frame_surface (renderer, define->frame);
   cairo_surface_t *surface = resized_copy (old, define->width,
 					   define->height);
   if (!surface)
@@ -157,21 +201,15 @@ define_frame (struct rc_renderer *renderer,
       delete_frame (renderer, define->frame);
       return;
     }
-  if (!frame)
-    frame = add_frame (renderer, define->frame);
   cairo_surface_destroy (old);
-  frame->surface = surface;
+  rc_table_set (&renderer->frames, define->frame, surface);
 }
 
 /* Remove the frame ID, if it exists.  */
 static void
 delete_frame (struct rc_renderer *renderer, uint32_t id)
 {
-  struct rc_frame *frame = find_frame (renderer, id);
-  if (!frame)
-    return;
-  cairo_surface_destroy (frame->surface);
-  *frame = renderer->frames[--renderer->nframes];
+  cairo_surface_destroy (rc_table_remove (&renderer->frames, id));
 }
 
 /* Apply the clear-area message CLEAR to SURFACE, if it is not NULL.  */
@@ -258,6 +296,89 @@ draw_hollow_box (cairo_t *cr, struct rc_rect rect)
     };
   for (int i = 0; i < 4; i++)
     fill_rect (cr, edges[i]);
+}
+
+/* Give the font ID of DEFINE the face that the font source of RENDERER
+   finds for it.  If the source finds no face, the font ID has no
+   font after this call.  */
+static void
+define_font (struct rc_renderer *renderer,
+	     const struct rd_define_font *define)
+{
+  struct rc_font_source *source = &renderer->source;
+  cairo_font_face_t *face = source->find (source->data, define->hash,
+					  define->nhash, define->index);
+  cairo_scaled_font_t *font = face ? scaled_font (face, define->size)
+			      : NULL;
+  cairo_font_face_destroy (face);
+  cairo_scaled_font_destroy (rc_table_remove (&renderer->fonts,
+					      define->font));
+  if (font)
+    rc_table_set (&renderer->fonts, define->font, font);
+}
+
+/* Return a new scaled font of FACE at the size SIZE in pixels, or NULL
+   if SIZE is above RC_MAX_FONT_SIZE or Cairo cannot make it.  */
+static cairo_scaled_font_t *
+scaled_font (cairo_font_face_t *face, uint32_t size)
+{
+  if (size > RC_MAX_FONT_SIZE)
+    return NULL;
+  cairo_matrix_t matrix, identity;
+  cairo_matrix_init_scale (&matrix, size, size);
+  cairo_matrix_init_identity (&identity);
+  cairo_font_options_t *options = cairo_font_options_create ();
+  cairo_scaled_font_t *font = cairo_scaled_font_create (face, &matrix,
+							&identity, options);
+  cairo_font_options_destroy (options);
+  if (cairo_scaled_font_status (font) == CAIRO_STATUS_SUCCESS)
+    return font;
+  cairo_scaled_font_destroy (font);
+  return NULL;
+}
+
+/* Apply the draw-glyphs message GLYPHS with FONT to SURFACE, if
+   neither is NULL.  */
+static void
+draw_glyphs (cairo_surface_t *surface, cairo_scaled_font_t *font,
+	     const struct rd_draw_glyphs *glyphs)
+{
+  if (!surface || !font)
+    return;
+  struct rc_rect clip = clip_rect ((struct rc_rect) { glyphs->clip_x,
+						      glyphs->clip_y,
+						      glyphs->clip_width,
+						      glyphs->clip_height },
+				   surface);
+  if (clip.width == 0 || clip.height == 0)
+    return;
+  cairo_glyph_t positions[RD_MAX_GLYPHS];
+  layout_glyphs (font, glyphs, positions);
+  cairo_t *cr = cairo_create (surface);
+  cairo_rectangle (cr, clip.x, clip.y, clip.width, clip.height);
+  cairo_clip (cr);
+  set_color (cr, glyphs->color);
+  cairo_set_scaled_font (cr, font);
+  cairo_show_glyphs (cr, positions, glyphs->nglyphs);
+  cairo_destroy (cr);
+}
+
+/* Set POSITIONS to the glyphs of GLYPHS with FONT at their
+   positions.  Each glyph after the first starts at the advance of the
+   glyph before it, rounded to a pixel, as in ftcrfont_draw.  */
+static void
+layout_glyphs (cairo_scaled_font_t *font,
+	       const struct rd_draw_glyphs *glyphs, cairo_glyph_t *positions)
+{
+  double x = glyphs->x;
+  for (int i = 0; i < glyphs->nglyphs; i++)
+    {
+      cairo_glyph_t glyph = { glyphs->glyphs[i], 0, 0 };
+      cairo_text_extents_t extents;
+      cairo_scaled_font_glyph_extents (font, &glyph, 1, &extents);
+      positions[i] = (cairo_glyph_t) { glyph.index, x, glyphs->y };
+      x += lround (extents.x_advance);
+    }
 }
 
 /* Apply the draw-fringe message FRINGE to SURFACE, if it is not
@@ -348,31 +469,16 @@ resized_copy (cairo_surface_t *old, uint32_t width, uint32_t height)
   return surface;
 }
 
-/* Return the frame ID of RENDERER, or NULL if it does not exist.  */
-static struct rc_frame *
-find_frame (struct rc_renderer *renderer, uint32_t id)
+static void
+destroy_surface (void *surface)
 {
-  for (int i = 0; i < renderer->nframes; i++)
-    if (renderer->frames[i].id == id)
-      return &renderer->frames[i];
-  return NULL;
+  cairo_surface_destroy (surface);
 }
 
-/* Add a frame ID with no surface to RENDERER, and return it.  */
-static struct rc_frame *
-add_frame (struct rc_renderer *renderer, uint32_t id)
+static void
+destroy_font (void *font)
 {
-  if (renderer->nframes == renderer->size)
-    {
-      renderer->size = renderer->size ? 2 * renderer->size : 4;
-      renderer->frames = realloc (renderer->frames,
-				  renderer->size * sizeof *renderer->frames);
-      if (!renderer->frames)
-	abort ();
-    }
-  struct rc_frame *frame = &renderer->frames[renderer->nframes++];
-  *frame = (struct rc_frame) { id, NULL };
-  return frame;
+  cairo_scaled_font_destroy (font);
 }
 
 /* Return a Cairo context for SURFACE that fills exact pixels with
