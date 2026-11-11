@@ -28,4 +28,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 extern void remote_handle_input (struct remote_display_info *dpyinfo,
 				 const struct rd_message *message);
 
+/* The mouse_position_hook of a terminal of a session.  */
+extern void remote_mouse_position (struct frame **fp, int insist,
+				   Lisp_Object *bar_window,
+				   enum scroll_bar_part *part,
+				   Lisp_Object *x, Lisp_Object *y,
+				   Time *timestamp);
+
 #endif /* EMACS_REMOTEINPUT_H */

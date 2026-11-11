@@ -93,6 +93,7 @@ struct remote_display_info
   struct frame *last_mouse_motion_frame;
   int last_mouse_motion_x;
   int last_mouse_motion_y;
+  Time last_mouse_movement_time;
 
   /* The ID of the last frame that this session made.  The client
      knows a frame by its ID.  */

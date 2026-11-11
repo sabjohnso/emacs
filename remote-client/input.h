@@ -24,6 +24,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_INPUT_H
 #define REMOTE_CLIENT_INPUT_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <gdk/gdk.h>
@@ -35,5 +36,24 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 extern struct rd_message rc_key_message (uint32_t frame, guint keyval,
 					 GdkModifierType state,
 					 guint32 time);
+
+/* Return the button message of a press (PRESS is true) or a release
+   of the mouse button BUTTON at X, Y, with the GDK modifier state
+   STATE, at the time TIME, in the frame FRAME.  */
+extern struct rd_message rc_button_message (uint32_t frame, guint button,
+					    double x, double y,
+					    GdkModifierType state,
+					    guint32 time, bool press);
+
+/* Return the motion message of a move of the mouse to X, Y at the time
+   TIME in the frame FRAME.  */
+extern struct rd_message rc_motion_message (uint32_t frame, double x,
+					    double y, guint32 time);
+
+/* Return the wheel button of X for a scroll in the direction
+   DIRECTION, or for a smooth scroll with the deltas DX and DY.  Return
+   0 for a smooth scroll with no delta.  */
+extern int rc_scroll_button (GdkScrollDirection direction, double dx,
+			     double dy);
 
 #endif /* REMOTE_CLIENT_INPUT_H */

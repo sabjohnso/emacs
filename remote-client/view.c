@@ -52,6 +52,29 @@ static void destroy_window (void *);
 static gboolean draw_frame (GtkWidget *, cairo_t *, gpointer);
 static void window_closed (GtkWidget *, gpointer);
 static gboolean key_pressed (GtkWidget *, GdkEventKey *, gpointer);
+static gboolean button_changed (GtkWidget *, GdkEventButton *, gpointer);
+static gboolean mouse_moved (GtkWidget *, GdkEventMotion *, gpointer);
+static gboolean scrolled (GtkWidget *, GdkEventScroll *, gpointer);
+static void send (struct rc_window *, const struct rd_message *);
+
+/* The input signals of the drawing area of a frame, and their
+   functions.  */
+static const struct
+{
+  const char *name;
+  GCallback function;
+} input_signals[] =
+  {
+    { "button-press-event", G_CALLBACK (button_changed) },
+    { "button-release-event", G_CALLBACK (button_changed) },
+    { "motion-notify-event", G_CALLBACK (mouse_moved) },
+    { "scroll-event", G_CALLBACK (scrolled) },
+  };
+
+/* The events of the input signals.  */
+enum { INPUT_EVENTS = (GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK
+		       | GDK_POINTER_MOTION_MASK | GDK_SCROLL_MASK
+		       | GDK_SMOOTH_SCROLL_MASK) };
 
 struct rc_view *
 rc_view_new (struct rc_renderer *renderer,
@@ -134,6 +157,10 @@ add_window (struct rc_view *view, uint32_t frame)
 		    window);
   g_signal_connect (window->window, "key-press-event",
 		    G_CALLBACK (key_pressed), window);
+  gtk_widget_add_events (window->area, INPUT_EVENTS);
+  for (size_t i = 0; i < G_N_ELEMENTS (input_signals); i++)
+    g_signal_connect (window->area, input_signals[i].name,
+		      input_signals[i].function, window);
   gtk_window_set_title (GTK_WINDOW (window->window), "Emacs");
   gtk_window_set_resizable (GTK_WINDOW (window->window), false);
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
@@ -197,6 +224,65 @@ key_pressed (GtkWidget *widget, GdkEventKey *event, gpointer data)
     return true;
   struct rd_message message = rc_key_message (window->frame, event->keyval,
 					      event->state, event->time);
-  window->view->functions.send (window->view->functions.data, &message);
+  send (window, &message);
   return true;
+}
+
+/* The button-press-event and button-release-event signals of the
+   drawing area of a frame.  DATA is the struct rc_window.  Send the
+   button message of a press or a release.  GTK also gives a double and
+   a triple press, which Emacs makes itself from the times.  */
+static gboolean
+button_changed (GtkWidget *widget, GdkEventButton *event, gpointer data)
+{
+  (void) widget;
+  if (event->type != GDK_BUTTON_PRESS && event->type != GDK_BUTTON_RELEASE)
+    return true;
+  struct rc_window *window = data;
+  struct rd_message message
+    = rc_button_message (window->frame, event->button, event->x, event->y,
+			 event->state, event->time,
+			 event->type == GDK_BUTTON_PRESS);
+  send (window, &message);
+  return true;
+}
+
+/* The motion-notify-event signal of the drawing area of a frame.  DATA
+   is the struct rc_window.  Send the motion message.  */
+static gboolean
+mouse_moved (GtkWidget *widget, GdkEventMotion *event, gpointer data)
+{
+  (void) widget;
+  struct rc_window *window = data;
+  struct rd_message message = rc_motion_message (window->frame, event->x,
+						 event->y, event->time);
+  send (window, &message);
+  return true;
+}
+
+/* The scroll-event signal of the drawing area of a frame.  DATA is the
+   struct rc_window.  Send a press of the wheel button of the scroll, as
+   in X.  */
+static gboolean
+scrolled (GtkWidget *widget, GdkEventScroll *event, gpointer data)
+{
+  (void) widget;
+  struct rc_window *window = data;
+  int button = rc_scroll_button (event->direction, event->delta_x,
+				 event->delta_y);
+  if (button == 0)
+    return true;
+  struct rd_message message
+    = rc_button_message (window->frame, button, event->x, event->y,
+			 event->state, event->time, true);
+  send (window, &message);
+  return true;
+}
+
+/* Give MESSAGE of the input of the user in WINDOW to the function of
+   the view.  */
+static void
+send (struct rc_window *window, const struct rd_message *message)
+{
+  window->view->functions.send (window->view->functions.data, message);
 }

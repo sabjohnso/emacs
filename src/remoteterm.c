@@ -34,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "termhooks.h"
 #include "window.h"
 #include "remoteterm.h"
+#include "remoteinput.h"
 #include "rdproto.h"
 
 #include <fcntl.h>
@@ -83,6 +84,8 @@ static uint32_t remote_frame_id (struct frame *);
 static void remote_init_frame_font (struct frame *, Lisp_Object);
 static void remote_default_frame_parameters (struct frame *, Lisp_Object);
 static void remote_finish_frame (struct frame *, Lisp_Object);
+static void remote_forget_mouse_frame (struct remote_display_info *,
+				       struct frame *);
 static void remote_free_frame_resources (struct frame *);
 static void remote_delete_terminal (struct terminal *);
 static bool remote_defined_color (struct frame *, const char *,
@@ -1006,6 +1009,18 @@ remote_delete_frame (struct frame *f)
   remote_free_frame_resources (f);
 }
 
+/* Remove F from the mouse state of DPYINFO: the frame of the last
+   motion, and the frame of the mouse highlight.  */
+static void
+remote_forget_mouse_frame (struct remote_display_info *dpyinfo,
+			   struct frame *f)
+{
+  if (dpyinfo->last_mouse_motion_frame == f)
+    dpyinfo->last_mouse_motion_frame = NULL;
+  if (dpyinfo->mouse_highlight.mouse_face_mouse_frame == f)
+    reset_mouse_highlight (&dpyinfo->mouse_highlight);
+}
+
 /* Free the data of F that the generic code does not free, and remove
    F from its session.  */
 static void
@@ -1018,8 +1033,7 @@ remote_free_frame_resources (struct frame *f)
     dpyinfo->focus_frame = NULL;
   if (dpyinfo->highlight_frame == f)
     dpyinfo->highlight_frame = NULL;
-  if (dpyinfo->mouse_highlight.mouse_face_mouse_frame == f)
-    reset_mouse_highlight (&dpyinfo->mouse_highlight);
+  remote_forget_mouse_frame (dpyinfo, f);
   xfree (f->output_data.remote);
   f->output_data.remote = NULL;
   unblock_input ();
@@ -1797,6 +1811,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->get_string_resource_hook = remote_get_string_resource;
   terminal->menu_show_hook = remote_menu_show;
   terminal->read_socket_hook = remote_read_socket;
+  terminal->mouse_position_hook = remote_mouse_position;
   terminal->update_begin_hook = remote_no_op_frame;
   terminal->update_end_hook = remote_flush_frame;
   terminal->clear_frame_hook = remote_no_op_frame;

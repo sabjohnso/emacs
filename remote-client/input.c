@@ -21,6 +21,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "input.h"
 
+#include <math.h>
+
 static uint8_t modifier_bits (GdkModifierType);
 
 struct rd_message
@@ -32,6 +34,48 @@ rc_key_message (uint32_t frame, guint keyval, GdkModifierType state,
       .u.key = { .frame = frame, .time = time, .keysym = keyval,
 		 .character = gdk_keyval_to_unicode (keyval),
 		 .modifiers = modifier_bits (state) } };
+}
+
+struct rd_message
+rc_button_message (uint32_t frame, guint button, double x, double y,
+		   GdkModifierType state, guint32 time, bool press)
+{
+  return (struct rd_message)
+    { .type = RD_BUTTON,
+      .u.button = { .frame = frame, .time = time, .x = floor (x),
+		    .y = floor (y), .button = button,
+		    .modifiers = modifier_bits (state), .press = press } };
+}
+
+struct rd_message
+rc_motion_message (uint32_t frame, double x, double y, guint32 time)
+{
+  return (struct rd_message)
+    { .type = RD_MOTION,
+      .u.motion = { .frame = frame, .time = time, .x = floor (x),
+		    .y = floor (y) } };
+}
+
+int
+rc_scroll_button (GdkScrollDirection direction, double dx, double dy)
+{
+  switch (direction)
+    {
+    case GDK_SCROLL_UP:
+      return RD_BUTTON_WHEEL_UP;
+    case GDK_SCROLL_DOWN:
+      return RD_BUTTON_WHEEL_DOWN;
+    case GDK_SCROLL_LEFT:
+      return RD_BUTTON_WHEEL_LEFT;
+    case GDK_SCROLL_RIGHT:
+      return RD_BUTTON_WHEEL_RIGHT;
+    default:
+      if (fabs (dy) >= fabs (dx) && dy != 0)
+	return dy < 0 ? RD_BUTTON_WHEEL_UP : RD_BUTTON_WHEEL_DOWN;
+      if (dx != 0)
+	return dx < 0 ? RD_BUTTON_WHEEL_LEFT : RD_BUTTON_WHEEL_RIGHT;
+      return 0;
+    }
 }
 
 /* Return the modifier bits of the GDK state STATE.  Mod1, the Alt key

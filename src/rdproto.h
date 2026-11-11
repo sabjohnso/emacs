@@ -222,7 +222,8 @@ enum rd_cursor_kind
   FIELD (M, uint8, modifiers)
 
 /* The user pressed (PRESS is 1) or released (PRESS is 0) the mouse
-   button BUTTON at X, Y.  Button 1 is the left button.  */
+   button BUTTON at X, Y.  Button 1 is the left button.  The buttons of
+   enum rd_wheel_button are the wheel, as in X.  */
 #define RD_BUTTON_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint32, frame)						\
   FIELD (M, uint32, time)						\
@@ -249,6 +250,15 @@ enum rd_cursor_kind
   FIELD (M, uint32, frame)						\
   FIELD (M, uint32, width)						\
   FIELD (M, uint32, height)
+
+/* The buttons of a button message that are the mouse wheel.  */
+enum rd_wheel_button
+  {
+    RD_BUTTON_WHEEL_UP = 4,
+    RD_BUTTON_WHEEL_DOWN = 5,
+    RD_BUTTON_WHEEL_LEFT = 6,
+    RD_BUTTON_WHEEL_RIGHT = 7,
+  };
 
 /* The modifiers of an input message.  A row is MODIFIER (ENUM, NAME,
    BIT): the bit RD_ENUM of the MODIFIERS field, and the NAME of the

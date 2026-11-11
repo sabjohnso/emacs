@@ -5271,15 +5271,12 @@ the keysym, because the session has no `system-key-alist'.")
            collect name))
 
 (defun remoteterm-tests--random-pointer-message ()
-  "Return a random button, motion, focus, or resize message for the frame.
-The session gives no event for these messages yet."
-  (pcase (rd-gen-integer 0 3)
-    (0 (list 'button :frame 'frame :time 0 :x (rd-gen-int32)
-             :y (rd-gen-int32) :button (rd-gen-integer 0 255)
-             :modifiers (rd-gen-integer 0 255) :press (rd-gen-integer 0 1)))
-    (1 (list 'motion :frame 'frame :time 0 :x (rd-gen-int32)
+  "Return a random message that gives no event: a motion message, or a
+focus or a resize message, which the session does not use yet."
+  (pcase (rd-gen-integer 0 2)
+    (0 (list 'motion :frame 'frame :time 0 :x (rd-gen-int32)
              :y (rd-gen-int32)))
-    (2 (list 'focus :frame 'frame :in (rd-gen-integer 0 1)))
+    (1 (list 'focus :frame 'frame :in (rd-gen-integer 0 1)))
     (_ (list 'resize :frame 'frame :width (rd-gen-uint32)
              :height (rd-gen-uint32)))))
 
@@ -5515,6 +5512,377 @@ Return t if nothing failed."
     (should (equal (remoteterm-tests--daemon-call
                     'remoteterm-tests--input-reattach-case)
                    '(?z)))))
+
+;;;; Mouse input
+
+(defconst remoteterm-tests--wheel-buttons
+  '((4 . wheel-up) (5 . wheel-down) (6 . wheel-left) (7 . wheel-right))
+  "The buttons of the mouse wheel, with the event of each.")
+
+(defun remoteterm-tests--random-mouse-input ()
+  "Return a random mouse input.
+An input is (click B M X Y DX DY), (wheel B M X Y), or (ignored
+MESSAGE...).  B is a button, and M has 8 random bits, of which
+`remote-display--modifier-bits' names some.  X and Y are fractions
+of the text area of the window: the daemon turns them into pixels.
+A click is a press at X, Y and a release DX, DY pixels from it.  An
+ignored input is messages that give no event: a press and a release of
+the button 0, a release of a wheel button, or a press of a frame that
+does not exist."
+  (let ((modifiers (rd-gen-integer 0 255))
+        (x (/ (rd-gen-integer 10 90) 100.0))
+        (y (/ (rd-gen-integer 10 90) 100.0)))
+    (pcase (rd-gen-integer 0 5)
+      (0 (list 'wheel (car (rd-gen-element remoteterm-tests--wheel-buttons))
+               modifiers x y))
+      (1 (list 'ignored
+               (rd-gen-element
+                (list (list 0 1 'frame) (list 0 0 'frame)
+                      (list (car (rd-gen-element
+                                  remoteterm-tests--wheel-buttons))
+                            0 'frame)
+                      (list 1 1 'other)))))
+      (_ (list 'click (rd-gen-element '(1 2 3 8 9)) modifiers x y
+               (remoteterm-tests--random-offset)
+               (remoteterm-tests--random-offset))))))
+
+(defun remoteterm-tests--random-offset ()
+  "Return a random offset in pixels of a release from its press.
+The offsets near `double-click-fuzz' are frequent."
+  (let ((size (if (zerop (rd-gen-integer 0 3))
+                  (rd-gen-integer 0 40)
+                (rd-gen-integer 0 (+ double-click-fuzz 2)))))
+    (if (zerop (rd-gen-integer 0 1)) size (- size))))
+
+(defun remoteterm-tests--random-mouse-inputs ()
+  "Return a list of random mouse inputs."
+  (cl-loop repeat (rd-gen-integer 1 8)
+           collect (remoteterm-tests--random-mouse-input)))
+
+(defun remoteterm-tests--text-area-pixel (window fraction-x fraction-y)
+  "Return the pixel (X . Y) of WINDOW at the fractions of its text area.
+X and Y are relative to the text area."
+  (pcase-let ((`(,left ,top ,right ,bottom) (window-inside-pixel-edges window)))
+    (cons (floor (* fraction-x (- right left 1)))
+          (floor (* fraction-y (- bottom top 1))))))
+
+(defvar remoteterm-tests--mouse-time 0
+  "The time of the client of the last mouse input of a test.
+The time increases from trial to trial, because keyboard.c compares the
+time of a click with the time of the click before, also of an earlier
+trial, to find a double click.")
+
+(defun remoteterm-tests--drag-p (window start end)
+  "Return non-nil if a press at START and a release at END are a drag.
+START and END are pixels of the text area of WINDOW.  This is the rule
+of keyboard.c: a release that is `double-click-fuzz' pixels or more
+from the press on an axis, or on another buffer position, is a drag."
+  (or (>= (abs (- (car end) (car start))) double-click-fuzz)
+      (>= (abs (- (cdr end) (cdr start))) double-click-fuzz)
+      (not (eql (posn-point (posn-at-x-y (car start) (cdr start) window))
+                (posn-point (posn-at-x-y (car end) (cdr end) window))))))
+
+(defun remoteterm-tests--mouse-messages (inputs frame)
+  "Return the messages and the expected events of the mouse INPUTS in FRAME.
+The value is (MESSAGES . EVENTS), with the expected events in the
+form of `remoteterm-tests--event-summary'."
+  (let* ((window (frame-selected-window frame))
+         (edges (window-inside-pixel-edges window))
+         (id (remoteterm-tests--frame-id frame))
+         (messages nil)
+         (events nil))
+    (cl-flet ((button (frame time pixel button modifiers press)
+                (push `(button :frame ,frame :time ,time
+                               :x ,(+ (nth 0 edges) (car pixel))
+                               :y ,(+ (nth 1 edges) (cdr pixel))
+                               :button ,button :modifiers ,modifiers
+                               :press ,press)
+                      messages)))
+      (dolist (input inputs)
+        (let ((time (cl-incf remoteterm-tests--mouse-time 10000))
+              (names (and (integerp (nth 2 input))
+                          (remoteterm-tests--modifier-names (nth 2 input)))))
+          (pcase input
+            (`(ignored (,b ,press ,which))
+             (button (if (eq which 'frame) id (+ id 1000)) time '(5 . 5)
+                     b 0 press))
+            (`(wheel ,b ,modifiers ,x ,y)
+             (let ((pixel (remoteterm-tests--text-area-pixel window x y)))
+               (button id time pixel b modifiers 1)
+               (button id (+ time 50) pixel b modifiers 0)
+               (push (list (event-convert-list
+                            (append names
+                                    (list (alist-get
+                                           b remoteterm-tests--wheel-buttons))))
+                           pixel time)
+                     events)))
+            (`(click ,b ,modifiers ,x ,y ,dx ,dy)
+             (let* ((start (remoteterm-tests--text-area-pixel window x y))
+                    (end (cons (+ (car start) dx) (+ (cdr start) dy)))
+                    (mouse (intern (format "mouse-%d" b))))
+               (button id time start b modifiers 1)
+               (button id (+ time 50) end b modifiers 0)
+               (push (list (event-convert-list (append names (list 'down mouse)))
+                           start time)
+                     events)
+               (push (if (remoteterm-tests--drag-p window start end)
+                         (list (event-convert-list
+                                (append names (list 'drag mouse)))
+                               start end time (+ time 50))
+                       (list (event-convert-list
+                              (append names (list mouse)))))
+                     events)))))))
+    (cons (nreverse messages) (nreverse events))))
+
+(defun remoteterm-tests--event-summary (event)
+  "Return the summary of the mouse EVENT that the model gives.
+A drag is (SYMBOL START END START-TIME END-TIME), a press and a wheel
+event are (SYMBOL POSITION TIME), and a click is (SYMBOL).  For Emacs,
+a wheel event has the `click' modifier, so the test of a wheel comes
+first."
+  (let ((symbol (car event))
+        (start (event-start event))
+        (end (event-end event)))
+    (cond ((assq (event-basic-type event)
+                 (mapcar (lambda (wheel) (list (cdr wheel)))
+                         remoteterm-tests--wheel-buttons))
+           (list symbol (posn-x-y start) (posn-timestamp start)))
+          ((memq 'drag (event-modifiers event))
+           (list symbol (posn-x-y start) (posn-x-y end)
+                 (posn-timestamp start) (posn-timestamp end)))
+          ((memq 'click (event-modifiers event)) (list symbol))
+          (t (list symbol (posn-x-y start) (posn-timestamp start))))))
+
+(defun remoteterm-tests--run-mouse-inputs (inputs)
+  "Send the mouse INPUTS to a session, and return (EVENTS . EXPECTED).
+A key message comes after the inputs, so that each input that gives no
+event must also not hold back a later event."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (redisplay t)
+     (pcase-let ((`(,messages . ,expected)
+                  (remoteterm-tests--mouse-messages inputs frame)))
+       (process-send-string
+        client-side
+        (concat (mapconcat #'remote-display--encode messages)
+                (remote-display--encode
+                 `(key :frame ,(remoteterm-tests--frame-id frame) :time 0
+                       :keysym ?z :character ?z :modifiers 0))))
+       (let ((events (remoteterm-tests--read-events (1+ (length expected)))))
+         (cons (mapcar (lambda (event)
+                         (if (eq event ?z) event
+                           (remoteterm-tests--event-summary event)))
+                       events)
+               (append expected (list ?z))))))))
+
+(rd-daemon-deftest remoteterm-tests-mouse-events
+  "A button message gives the click or the wheel event of Emacs.
+A press of a button that is not a wheel button gives a down event at
+its position and time.  The release gives a click, or a drag from the
+press, as `remoteterm-tests--drag-p' says.  A press of a button from 4
+to 7 gives a wheel event at its position and time, and its release
+gives no event.  Each event has the modifiers of the message.  The
+button 0 and a frame that does not exist give no event."
+  (let ((rd-gen-trials 30))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-mouse-inputs
+     (lambda (inputs)
+       (let ((result (remoteterm-tests--run-mouse-inputs inputs)))
+         (should (equal (car result) (cdr result))))))))
+
+(defun remoteterm-tests--random-motions ()
+  "Return a list of random motions: (FRAME X Y).
+FRAME is `frame' or `other', for a frame that does not exist.  X and Y
+can be negative, or far outside the frame."
+  (cl-loop repeat (rd-gen-integer 1 10)
+           collect (list (if (zerop (rd-gen-integer 0 3)) 'other 'frame)
+                         (rd-gen-integer -5000 5000)
+                         (rd-gen-integer -5000 5000))))
+
+(defun remoteterm-tests--run-motions (motions)
+  "Send MOTIONS to a session, and return the pixel position of the mouse.
+The value is (FRAME-P X . Y), with FRAME-P non-nil if the position is
+in the frame of the session, or nil if Emacs gives no position."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (process-send-string
+      client-side
+      (mapconcat
+       (lambda (motion)
+         (remote-display--encode
+          `(motion :frame ,(if (eq (nth 0 motion) 'frame)
+                               (remoteterm-tests--frame-id frame)
+                             (+ 1000 (remoteterm-tests--frame-id frame)))
+                   :time 5 :x ,(nth 1 motion) :y ,(nth 2 motion))))
+       motions))
+     (let ((last (car (last (cl-remove 'other motions :key #'car)))))
+       (with-timeout (5)
+         (while (and last
+                     (not (equal (cdr (mouse-pixel-position))
+                                 (cons (nth 1 last) (nth 2 last)))))
+           (accept-process-output nil 0.05)))
+       (accept-process-output nil 0.1)
+       (let ((position (mouse-pixel-position)))
+         (and (cadr position)
+              (cons (eq (car position) frame) (cdr position))))))))
+
+(rd-daemon-deftest remoteterm-tests-mouse-motions
+  "After motion messages, the mouse position is the position of the last
+message for a frame of the session.  A motion message for a frame that
+does not exist changes nothing."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-motions
+     (lambda (motions)
+       (let ((last (car (last (cl-remove 'other motions :key #'car)))))
+         (should (equal (remoteterm-tests--run-motions motions)
+                        (and last (cons t (cons (nth 1 last)
+                                                (nth 2 last)))))))))))
+
+(defun remoteterm-tests--deleted-motion-frame-case ()
+  "Move the mouse in a second frame, delete it, and return its position.
+Return t if the position has no deleted frame."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (let ((other (remoteterm-tests--make-frame "remote-input" nil)))
+       (process-send-string
+        client-side
+        (remote-display--encode
+         `(motion :frame ,(remoteterm-tests--frame-id other) :time 5
+                  :x 3 :y 4)))
+       (with-timeout (5)
+         (while (not (eq (car (mouse-pixel-position)) other))
+           (accept-process-output nil 0.05)))
+       (delete-frame other)
+       (select-frame frame)
+       (and (frame-live-p (car (mouse-pixel-position))) t)))))
+
+(ert-deftest remoteterm-tests-mouse-deleted-frame ()
+  "The mouse position has no frame that is deleted."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (eq (remoteterm-tests--daemon-call
+                 'remoteterm-tests--deleted-motion-frame-case)
+                t))))
+
+(defun remoteterm-tests--mouse-face-case ()
+  "Move the mouse onto a text with a `mouse-face', and return the frame
+of the mouse highlight of the session."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (let ((buffer (get-buffer-create "remote-mouse-face")))
+       (with-current-buffer buffer
+         (erase-buffer)
+         (insert (propertize "mouse" 'mouse-face 'highlight)))
+       (set-window-buffer (frame-selected-window frame) buffer)
+       (redisplay t)
+       (let ((edges (window-inside-pixel-edges (frame-selected-window frame))))
+         (process-send-string
+          client-side
+          (remote-display--encode
+           `(motion :frame ,(remoteterm-tests--frame-id frame) :time 5
+                    :x ,(1+ (nth 0 edges)) :y ,(1+ (nth 1 edges)))))
+         (with-timeout (5)
+           (while (not (remote-display--mouse-frame "remote-input"))
+             (accept-process-output nil 0.05)))
+         (prog1 (eq (remote-display--mouse-frame "remote-input") frame)
+           (kill-buffer buffer)))))))
+
+(ert-deftest remoteterm-tests-mouse-face ()
+  "A motion message onto a text with a `mouse-face' highlights the text."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (eq (remoteterm-tests--daemon-call
+                 'remoteterm-tests--mouse-face-case)
+                t))))
+
+(defun remoteterm-tests--double-click-case ()
+  "Send two clicks at one place within `double-click-time', return events."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (redisplay t)
+     (let* ((edges (window-inside-pixel-edges (frame-selected-window frame)))
+            (x (+ (nth 0 edges) 10))
+            (y (+ (nth 1 edges) 10)))
+       (process-send-string
+        client-side
+        (mapconcat
+         (lambda (step)
+           (remote-display--encode
+            `(button :frame ,(remoteterm-tests--frame-id frame)
+                     :time ,(car step) :x ,x :y ,y :button 1 :modifiers 0
+                     :press ,(cdr step))))
+         '((1000 . 1) (1050 . 0) (1100 . 1) (1150 . 0))))
+       (mapcar #'car (remoteterm-tests--read-events 4))))))
+
+(ert-deftest remoteterm-tests-mouse-double-click ()
+  "Two clicks at one place in a short time give a double click."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--double-click-case)
+                   '(down-mouse-1 mouse-1 double-down-mouse-1
+                                  double-mouse-1)))))
+
+(defun remoteterm-tests--mouse-position-case ()
+  "Move the mouse of the client, and return the pixel position of Emacs."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (process-send-string
+      client-side
+      (remote-display--encode
+       `(motion :frame ,(remoteterm-tests--frame-id frame) :time 5
+                :x 37 :y 23)))
+     (with-timeout (5)
+       (while (not (equal (cdr (mouse-pixel-position)) '(37 . 23)))
+         (accept-process-output nil 0.05)))
+     (let ((position (mouse-pixel-position)))
+       (list (eq (car position) frame) (cdr position))))))
+
+(ert-deftest remoteterm-tests-mouse-position ()
+  "After a motion message, the mouse position is the position of it."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--mouse-position-case)
+                   '(t (37 . 23))))))
+
+;; With `track-mouse', Emacs asks the mouse_position_hook of the
+;; terminal for the position, and makes a `mouse-movement' event.
+
+(defun remoteterm-tests--track-mouse-case ()
+  "Move the mouse in `track-mouse', and return the event and its position."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (redisplay t)
+     (let* ((window (frame-selected-window frame))
+            (edges (window-inside-pixel-edges window)))
+       (process-send-string
+        client-side
+        (remote-display--encode
+         `(motion :frame ,(remoteterm-tests--frame-id frame) :time 5
+                  :x ,(+ (nth 0 edges) 11) :y ,(+ (nth 1 edges) 7))))
+       (let ((event (track-mouse
+                      (with-timeout (5 'timeout)
+                        (let ((event nil))
+                          (while (or (null event)
+                                     (eq (car-safe event) 'switch-frame))
+                            (setq event (read-event nil nil 0.1)))
+                          event)))))
+         (list (car-safe event)
+               (eq (posn-window (event-start event)) window)
+               (posn-x-y (event-start event))
+               ;; One motion gives one event: the hook clears the
+               ;; mark of the motion.
+               (track-mouse (read-event nil nil 0.3))))))))
+
+(ert-deftest remoteterm-tests-track-mouse ()
+  "In `track-mouse', a motion message gives a `mouse-movement' event."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--track-mouse-case)
+                   '(mouse-movement t (11 . 7) nil)))))
 
 ;;;; The loop of the trials
 

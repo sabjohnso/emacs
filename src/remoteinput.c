@@ -27,12 +27,20 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    Unicode character of the key.  As in pgtkterm.c, a keysym of a
    function key gives a NON_ASCII_KEYSTROKE_EVENT, and keyboard.c gives
    the name of the keysym.  Another key gives its character, if it has
-   one.  */
+   one.
+
+   A button message gives a MOUSE_CLICK_EVENT, and keyboard.c makes
+   the click, drag, and double click events from the presses and the
+   releases.  The wheel buttons of rdproto.h are those of X: a press
+   gives a wheel event, and a release gives none.  A motion message
+   records the position of the mouse in the session, for the
+   mouse_position_hook, and updates the mouse highlight.  */
 
 #include <config.h>
 
 #include "lisp.h"
 #include "character.h"
+#include "dispextern.h"
 #include "frame.h"
 #include "keyboard.h"
 #include "termhooks.h"
@@ -41,32 +49,57 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 /* Keysyms with this bit are vendor keys.  */
 enum { KEYSYM_VENDOR = 1 << 28 };
 
-static void remote_key_event (struct remote_display_info *,
-			      const struct rd_key *);
+/* The wheel buttons, and the kind and the modifier of the event of
+   each, as in pgtkterm.c.  */
+struct remote_wheel
+{
+  uint8_t button;
+  enum event_kind kind;
+  int modifier;
+};
+
+static void remote_key_input (struct remote_display_info *,
+			      const struct rd_message *);
+static void remote_button_input (struct remote_display_info *,
+				 const struct rd_message *);
+static void remote_motion_input (struct remote_display_info *,
+				 const struct rd_message *);
+static void remote_wheel_event (struct frame *, const struct rd_button *,
+				const struct remote_wheel *);
+static void remote_click_event (struct frame *, const struct rd_button *);
+static const struct remote_wheel *remote_wheel_of (uint8_t);
+static void remote_clear_mouse_moved (struct remote_display_info *);
+static void remote_set_position (struct input_event *, struct frame *,
+				 int32_t, int32_t, uint32_t);
 static bool remote_function_keysym_p (uint32_t);
 static bool remote_modifier_keysym_p (uint32_t);
 static int remote_emacs_modifiers (uint8_t);
 static enum event_kind remote_character_kind (int);
 
+/* The function of each type of input message.  A type with no function
+   gives no event.  */
+static void (*const remote_input_functions[RD_TYPE_LIMIT])
+  (struct remote_display_info *, const struct rd_message *) =
+  {
+    [RD_KEY] = remote_key_input,
+    [RD_BUTTON] = remote_button_input,
+    [RD_MOTION] = remote_motion_input,
+  };
+
 void
 remote_handle_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
 {
-  switch (message->type)
-    {
-    case RD_KEY:
-      remote_key_event (dpyinfo, &message->u.key);
-      break;
-    default:
-      break;
-    }
+  if (remote_input_functions[message->type])
+    remote_input_functions[message->type] (dpyinfo, message);
 }
 
-/* Store the key event of KEY for its frame of DPYINFO.  */
+/* Store the key event of the key MESSAGE for its frame of DPYINFO.  */
 static void
-remote_key_event (struct remote_display_info *dpyinfo,
-		  const struct rd_key *key)
+remote_key_input (struct remote_display_info *dpyinfo,
+		  const struct rd_message *message)
 {
+  const struct rd_key *key = &message->u.key;
   struct frame *f = remote_frame_of_id (dpyinfo, key->frame);
   if (!f)
     return;
@@ -88,6 +121,132 @@ remote_key_event (struct remote_display_info *dpyinfo,
   else
     return;
   kbd_buffer_store_event (&ie);
+}
+
+/* Store the click or the wheel event of the button MESSAGE for its
+   frame of DPYINFO.  The button 0 is not a button.  */
+static void
+remote_button_input (struct remote_display_info *dpyinfo,
+		     const struct rd_message *message)
+{
+  const struct rd_button *button = &message->u.button;
+  struct frame *f = remote_frame_of_id (dpyinfo, button->frame);
+  if (!f || button->button == 0)
+    return;
+  const struct remote_wheel *wheel = remote_wheel_of (button->button);
+  if (!wheel)
+    remote_click_event (f, button);
+  else if (button->press)
+    remote_wheel_event (f, button, wheel);
+}
+
+/* Record the mouse position of the motion MESSAGE in DPYINFO, and
+   update the mouse highlight of its frame.  */
+static void
+remote_motion_input (struct remote_display_info *dpyinfo,
+		     const struct rd_message *message)
+{
+  const struct rd_motion *motion = &message->u.motion;
+  struct frame *f = remote_frame_of_id (dpyinfo, motion->frame);
+  if (!f)
+    return;
+  dpyinfo->last_mouse_motion_frame = f;
+  dpyinfo->last_mouse_motion_x = motion->x;
+  dpyinfo->last_mouse_motion_y = motion->y;
+  dpyinfo->last_mouse_movement_time = motion->time;
+  f->mouse_moved = true;
+  note_mouse_highlight (f, motion->x, motion->y);
+}
+
+void
+remote_mouse_position (struct frame **fp, int insist,
+		       Lisp_Object *bar_window, enum scroll_bar_part *part,
+		       Lisp_Object *x, Lisp_Object *y, Time *timestamp)
+{
+  struct remote_display_info *dpyinfo = FRAME_DISPLAY_INFO (*fp);
+  struct frame *f = dpyinfo->last_mouse_motion_frame;
+  if (!f)
+    return;
+  remote_clear_mouse_moved (dpyinfo);
+  *fp = f;
+  *bar_window = Qnil;
+  *part = scroll_bar_above_handle;
+  XSETINT (*x, dpyinfo->last_mouse_motion_x);
+  XSETINT (*y, dpyinfo->last_mouse_motion_y);
+  *timestamp = dpyinfo->last_mouse_movement_time;
+}
+
+/* Store the WHEEL event of a press of BUTTON in F.  */
+static void
+remote_wheel_event (struct frame *f, const struct rd_button *button,
+		    const struct remote_wheel *wheel)
+{
+  struct input_event ie;
+  EVENT_INIT (ie);
+  remote_set_position (&ie, f, button->x, button->y, button->time);
+  ie.kind = wheel->kind;
+  ie.modifiers = remote_emacs_modifiers (button->modifiers) | wheel->modifier;
+  kbd_buffer_store_event (&ie);
+}
+
+/* Store the click event of a press or a release of BUTTON in F.  */
+static void
+remote_click_event (struct frame *f, const struct rd_button *button)
+{
+  struct input_event ie;
+  EVENT_INIT (ie);
+  remote_set_position (&ie, f, button->x, button->y, button->time);
+  ie.kind = MOUSE_CLICK_EVENT;
+  ie.code = button->button - 1;
+  ie.modifiers = (remote_emacs_modifiers (button->modifiers)
+		  | (button->press ? down_modifier : up_modifier));
+  kbd_buffer_store_event (&ie);
+}
+
+/* The wheel buttons.  */
+static const struct remote_wheel remote_wheels[] =
+  {
+    { RD_BUTTON_WHEEL_UP, WHEEL_EVENT, up_modifier },
+    { RD_BUTTON_WHEEL_DOWN, WHEEL_EVENT, down_modifier },
+    { RD_BUTTON_WHEEL_LEFT, HORIZ_WHEEL_EVENT, up_modifier },
+    { RD_BUTTON_WHEEL_RIGHT, HORIZ_WHEEL_EVENT, down_modifier },
+  };
+
+/* Return the wheel of BUTTON, or NULL if BUTTON is not a wheel
+   button.  */
+static const struct remote_wheel *
+remote_wheel_of (uint8_t button)
+{
+  for (int i = 0; i < countof (remote_wheels); i++)
+    if (remote_wheels[i].button == button)
+      return &remote_wheels[i];
+  return NULL;
+}
+
+/* Clear the mark of a motion of each frame of DPYINFO.  The
+   mouse_position_hook gives the position, so the motion is not new
+   after it.  */
+static void
+remote_clear_mouse_moved (struct remote_display_info *dpyinfo)
+{
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    if (FRAME_REMOTE_P (XFRAME (frame))
+	&& FRAME_DISPLAY_INFO (XFRAME (frame)) == dpyinfo)
+      XFRAME (frame)->mouse_moved = false;
+}
+
+/* Set the frame, the position X, Y, and the time TIME of the event
+   IE to F.  */
+static void
+remote_set_position (struct input_event *ie, struct frame *f, int32_t x,
+		     int32_t y, uint32_t time)
+{
+  XSETFRAME (ie->frame_or_window, f);
+  XSETINT (ie->x, x);
+  XSETINT (ie->y, y);
+  ie->timestamp = time;
+  ie->arg = Qnil;
 }
 
 /* Return true if KEYSYM is a key with no character for Emacs: a
