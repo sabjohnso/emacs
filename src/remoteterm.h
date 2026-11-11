@@ -195,6 +195,10 @@ extern void syms_of_remoteterm (void);
 /* Defined in remoteproc.c.  */
 extern void syms_of_remoteproc (void);
 
+/* In remoteterm.c.  */
+extern struct frame *remote_frame_of_id (struct remote_display_info *,
+					 uint32_t);
+
 /* Defined in remotetest.c.  */
 extern void syms_of_remotetest (void);
 

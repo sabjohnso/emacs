@@ -24,15 +24,24 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_VIEW_H
 #define REMOTE_CLIENT_VIEW_H
 
+#include "rdproto.h"
 #include "render.h"
 
 struct rc_view;
 
-/* Return a new view of the frames of RENDERER.  When the user closes a
-   window, the view calls ON_CLOSE with DATA.  */
+/* The functions of a view.  The view calls ON_CLOSE when the user
+   closes a window, and SEND with each message of the input of the
+   user.  DATA is their first argument.  */
+struct rc_view_functions
+{
+  void (*on_close) (void *data);
+  void (*send) (void *data, const struct rd_message *message);
+  void *data;
+};
+
+/* Return a new view of the frames of RENDERER, with FUNCTIONS.  */
 extern struct rc_view *rc_view_new (struct rc_renderer *renderer,
-				    void (*on_close) (void *data),
-				    void *data);
+				    struct rc_view_functions functions);
 extern void rc_view_free (struct rc_view *view);
 
 /* Update VIEW for CHANGE, a change of its renderer.  Make, resize, or

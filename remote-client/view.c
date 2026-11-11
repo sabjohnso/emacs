@@ -23,14 +23,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <gtk/gtk.h>
 
+#include "input.h"
 #include "table.h"
 #include "view.h"
 
 struct rc_view
 {
   struct rc_renderer *renderer;
-  void (*on_close) (void *);
-  void *data;
+  struct rc_view_functions functions;
   /* The struct rc_window of each frame that has a window.  */
   struct rc_table windows;
 };
@@ -51,15 +51,15 @@ static struct rc_window *add_window (struct rc_view *, uint32_t);
 static void destroy_window (void *);
 static gboolean draw_frame (GtkWidget *, cairo_t *, gpointer);
 static void window_closed (GtkWidget *, gpointer);
+static gboolean key_pressed (GtkWidget *, GdkEventKey *, gpointer);
 
 struct rc_view *
-rc_view_new (struct rc_renderer *renderer, void (*on_close) (void *),
-	     void *data)
+rc_view_new (struct rc_renderer *renderer,
+	     struct rc_view_functions functions)
 {
   struct rc_view *view = g_new0 (struct rc_view, 1);
   view->renderer = renderer;
-  view->on_close = on_close;
-  view->data = data;
+  view->functions = functions;
   return view;
 }
 
@@ -132,6 +132,8 @@ add_window (struct rc_view *view, uint32_t frame)
   g_signal_connect (window->area, "draw", G_CALLBACK (draw_frame), window);
   g_signal_connect (window->window, "destroy", G_CALLBACK (window_closed),
 		    window);
+  g_signal_connect (window->window, "key-press-event",
+		    G_CALLBACK (key_pressed), window);
   gtk_window_set_title (GTK_WINDOW (window->window), "Emacs");
   gtk_window_set_resizable (GTK_WINDOW (window->window), false);
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
@@ -180,5 +182,21 @@ window_closed (GtkWidget *widget, gpointer data)
   struct rc_view *view = window->view;
   rc_table_remove (&view->windows, window->frame);
   g_free (window);
-  view->on_close (view->data);
+  view->functions.on_close (view->functions.data);
+}
+
+/* The key-press-event signal of a window.  DATA is the struct
+   rc_window.  Send the key message of the press, but not of a
+   modifier key alone.  */
+static gboolean
+key_pressed (GtkWidget *widget, GdkEventKey *event, gpointer data)
+{
+  (void) widget;
+  struct rc_window *window = data;
+  if (event->is_modifier)
+    return true;
+  struct rd_message message = rc_key_message (window->frame, event->keyval,
+					      event->state, event->time);
+  window->view->functions.send (window->view->functions.data, &message);
+  return true;
 }

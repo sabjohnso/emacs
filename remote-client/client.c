@@ -35,6 +35,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,12 +79,13 @@ struct png_mode
   bool have_first;
 };
 
-/* The state of the mode with windows.  */
+/* The state of the mode with windows.  FD is the connection.  */
 struct window_mode
 {
   struct rc_renderer *renderer;
   struct rc_reader *reader;
   struct rc_view *view;
+  int fd;
   /* True if the connection had an error.  */
   bool failed;
 };
@@ -97,6 +99,8 @@ static int show_frames (struct rc_renderer *, int);
 static void show_message (void *, const struct rd_message *);
 static gboolean read_input (gint, GIOCondition, gpointer);
 static void stop_main_loop (void *);
+static void send_message (void *, const struct rd_message *);
+static bool write_all (int, const unsigned char *, size_t);
 static enum read_result read_chunk (struct rc_reader *, int);
 static int connect_to (const char *);
 static void usage (void);
@@ -227,9 +231,10 @@ record_first_frame (void *data, const struct rd_message *message)
 static int
 show_frames (struct rc_renderer *renderer, int fd)
 {
-  struct window_mode mode = { .renderer = renderer };
+  struct window_mode mode = { .renderer = renderer, .fd = fd };
   mode.reader = rc_reader_new (show_message, &mode);
-  mode.view = rc_view_new (renderer, stop_main_loop, NULL);
+  mode.view = rc_view_new (renderer, (struct rc_view_functions)
+			   { stop_main_loop, send_message, &mode });
   fcntl (fd, F_SETFL, fcntl (fd, F_GETFL) | O_NONBLOCK);
   guint source = g_unix_fd_add (fd, G_IO_IN | G_IO_HUP | G_IO_ERR,
 				read_input, &mode);
@@ -273,6 +278,51 @@ stop_main_loop (void *data)
 {
   (void) data;
   gtk_main_quit ();
+}
+
+/* The function of the view for each message of the input of the user.
+   DATA is the struct window_mode.  Send MESSAGE to the server.  After
+   a failed write, stop the main loop.  */
+static void
+send_message (void *data, const struct rd_message *message)
+{
+  struct window_mode *mode = data;
+  size_t size = rd_encoded_size (message);
+  unsigned char *bytes = g_malloc (size);
+  rd_encode (message, bytes);
+  if (!write_all (mode->fd, bytes, size))
+    {
+      perror ("remote-client: write");
+      mode->failed = true;
+      gtk_main_quit ();
+    }
+  g_free (bytes);
+}
+
+/* Write the SIZE BYTES to the connection FD, which does not block.
+   When the connection cannot take more bytes now, wait until it can.
+   Return false on an error.  An input message is small, so the wait
+   is short.  */
+static bool
+write_all (int fd, const unsigned char *bytes, size_t size)
+{
+  while (size > 0)
+    {
+      ssize_t n = send (fd, bytes, size, MSG_NOSIGNAL);
+      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+	{
+	  struct pollfd ready = { .fd = fd, .events = POLLOUT };
+	  poll (&ready, 1, -1);
+	  continue;
+	}
+      if (n < 0 && errno == EINTR)
+	continue;
+      if (n < 0)
+	return false;
+      bytes += n;
+      size -= n;
+    }
+  return true;
 }
 
 /* Read one chunk from the connection FD, and give it to READER.

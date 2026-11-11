@@ -25,7 +25,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    and must not wait.  It writes to the file descriptor of the process
    with no wait.  The bytes that the connection cannot take now stay in
    a queue, and the process loop calls the sink again when the
-   connection can take more.  */
+   connection can take more.
+
+   The client sends its input messages on the same connection.  The
+   filter of the process, remote-display--receive, decodes them, and
+   gives each one to remoteinput.c.  */
 
 #include <config.h>
 
@@ -34,23 +38,50 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "lisp.h"
 #include "process.h"
+#include "rdproto.h"
+#include "remoteinput.h"
 #include "remoteterm.h"
 
-/* The data of a connection sink: the process, and the queue of the
-   bytes that the connection did not take.  The bytes from START to
-   USED are not sent.  WAITING is true while the process loop calls
-   remote_connection_writable for the file descriptor.  */
+/* The input from a client that is not a complete message.  BYTES has
+   USED such bytes, and has SIZE bytes.  SKIP is the number of bytes of
+   a message of an unknown type that did not come.  After a message with
+   an error, FAILED is true, and the input ignores all bytes.  */
+struct remote_input
+{
+  unsigned char *bytes;
+  ptrdiff_t used;
+  ptrdiff_t size;
+  ptrdiff_t skip;
+  bool failed;
+};
+
+/* The data of a connection sink: the process, the session DPYINFO,
+   the queue of the bytes that the connection did not take, and the
+   input from the client.  The bytes from START to USED are not sent.
+   WAITING is true while the process loop calls
+   remote_connection_writable for the file descriptor.  NEXT is the next
+   connection of remote_connections.  */
 struct remote_connection
 {
   Lisp_Object process;
+  struct remote_display_info *dpyinfo;
   unsigned char *queue;
   ptrdiff_t start;
   ptrdiff_t used;
   ptrdiff_t size;
   bool waiting;
+  struct remote_input input;
+  struct remote_connection *next;
 };
 
-static struct remote_sink *remote_make_connection_sink (Lisp_Object);
+static struct remote_sink *remote_make_connection_sink
+  (struct remote_display_info *, Lisp_Object);
+static struct remote_connection *remote_find_connection (Lisp_Object);
+static void remote_connection_receive (struct remote_connection *,
+				       const unsigned char *, ptrdiff_t);
+static void remote_input_add (struct remote_input *, const unsigned char *,
+			      ptrdiff_t);
+static bool remote_input_next (struct remote_input *, struct rd_message *);
 static void remote_connection_write (void *, const unsigned char *, ptrdiff_t);
 static void remote_connection_flush (void *);
 static void remote_connection_free (void *);
@@ -73,6 +104,9 @@ static const struct remote_sink_ops remote_connection_ops =
    the list has exactly the processes of the live sinks.  */
 static Lisp_Object remote_connection_processes;
 
+/* The connections of the live sinks.  */
+static struct remote_connection *remote_connections;
+
 DEFUN ("remote-display-attach", Fremote_display_attach,
        Sremote_display_attach, 2, 2, 0,
        doc: /* Attach the network connection PROCESS to the session DISPLAY.
@@ -85,8 +119,99 @@ one session.  */)
   struct remote_display_info *dpyinfo = check_x_display_info (display);
   remote_check_connection (process);
   remote_connection_processes = Fcons (process, remote_connection_processes);
-  remote_set_sink (dpyinfo, remote_make_connection_sink (process));
+  remote_set_sink (dpyinfo, remote_make_connection_sink (dpyinfo, process));
+  Fset_process_coding_system (process, Qno_conversion, Qno_conversion);
+  Fset_process_filter (process, Qremote_display__receive);
   return Qnil;
+}
+
+DEFUN ("remote-display--receive", Fremote_display__receive,
+       Sremote_display__receive, 2, 2, 0,
+       doc: /* Give the bytes STRING from the client PROCESS to its session.
+`remote-display-attach' makes this function the filter of PROCESS.  */)
+  (Lisp_Object process, Lisp_Object string)
+{
+  CHECK_STRING (string);
+  struct remote_connection *connection = remote_find_connection (process);
+  if (connection)
+    remote_connection_receive (connection, SDATA (string), SBYTES (string));
+  return Qnil;
+}
+
+/* Return the connection of the sink of PROCESS, or NULL if PROCESS is
+   not the client of a session.  */
+static struct remote_connection *
+remote_find_connection (Lisp_Object process)
+{
+  for (struct remote_connection *c = remote_connections; c; c = c->next)
+    if (EQ (c->process, process))
+      return c;
+  return NULL;
+}
+
+/* Give the SIZE BYTES from the client to the session of CONNECTION:
+   give each message that is complete now to remote_handle_input.  The
+   handler can quit, for example for the key C-g, so the input removes
+   each message before the handler gets it.  */
+static void
+remote_connection_receive (struct remote_connection *connection,
+			   const unsigned char *bytes, ptrdiff_t size)
+{
+  remote_input_add (&connection->input, bytes, size);
+  struct rd_message message;
+  while (remote_input_next (&connection->input, &message))
+    remote_handle_input (connection->dpyinfo, &message);
+}
+
+/* Add the SIZE BYTES to INPUT, after the bytes of an unknown message
+   that INPUT skips.  After an error, ignore them.  */
+static void
+remote_input_add (struct remote_input *input, const unsigned char *bytes,
+		  ptrdiff_t size)
+{
+  if (input->failed)
+    return;
+  ptrdiff_t skipped = min (size, input->skip);
+  input->skip -= skipped;
+  bytes += skipped;
+  size -= skipped;
+  ptrdiff_t needed = input->used + size - input->size;
+  if (needed > 0)
+    input->bytes = xpalloc (input->bytes, &input->size, needed, -1, 1);
+  memcpy (input->bytes + input->used, bytes, size);
+  input->used += size;
+}
+
+/* Remove the first complete message from INPUT, and set *MESSAGE to
+   it.  Return false if INPUT has no complete message.  Skip a message
+   of an unknown type.  After a message with an error, discard the
+   input, and ignore all later bytes.  */
+static bool
+remote_input_next (struct remote_input *input, struct rd_message *message)
+{
+  for (;;)
+    {
+      size_t used;
+      ptrdiff_t left = input->used;
+      enum rd_status status = rd_decode (input->bytes, left, message, &used);
+      if (status == RD_INCOMPLETE)
+	return false;
+      if (status != RD_OK && status != RD_UNKNOWN_TYPE)
+	{
+	  input->failed = true;
+	  input->used = 0;
+	  return false;
+	}
+      if (status == RD_UNKNOWN_TYPE && used > left)
+	{
+	  input->skip = used - left;
+	  used = left;
+	}
+      memmove (input->bytes, input->bytes + used, left - used);
+      input->used = left - used;
+      if (status == RD_OK)
+	return true;
+    }
 }
 
 /* Signal an error if PROCESS cannot be the client of a session.  */
@@ -105,12 +230,17 @@ remote_check_connection (Lisp_Object process)
     error ("The process is already the client of a session");
 }
 
-/* Return a new sink that sends its bytes to PROCESS.  */
+/* Return a new sink of the session DPYINFO that sends its bytes to
+   PROCESS.  */
 static struct remote_sink *
-remote_make_connection_sink (Lisp_Object process)
+remote_make_connection_sink (struct remote_display_info *dpyinfo,
+			     Lisp_Object process)
 {
   struct remote_connection *connection = xzalloc (sizeof *connection);
   connection->process = process;
+  connection->dpyinfo = dpyinfo;
+  connection->next = remote_connections;
+  remote_connections = connection;
   return remote_make_sink (&remote_connection_ops, connection);
 }
 
@@ -153,6 +283,11 @@ remote_connection_free (void *data)
 				  remote_connection_fd (connection));
   remote_connection_processes = Fdelq (connection->process,
 				       remote_connection_processes);
+  struct remote_connection **link = &remote_connections;
+  while (*link != connection)
+    link = &(*link)->next;
+  *link = connection->next;
+  xfree (connection->input.bytes);
   xfree (connection->queue);
   xfree (connection);
 }
@@ -226,5 +361,7 @@ syms_of_remoteproc (void)
   remote_connection_processes = Qnil;
   staticpro (&remote_connection_processes);
 
+  DEFSYM (Qremote_display__receive, "remote-display--receive");
   defsubr (&Sremote_display_attach);
+  defsubr (&Sremote_display__receive);
 }

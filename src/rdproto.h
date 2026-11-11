@@ -86,7 +86,12 @@ enum rd_cursor_kind
   MESSAGE (DRAW_FRINGE, draw_fringe, RD_DRAW_FRINGE_FIELDS)		\
   MESSAGE (DEFINE_FONT, define_font, RD_DEFINE_FONT_FIELDS)		\
   MESSAGE (DEFINE_FRAME, define_frame, RD_DEFINE_FRAME_FIELDS)		\
-  MESSAGE (DELETE_FRAME, delete_frame, RD_DELETE_FRAME_FIELDS)
+  MESSAGE (DELETE_FRAME, delete_frame, RD_DELETE_FRAME_FIELDS)		\
+  MESSAGE (KEY, key, RD_KEY_FIELDS)					\
+  MESSAGE (BUTTON, button, RD_BUTTON_FIELDS)				\
+  MESSAGE (MOTION, motion, RD_MOTION_FIELDS)				\
+  MESSAGE (FOCUS, focus, RD_FOCUS_FIELDS)				\
+  MESSAGE (RESIZE, resize, RD_RESIZE_FIELDS)
 
 /* Each list gives the fields of a message in the order of the wire.
    FIELD (M, TYPE, NAME) is a member NAME of the C type TYPE_t.
@@ -201,6 +206,67 @@ enum rd_cursor_kind
    a frame that it defined after the last attach of the client.  */
 #define RD_DELETE_FRAME_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint32, frame)
+
+/* The messages from a client to the server follow.  Each has the
+   frame of the window where the event happened.  TIME is the time of
+   the client in milliseconds, which can wrap.  MODIFIERS has the bits
+   of enum rd_modifier.  */
+
+/* The user pressed the key KEYSYM, an X keysym.  CHARACTER is the
+   Unicode character of the key, or 0 if it has none.  */
+#define RD_KEY_FIELDS(FIELD, ARRAY, M)					\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, time)						\
+  FIELD (M, uint32, keysym)						\
+  FIELD (M, uint32, character)						\
+  FIELD (M, uint8, modifiers)
+
+/* The user pressed (PRESS is 1) or released (PRESS is 0) the mouse
+   button BUTTON at X, Y.  Button 1 is the left button.  */
+#define RD_BUTTON_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, time)						\
+  FIELD (M, int32, x)							\
+  FIELD (M, int32, y)							\
+  FIELD (M, uint8, button)						\
+  FIELD (M, uint8, modifiers)						\
+  FIELD (M, uint8, press)
+
+/* The mouse moved to X, Y.  */
+#define RD_MOTION_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, time)						\
+  FIELD (M, int32, x)							\
+  FIELD (M, int32, y)
+
+/* The window of FRAME got (IN is 1) or lost (IN is 0) the focus.  */
+#define RD_FOCUS_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint8, in)
+
+/* The window of FRAME has the size WIDTH, HEIGHT in pixels now.  */
+#define RD_RESIZE_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, width)						\
+  FIELD (M, uint32, height)
+
+/* The modifiers of an input message.  A row is MODIFIER (ENUM, NAME,
+   BIT): the bit RD_ENUM of the MODIFIERS field, and the NAME of the
+   modifier in Lisp.  The bits are part of the wire format.  */
+#define RD_MODIFIERS(MODIFIER)						\
+  MODIFIER (SHIFT, shift, 1)						\
+  MODIFIER (CONTROL, control, 2)					\
+  MODIFIER (META, meta, 4)						\
+  MODIFIER (SUPER, super, 8)						\
+  MODIFIER (HYPER, hyper, 16)						\
+  MODIFIER (ALT, alt, 32)
+
+#define RD_MODIFIER_ENUMERATOR(ENUM, NAME, BIT) RD_##ENUM = BIT,
+enum rd_modifier
+  {
+    RD_MODIFIERS (RD_MODIFIER_ENUMERATOR)
+  };
+#undef RD_MODIFIER_ENUMERATOR
 
 /* The value 0 is not a message type.  */
 #define RD_TYPE_ENUMERATOR(ENUM, NAME, FIELDS) RD_##ENUM,

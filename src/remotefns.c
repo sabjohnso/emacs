@@ -269,6 +269,18 @@ syms_of_remotefns (void)
   Vremote_display__hash_size = make_fixnum (RD_HASH_SIZE);
   make_symbol_constant (intern_c_string ("remote-display--hash-size"));
 
+  DEFVAR_LISP ("remote-display--modifier-bits",
+	       Vremote_display__modifier_bits,
+	       doc: /* The bits of the modifiers field of an input message.
+Each element is (MODIFIER . BIT).  */);
+  Lisp_Object bits = Qnil;
+#define MODIFIER_ENTRY(ENUM, NAME, BIT)					\
+  bits = Fcons (Fcons (intern_c_string (#NAME), make_fixnum (BIT)), bits);
+  RD_MODIFIERS (MODIFIER_ENTRY)
+#undef MODIFIER_ENTRY
+  Vremote_display__modifier_bits = Fnreverse (bits);
+  make_symbol_constant (intern_c_string ("remote-display--modifier-bits"));
+
   /* The list for Lisp is a copy, so a change of it does not change
      the conversion of messages.  */
   Lisp_Object formats = Qnil;

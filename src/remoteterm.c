@@ -807,13 +807,20 @@ remote_assign_frame_id (struct frame *f)
 static bool
 remote_frame_id_used_p (struct remote_display_info *dpyinfo, uint32_t id)
 {
+  return remote_frame_of_id (dpyinfo, id) != NULL;
+}
+
+/* Return the frame of DPYINFO with the ID, or NULL if it has none.  */
+struct frame *
+remote_frame_of_id (struct remote_display_info *dpyinfo, uint32_t id)
+{
   Lisp_Object tail, frame;
   FOR_EACH_FRAME (tail, frame)
     if (FRAME_REMOTE_P (XFRAME (frame))
 	&& FRAME_DISPLAY_INFO (XFRAME (frame)) == dpyinfo
 	&& remote_frame_id (XFRAME (frame)) == id)
-      return true;
-  return false;
+      return XFRAME (frame);
+  return NULL;
 }
 
 /* Return the ID by which the client knows F.  */

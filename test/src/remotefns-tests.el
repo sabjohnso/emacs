@@ -90,6 +90,23 @@
 ;; (delete-frame :frame F)
 ;;     The frame F does not exist now.  A client closes its window.
 ;;
+;; A client sends these messages to the server:
+;;
+;; (key :frame F :time T :keysym K :character C :modifiers M)
+;;     The user pressed the key K, an X keysym, in the window of the
+;;     frame F.  C is the Unicode character of the key, or 0.  M has the
+;;     bits of `remote-display--modifier-bits'.  T is the time of the
+;;     client in milliseconds, which can wrap.
+;; (button :frame F :time T :x X :y Y :button B :modifiers M :press P)
+;;     The user pressed (P is 1) or released (P is 0) the mouse button
+;;     B at X, Y.
+;; (motion :frame F :time T :x X :y Y)
+;;     The mouse moved to X, Y.
+;; (focus :frame F :in I)
+;;     The window of F got (I is 1) or lost (I is 0) the focus.
+;; (resize :frame F :width W :height H)
+;;     The window of F has the size W, H in pixels now.
+;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
 ;; 16 bits, because a row of a fringe bitmap has 16 bits.  Each color
@@ -110,6 +127,7 @@
 (defvar remote-display--hash-size)
 (defvar remote-display--max-fringe-rows)
 (defvar remote-display--message-formats)
+(defvar remote-display--modifier-bits)
 
 ;; A build without the remote window system does not have these
 ;; functions.  The tests of such a build are skipped.
@@ -125,7 +143,12 @@
     (draw-fringe . remotefns-tests--draw-fringe)
     (define-font . remotefns-tests--define-font)
     (define-frame . remotefns-tests--define-frame)
-    (delete-frame . remotefns-tests--delete-frame))
+    (delete-frame . remotefns-tests--delete-frame)
+    (key . remotefns-tests--key)
+    (button . remotefns-tests--button)
+    (motion . remotefns-tests--motion)
+    (focus . remotefns-tests--focus)
+    (resize . remotefns-tests--resize))
   "The message types, each with the function that generates a message.")
 
 (defconst remotefns-tests--clip-and-color
@@ -226,6 +249,33 @@
 (defun remotefns-tests--delete-frame ()
   "Return a random `delete-frame' message."
   (list 'delete-frame :frame (rd-gen-uint32)))
+
+(defun remotefns-tests--key ()
+  "Return a random `key' message."
+  (list 'key :frame (rd-gen-uint32) :time (rd-gen-uint32)
+        :keysym (rd-gen-uint32) :character (rd-gen-uint32)
+        :modifiers (rd-gen-integer 0 255)))
+
+(defun remotefns-tests--button ()
+  "Return a random `button' message."
+  (list 'button :frame (rd-gen-uint32) :time (rd-gen-uint32)
+        :x (rd-gen-int32) :y (rd-gen-int32)
+        :button (rd-gen-integer 0 255) :modifiers (rd-gen-integer 0 255)
+        :press (rd-gen-integer 0 255)))
+
+(defun remotefns-tests--motion ()
+  "Return a random `motion' message."
+  (list 'motion :frame (rd-gen-uint32) :time (rd-gen-uint32)
+        :x (rd-gen-int32) :y (rd-gen-int32)))
+
+(defun remotefns-tests--focus ()
+  "Return a random `focus' message."
+  (list 'focus :frame (rd-gen-uint32) :in (rd-gen-integer 0 255)))
+
+(defun remotefns-tests--resize ()
+  "Return a random `resize' message."
+  (list 'resize :frame (rd-gen-uint32) :width (rd-gen-uint32)
+        :height (rd-gen-uint32)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -438,6 +488,56 @@
   ;; Length 5, type 9, frame #x01020304.
   (should (equal (remote-display--encode '(delete-frame :frame #x01020304))
                  (unibyte-string 0 0 0 5 9 1 2 3 4))))
+
+(ert-deftest remotefns-tests-key-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 18, type 10, frame 1, time 5, keysym #xff0d, character 0,
+  ;; modifiers 2.
+  (should (equal (remote-display--encode
+                  '(key :frame 1 :time 5 :keysym #xff0d :character 0
+                        :modifiers 2))
+                 (unibyte-string 0 0 0 18 10 0 0 0 1 0 0 0 5
+                                 0 0 #xff #x0d 0 0 0 0 2))))
+
+(ert-deftest remotefns-tests-button-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 20, type 11, frame 1, time 2, x -1, y 3, button 1,
+  ;; modifiers 4, press 1.
+  (should (equal (remote-display--encode
+                  '(button :frame 1 :time 2 :x -1 :y 3 :button 1
+                           :modifiers 4 :press 1))
+                 (unibyte-string 0 0 0 20 11 0 0 0 1 0 0 0 2
+                                 #xff #xff #xff #xff 0 0 0 3 1 4 1))))
+
+(ert-deftest remotefns-tests-motion-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 17, type 12, frame 1, time 2, x 3, y -2.
+  (should (equal (remote-display--encode
+                  '(motion :frame 1 :time 2 :x 3 :y -2))
+                 (unibyte-string 0 0 0 17 12 0 0 0 1 0 0 0 2
+                                 0 0 0 3 #xff #xff #xff #xfe))))
+
+(ert-deftest remotefns-tests-focus-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 6, type 13, frame 7, in 1.
+  (should (equal (remote-display--encode '(focus :frame 7 :in 1))
+                 (unibyte-string 0 0 0 6 13 0 0 0 7 1))))
+
+(ert-deftest remotefns-tests-resize-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 13, type 14, frame 1, width 2, height 3.
+  (should (equal (remote-display--encode
+                  '(resize :frame 1 :width 2 :height 3))
+                 (unibyte-string 0 0 0 13 14 0 0 0 1 0 0 0 2 0 0 0 3))))
+
+(ert-deftest remotefns-tests-modifier-bits ()
+  "Each modifier has one bit, and the bits are the same for each build.
+The bits are part of the wire format, so a change of them changes the
+protocol."
+  (skip-unless (featurep 'remote-display))
+  (should (equal remote-display--modifier-bits
+                 '((shift . 1) (control . 2) (meta . 4) (super . 8)
+                   (hyper . 16) (alt . 32)))))
 
 (ert-deftest remotefns-tests-byte-order-of-each-value ()
   "All bytes of a value are in big-endian order, not only the low bytes."

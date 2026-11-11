@@ -37,10 +37,10 @@ GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 RENDER_OBJS = render.o table.o rdproto.o
 READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o
-CLIENT_OBJS = client.o view.o reader.o render.o table.o fonts.o \
+CLIENT_OBJS = client.o view.o input.o reader.o render.o table.o fonts.o \
   hashfonts.o hashcache.o rdproto.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
-  test-client
+  test-input test-client
 
 all: remote-client $(TESTS)
 
@@ -53,6 +53,7 @@ check: remote-client $(TESTS)
 	./test-reader
 	./test-glyphs
 	./test-fonts
+	./test-input
 	./test-client
 
 # Build again with AddressSanitizer and UndefinedBehaviorSanitizer, and
@@ -78,10 +79,13 @@ test-glyphs: test-glyphs.o $(RENDER_OBJS) $(FONTS_OBJS)
 test-fonts: test-fonts.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+test-input: test-input.o input.o rdproto.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
+
 test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-client.o view.o: %.o: %.c
+client.o view.o input.o test-input.o: %.o: %.c
 	$(CC) $(ALL_CFLAGS) $(GTK_CFLAGS) -c -o $@ $<
 
 rdproto.o: ../src/rdproto.c ../src/rdproto.h config.h
@@ -98,6 +102,7 @@ fonts.o test-glyphs.o test-client.o test-fonts.o: fonts.h render.h \
 hashfonts.o test-fonts.o client.o: hashfonts.h render.h ../src/rdproto.h
 hashfonts.o hashcache.o client.o: hashcache.h ../src/rdproto.h
 client.o view.o: view.h reader.h fonts.h render.h ../src/rdproto.h
+input.o test-input.o view.o: input.h ../src/rdproto.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)

@@ -5158,6 +5158,364 @@ that nothing else holds, so a weak table shows if the kboard went away."
                 (remoteterm-tests--with-frame _frame "remote-kboard" nil)))
              remoteterm-tests--kboard-cycles)))
 
+;;;; Input
+
+(defconst remoteterm-tests--function-keys
+  '((#xff08 8 backspace) (#xff09 9 tab) (#xff0d 13 return)
+    (#xff1b 27 escape) (#xffff 127 delete) (#xff50 0 home)
+    (#xff51 0 left) (#xff52 0 up) (#xff53 0 right) (#xff54 0 down)
+    (#xff55 0 prior) (#xff56 0 next) (#xff57 0 end) (#xff63 0 insert)
+    (#xffbe 0 f1) (#xffc9 0 f12) (#xff95 0 kp-home) (#xffb1 0 kp-1))
+  "Function keys: each element is (KEYSYM CHARACTER EVENT).
+CHARACTER is the character that GDK gives for the key, or 0.  EVENT is
+the event of Emacs for the key with no modifiers.")
+
+(defun remoteterm-tests--random-key ()
+  "Return a random key: (KEYSYM CHARACTER MODIFIERS EXPECTED).
+MODIFIERS has the bits of `remote-display--modifier-bits'.  EXPECTED
+is the event that Emacs gives for the key.  An ASCII keysym is its
+character, a keysym from #x1000000 is #x1000000 plus a Unicode
+character, and a Latin-1 keysym from #xa0 is its character.  The
+event of a character has no shift modifier, because the keysym of a
+shifted key is the shifted character, but shift can change the case
+in a key chord: see `remoteterm-tests--chord-case'.  The space keeps
+shift, so S-SPC is not SPC."
+  (let* ((modifiers (rd-gen-integer 0 63))
+         (names (cl-loop for (name . bit) in remote-display--modifier-bits
+                         unless (zerop (logand modifiers bit))
+                         collect name)))
+    (pcase (rd-gen-integer 0 3)
+      (0 (let ((key (rd-gen-element remoteterm-tests--function-keys)))
+           (list (nth 0 key) (nth 1 key) modifiers
+                 (event-convert-list (append names (list (nth 2 key)))))))
+      (kind
+       (let* ((character (pcase kind
+                           (1 (rd-gen-integer 32 126))
+                           (2 (rd-gen-integer #xa0 #xff))
+                           (_ (rd-gen-integer #x100 #x2fff))))
+              ;; C-g quits.  The test of quit has its own case.
+              (character (if (memq character '(?g ?G)) ?h character))
+              (keysym (if (< character #x100) character
+                        (+ #x1000000 character))))
+         (list keysym character modifiers
+               (event-convert-list
+                (append (if (= character ?\s) names
+                          (delq 'shift (copy-sequence names)))
+                        (list (remoteterm-tests--chord-case character
+                                                            names))))))))))
+
+(defun remoteterm-tests--chord-case (character modifiers)
+  "Return CHARACTER with the case that a key chord with MODIFIERS gives.
+In a chord with a modifier other than shift, keyboard.c takes a
+capital letter with no shift, or a small letter with shift, as the
+effect of Caps Lock, and changes the case.  This is the rule of
+`make_lispy_event'."
+  (let ((shift (memq 'shift modifiers))
+        (upper (/= character (downcase character)))
+        (lower (and (= character (downcase character))
+                    (/= character (upcase character)))))
+    (cond ((null (delq 'shift (copy-sequence modifiers))) character)
+          ((and upper (not shift)) (downcase character))
+          ((and lower shift) (upcase character))
+          (t character))))
+
+;; An input of the property of the key messages is (MESSAGE EVENT):
+;; a message from the client, and the event that it gives, or nil if it
+;; gives none.  The message can also be the bytes of a frame of a type
+;; that the session does not know.  The frame field of a message is
+;; `frame', for the frame of the test, or `other', for a frame that does
+;; not exist.  The daemon puts the IDs of the frames in their place.
+
+(defconst remoteterm-tests--modifier-keysyms
+  '(#xffe1 #xffe2 #xffe3 #xffe5 #xffe9 #xffeb #xffee #xfe01 #xfe03 #xfe0f)
+  "Keysyms of modifier keys and lock keys, which give no event.
+The list has the first and the last keysym of each range.")
+
+(defconst remoteterm-tests--vendor-keysyms
+  '(#x1008ff11 #x1008ff13 #x10000000)
+  "Vendor keysyms.  The event of such a key is the symbol key-N, with N
+the keysym, because the session has no `system-key-alist'.")
+
+(defun remoteterm-tests--random-input ()
+  "Return a random input of the property of the key messages."
+  (pcase (rd-gen-integer 0 14)
+    (11 (let ((keysym (rd-gen-element remoteterm-tests--vendor-keysyms))
+              (modifiers (rd-gen-integer 0 63)))
+          (list (list 'key :frame 'frame :time 0 :keysym keysym
+                      :character 0 :modifiers modifiers)
+                (event-convert-list
+                 (append (remoteterm-tests--modifier-names modifiers)
+                         (list (intern (format "key-%d" keysym))))))))
+    (12 (list (list 'key :frame 'frame :time 0
+                    :keysym (rd-gen-integer #x100 #xfdff)
+                    :character (rd-gen-element (list 0 #x400000 #xffffffff))
+                    :modifiers 0)
+              nil))
+    (13 (list (remoteterm-tests--random-pointer-message) nil))
+    (0 (list (list 'key :frame 'frame :time 0
+                   :keysym (rd-gen-element
+                            remoteterm-tests--modifier-keysyms)
+                   :character 0 :modifiers (rd-gen-integer 0 63))
+             nil))
+    (1 (let ((key (remoteterm-tests--random-key)))
+         (list (remoteterm-tests--key-message 'other key) nil)))
+    (2 (list (list 'hello :version (rd-gen-uint16)) nil))
+    (3 (list (remoteterm-tests--unknown-type-frame) nil))
+    (_ (let ((key (remoteterm-tests--random-key)))
+         (list (remoteterm-tests--key-message 'frame key) (nth 3 key))))))
+
+(defun remoteterm-tests--modifier-names (modifiers)
+  "Return the names of the bits of MODIFIERS."
+  (cl-loop for (name . bit) in remote-display--modifier-bits
+           unless (zerop (logand modifiers bit))
+           collect name))
+
+(defun remoteterm-tests--random-pointer-message ()
+  "Return a random button, motion, focus, or resize message for the frame.
+The session gives no event for these messages yet."
+  (pcase (rd-gen-integer 0 3)
+    (0 (list 'button :frame 'frame :time 0 :x (rd-gen-int32)
+             :y (rd-gen-int32) :button (rd-gen-integer 0 255)
+             :modifiers (rd-gen-integer 0 255) :press (rd-gen-integer 0 1)))
+    (1 (list 'motion :frame 'frame :time 0 :x (rd-gen-int32)
+             :y (rd-gen-int32)))
+    (2 (list 'focus :frame 'frame :in (rd-gen-integer 0 1)))
+    (_ (list 'resize :frame 'frame :width (rd-gen-uint32)
+             :height (rd-gen-uint32)))))
+
+(defun remoteterm-tests--unknown-type-frame ()
+  "Return the bytes of a frame of a type that the session does not know."
+  (let ((body (rd-gen-bytes (rd-gen-integer 0 40))))
+    (concat (unibyte-string 0 0 0 (1+ (length body)) 255) body)))
+
+(defun remoteterm-tests--key-message (frame key)
+  "Return the key message of KEY, a `remoteterm-tests--random-key', for FRAME."
+  (list 'key :frame frame :time 0 :keysym (nth 0 key)
+        :character (nth 1 key) :modifiers (nth 2 key)))
+
+(defun remoteterm-tests--random-inputs ()
+  "Return random inputs and chunks: (INPUTS CHUNKS).
+CHUNKS is a list of the sizes of the parts of the bytes of INPUTS that
+the client sends one at a time."
+  (list (cl-loop repeat (rd-gen-integer 1 20)
+                 collect (remoteterm-tests--random-input))
+        (cl-loop repeat (rd-gen-integer 0 8)
+                 collect (rd-gen-integer 1 30))))
+
+(defun remoteterm-tests--read-events (count)
+  "Read up to COUNT events, and return them in order.
+Leave out each `switch-frame' event.  Stop after 10 seconds, or after
+one second with no event."
+  (let ((events nil)
+        (idle 0))
+    (with-timeout (10)
+      (while (and (< (length events) count) (< idle 20))
+        (accept-process-output nil 0.05)
+        (let ((event (read-event nil nil 0.01)))
+          (cond ((null event) (cl-incf idle))
+                ((not (eq (car-safe event) 'switch-frame))
+                 (setq idle 0)
+                 (push event events))))))
+    (nreverse events)))
+
+(defun remoteterm-tests--send-in-chunks (process bytes chunks)
+  "Send BYTES to PROCESS in parts of the sizes CHUNKS, and then the rest.
+Read between the parts, so that the other end gets them apart."
+  (dolist (size chunks)
+    (let ((part (substring bytes 0 (min size (length bytes)))))
+      (setq bytes (substring bytes (length part)))
+      (process-send-string process part)
+      (accept-process-output nil 0.01)))
+  (process-send-string process bytes))
+
+(defun remoteterm-tests--with-input-session (function)
+  "Call FUNCTION in a session with a frame and an attached client.
+The arguments of FUNCTION are the frame, the client side of the
+connection, and the server side.  Return the value of FUNCTION."
+  (remoteterm-tests--with-display "remote-input"
+    (remoteterm-tests--with-frame frame "remote-input" nil
+      (select-frame frame)
+      (remoteterm-tests--with-connections
+       '(a)
+       (lambda (connections)
+         (let ((connection (alist-get 'a connections)))
+           (remote-display-attach "remote-input"
+                                  (plist-get connection :server-side))
+           (funcall function frame (plist-get connection :client-side)
+                    (plist-get connection :server-side))))))))
+
+(defun remoteterm-tests--encode-inputs (inputs frame)
+  "Return the bytes of the messages of INPUTS for FRAME."
+  (let ((id (remoteterm-tests--frame-id frame)))
+    (mapconcat
+     (lambda (input)
+       (if (stringp (car input))
+           (car input)
+       (let ((message (copy-sequence (car input))))
+         (when (plist-member (cdr message) :frame)
+           (setq message
+                 (cons (car message)
+                       (plist-put (cdr message) :frame
+                                  (if (eq (plist-get (cdr message) :frame)
+                                          'frame)
+                                      id
+                                    (+ id 1000))))))
+         (remote-display--encode message))))
+     inputs)))
+
+(defun remoteterm-tests--run-inputs (case)
+  "Send the inputs of CASE, a `remoteterm-tests--random-inputs', to a session.
+Return the events of the session."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (remoteterm-tests--send-in-chunks
+      client-side (remoteterm-tests--encode-inputs (car case) frame)
+      (cadr case))
+     (remoteterm-tests--read-events (length (car case))))))
+
+(rd-daemon-deftest remoteterm-tests-key-events
+  "A key message gives the event of Emacs for its key and modifiers.
+A function key gives the event of its name, with each modifier.  A
+character gives the character, with each modifier but shift.  A
+modifier key, a key for a frame that does not exist, and a message of
+another type give no event.  The chunks of the bytes do not change
+the events."
+  (let ((rd-gen-trials 30))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-inputs
+     (lambda (case)
+       (should (equal (remoteterm-tests--run-inputs case)
+                      (delq nil (mapcar #'cadr (car case)))))))))
+
+;; The examples run in a daemon too, but they have no trials, so they
+;; do not use `rd-daemon-deftest'.
+
+(defun remoteterm-tests--daemon-call (function)
+  "Call FUNCTION in the daemon of `rd-with-daemon', and return its value.
+The daemon loads the file of FUNCTION first."
+  (rd-daemon-eval
+   `(let ((load-prefer-newer t))
+      (load ,(file-name-sans-extension (symbol-file function 'defun)) nil t)
+      (,function))))
+
+(defun remoteterm-tests--input-error-case ()
+  "Send a key and a frame with an error, then a key, and return the events.
+The last key comes in its own write, after the session read the error,
+so the input of the session is empty when it comes."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (let ((key (remoteterm-tests--encode-inputs
+                 '(((key :frame frame :time 0 :keysym ?a :character ?a
+                         :modifiers 0)))
+                 frame)))
+       (process-send-string client-side
+                            (concat key (unibyte-string 0 0 0 0)))
+       (let ((first (remoteterm-tests--read-events 1)))
+         (process-send-string client-side key)
+         (append first (remoteterm-tests--read-events 1)))))))
+
+(ert-deftest remoteterm-tests-input-error ()
+  "After a message with an error, the session ignores the input."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--input-error-case)
+                   '(?a)))))
+
+(defun remoteterm-tests--input-quit-case ()
+  "Send the key C-g, run a loop, and return `quit' if the loop quits."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (process-send-string
+      client-side
+      (remoteterm-tests--encode-inputs
+       '(((key :frame frame :time 0 :keysym ?g :character ?g
+               :modifiers 2)))
+       frame))
+     (condition-case nil
+         (with-timeout (5 'timeout)
+           (while t (accept-process-output nil 0.01)))
+       (quit 'quit)))))
+
+(ert-deftest remoteterm-tests-input-quit ()
+  "The key C-g from the client quits a running command."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (eq (remoteterm-tests--daemon-call
+                 'remoteterm-tests--input-quit-case)
+                'quit))))
+
+(defun remoteterm-tests--input-after-quit-case ()
+  "Send C-g, a, and b in one write, and read events as an idle Emacs does.
+Read with `read-event' only, so that Emacs waits in read_char.  Return
+the events, with `quit' for a quit."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (process-send-string
+      client-side
+      (remoteterm-tests--encode-inputs
+       '(((key :frame frame :time 0 :keysym ?g :character ?g :modifiers 2))
+         ((key :frame frame :time 0 :keysym ?a :character ?a :modifiers 0))
+         ((key :frame frame :time 0 :keysym ?b :character ?b :modifiers 0)))
+       frame))
+     (let ((events nil))
+       (with-timeout (5)
+         (while (not (and (memq ?a events) (memq ?b events)))
+           (let ((event (condition-case nil (read-event nil nil 0.1)
+                          (quit 'quit))))
+             (when (and event (not (eq (car-safe event) 'switch-frame)))
+               (push event events)))))
+       (nreverse events)))))
+
+(ert-deftest remoteterm-tests-input-after-quit ()
+  "The keys after C-g in one chunk come too, with no more input."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (let ((events (remoteterm-tests--daemon-call
+                   'remoteterm-tests--input-after-quit-case)))
+      (should (memq ?a events))
+      (should (memq ?b events)))))
+
+(defun remoteterm-tests--not-client-case ()
+  "Give bytes to `remote-display--receive' for a process with no session.
+Return t if nothing failed."
+  (remoteterm-tests--with-connections
+   '(a)
+   (lambda (connections)
+     (remote-display--receive (plist-get (alist-get 'a connections)
+                                         :server-side)
+                              (unibyte-string 0 0 0 0))
+     t)))
+
+(ert-deftest remoteterm-tests-input-not-client ()
+  "Bytes for a process that is not the client of a session do nothing."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (eq (remoteterm-tests--daemon-call
+                 'remoteterm-tests--not-client-case)
+                t))))
+
+(defun remoteterm-tests--input-reattach-case ()
+  "Attach a client, detach it, attach it again, and return its key events."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side server-side)
+     (remote-display--detach "remote-input")
+     (remote-display-attach "remote-input" server-side)
+     (process-send-string
+      client-side
+      (remoteterm-tests--encode-inputs
+       '(((key :frame frame :time 0 :keysym ?z :character ?z :modifiers 0)))
+       frame))
+     (remoteterm-tests--read-events 1))))
+
+(ert-deftest remoteterm-tests-input-reattach ()
+  "A client that attaches again gives its input to the session."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--input-reattach-case)
+                   '(?z)))))
+
 ;;;; The loop of the trials
 
 (defun remoteterm-tests--trials-until (trials bad)
