@@ -4386,7 +4386,8 @@ the form is the list of the errors."
 
 (rd-daemon-deftest remoteterm-tests-attach-sequence
   "Each draw goes to the connection that a model of the attaches gives.
-The operations attach, detach, draw, and close two connections.  A
+The operations attach, detach, draw, and close two connections.  The
+redisplay after an attach draws all of the frame for the new client.  A
 refused attach keeps the client.  A process can attach again after a
 detach.  A closed connection gets no bytes, and the session gives no
 error."
@@ -4416,8 +4417,10 @@ error."
 (defun remoteterm-tests--attach-operations ()
   "Return a random list of operations on the connections A and B.
 An operation is (attach NAME), (detach), (draw), (close NAME) or
-\(close-peer NAME).  close closes the connection on the side of the
-session.  close-peer closes the other end, and then draws."
+\(close-peer NAME).  attach attaches NAME, and then runs redisplay.
+After a refused attach, that redisplay has no change to draw, so it
+sends no bytes.  close closes the connection on the side of the session.  close-peer
+closes the other end, and then draws."
   (cl-loop repeat (rd-gen-integer 1 12)
            collect (pcase (rd-gen-random 6)
                      ((or 0 1) (list 'attach (rd-gen-element '(a b))))
@@ -4430,26 +4433,25 @@ session.  close-peer closes the other end, and then draws."
   "Return the model of the draws and errors of OPERATIONS.
 The value is (EXPECTED . ERRORS).  EXPECTED is an alist from each
 connection name to the list of its draws.  A draw is `first' if it is
-the first draw after an attach, and `later' if not.  ERRORS is the
-list of (INDEX . KIND) of each refused attach, where INDEX is the
-position of the operation and KIND is a key of
-`remoteterm-tests--attach-errors'."
-  (let ((client nil) (fresh nil) (closed nil) (draws nil) (errors nil)
-        (index 0))
-    (cl-flet ((draw ()
+the redisplay after an attach, which draws all of the frame, and
+`later' if not.  ERRORS is the list of (INDEX . KIND) of each refused
+attach, where INDEX is the position of the operation and KIND is a key
+of `remoteterm-tests--attach-errors'."
+  (let ((client nil) (closed nil) (draws nil) (errors nil) (index 0))
+    (cl-flet ((draw (kind)
                 (when (and client (not (memq client closed)))
-                  (push (if fresh 'first 'later) (alist-get client draws))
-                  (setq fresh nil))))
+                  (push kind (alist-get client draws)))))
       (dolist (operation operations)
         (pcase operation
           (`(attach ,name)
            (cond ((memq name closed) (push (cons index 'closed) errors))
                  ((eq name client) (push (cons index 'attached) errors))
-                 (t (setq client name fresh t))))
+                 (t (setq client name)
+                    (draw 'first))))
           ('(detach) (setq client nil))
-          ('(draw) (draw))
+          ('(draw) (draw 'later))
           (`(close ,name) (push name closed))
-          (`(close-peer ,name) (push name closed) (draw)))
+          (`(close-peer ,name) (push name closed) (draw 'later)))
         (cl-incf index)))
     (cons (mapcar (lambda (name)
                     (cons name (reverse (alist-get name draws))))
@@ -4493,7 +4495,8 @@ until the end."
                (`(attach ,name)
                 (condition-case err
                     (remote-display-attach display (side name :server-side))
-                  (error (push (cons index (cadr err)) refused))))
+                  (error (push (cons index (cadr err)) refused)))
+                (redisplay t))
                ('(detach) (remote-display--detach display))
                ('(draw) (redraw))
                (`(close ,name) (delete-process (side name :server-side)))
@@ -4651,6 +4654,74 @@ that extra bytes also arrive.  Stop after 10 seconds."
     (while (< (apply #'+ (mapcar #'length (funcall received))) size)
       (accept-process-output process 0.05)))
   (accept-process-output process 0.05))
+
+(rd-daemon-deftest remoteterm-tests-attach-redraws
+  "The first redisplay after an attach draws each frame fully.
+A client draws the frame, and then detaches.  While no client is
+attached, random edits change the buffer, point moves, the frame
+changes its size, and redisplay can run.  Law: the bytes of the first redisplay after an
+attach are equal to the bytes of `redraw-frame' and a redisplay for a
+new client."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     #'remoteterm-tests--detached-operations
+     (lambda (operations)
+       (pcase-let ((`(,attached ,redrawn)
+                    (rd-daemon-eval
+                     (remoteterm-tests--frame-form
+                      '((width . 30) (height . 6))
+                      '(insert "abc\ndef\n")
+                      `(remoteterm-tests--attach-after
+                        ',operations display frame buffer)))))
+         (should (> (length redrawn) 0))
+         (should (equal attached redrawn)))))))
+
+(defun remoteterm-tests--detached-operations ()
+  "Return a random list of operations on a frame with no client.
+An operation is (insert POSITION STRING), (delete COUNT), (goto
+POSITION), (resize COLUMNS LINES), or (redisplay).  One in three
+operations is (redisplay)."
+  (cl-loop repeat (rd-gen-integer 0 8)
+           collect (pcase (rd-gen-random 6)
+                     (0 (list 'insert (rd-gen-integer 1 60)
+                              (rd-gen-element
+                               '("x" "yz\n" "\n" "\u00e9\u4e2d"
+                                 "a line that is longer than the window\n"))))
+                     (1 (list 'delete (rd-gen-integer 1 8)))
+                     (2 (list 'goto (rd-gen-integer 1 60)))
+                     (3 (list 'resize (rd-gen-integer 20 40)
+                              (rd-gen-integer 4 8)))
+                     (_ '(redisplay)))))
+
+(defun remoteterm-tests--attach-after (operations display frame buffer)
+  "Detach DISPLAY, do OPERATIONS, and attach a client again.
+FRAME shows BUFFER, and DISPLAY has a client that drew FRAME.  The
+value is (ATTACHED REDRAWN).  ATTACHED is the bytes of the first
+redisplay after the attach.  REDRAWN is the bytes of `redraw-frame'
+and a redisplay for one more new client."
+  (remote-display--detach display)
+  (let ((window (frame-root-window frame)))
+    (with-current-buffer buffer
+      (dolist (operation operations)
+        (pcase operation
+          (`(insert ,position ,string)
+           (goto-char (min position (point-max)))
+           (insert string))
+          (`(delete ,count)
+           (delete-region (point-min)
+                          (min (point-max) (+ (point-min) count))))
+          (`(goto ,position)
+           (set-window-point window (min position (point-max))))
+          (`(resize ,columns ,lines)
+           (set-frame-size frame columns lines))
+          ('(redisplay) (redisplay t))))))
+  (remote-display--record display)
+  (redisplay t)
+  (let ((attached (remote-display--take-output display)))
+    (remote-display--record display)
+    (redraw-frame frame)
+    (redisplay t)
+    (list attached (remote-display--take-output display))))
 
 ;;;; Frame messages
 

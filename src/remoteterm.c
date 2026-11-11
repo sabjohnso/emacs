@@ -101,7 +101,7 @@ static void remote_send_message (struct remote_display_info *,
 				 const struct rd_message *);
 static void remote_send_draw (struct frame *, const struct rd_message *);
 static void remote_define_frame (struct frame *);
-static void remote_undefine_frames (struct remote_display_info *);
+static void remote_forget_frames (struct remote_display_info *);
 static void remote_send_delete_frame (struct frame *);
 static void remote_flush_frame (struct frame *);
 static void remote_clear_glyph_string (struct glyph_string *);
@@ -472,16 +472,21 @@ remote_send_delete_frame (struct frame *f)
   remote_send_message (FRAME_DISPLAY_INFO (f), &message);
 }
 
-/* Mark each frame of DPYINFO as unknown to the client.  */
+/* Make the client of DPYINFO forget its frames.  Mark each frame as
+   unknown to the client, and as garbaged, so that the next redisplay
+   defines and draws all of it.  */
 static void
-remote_undefine_frames (struct remote_display_info *dpyinfo)
+remote_forget_frames (struct remote_display_info *dpyinfo)
 {
   Lisp_Object tail, frame;
   FOR_EACH_FRAME (tail, frame)
     {
       struct frame *f = XFRAME (frame);
       if (FRAME_REMOTE_P (f) && FRAME_DISPLAY_INFO (f) == dpyinfo)
-	FRAME_REMOTE_OUTPUT (f)->defined = false;
+	{
+	  FRAME_REMOTE_OUTPUT (f)->defined = false;
+	  SET_FRAME_GARBAGED (f);
+	}
     }
 }
 
@@ -526,8 +531,9 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
   struct remote_sink *old = dpyinfo->sink;
   dpyinfo->sink = sink;
 
-  /* A new client has no font or frame definitions.  */
-  remote_undefine_frames (dpyinfo);
+  /* A new client has no font or frame definitions, and shows
+     nothing.  */
+  remote_forget_frames (dpyinfo);
   if (dpyinfo->font_defined)
     memset (dpyinfo->font_defined, 0, dpyinfo->font_defined_size);
   if (old)
