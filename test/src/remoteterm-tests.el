@@ -4390,54 +4390,80 @@ The operations attach, detach, draw, and close two connections.  The
 redisplay after an attach draws all of the frame for the new client.  A
 refused attach keeps the client.  A process can attach again after a
 detach.  A closed connection gets no bytes, and the session gives no
-error."
+error.  When the connection of the client closes, the session has no
+client, and keeps its frame."
   (let ((rd-gen-trials 12))
-    (rd-gen-for-all
-     #'remoteterm-tests--attach-operations
-     (lambda (operations)
-       (pcase-let* ((`(,expected . ,errors)
-                     (remoteterm-tests--attach-model operations))
-                    ((map :received :refused :first :later)
-                     (rd-daemon-eval
-                      (remoteterm-tests--attach-sequence-form operations))))
-         (should (> (length later) 0))
-         (should (equal refused
-                        (mapcar (lambda (error)
-                                  (cons (car error)
-                                        (alist-get
-                                         (cdr error)
-                                         remoteterm-tests--attach-errors)))
-                                errors)))
-         (dolist (name '(a b))
-           (should (equal (alist-get name received)
-                          (mapconcat (lambda (draw)
-                                       (if (eq draw 'first) first later))
-                                     (alist-get name expected))))))))))
+    (rd-gen-for-all #'remoteterm-tests--attach-operations
+                    #'remoteterm-tests--check-attaches)))
+
+(rd-daemon-deftest remoteterm-tests-attach-sentinel
+  "Only a close of its connection detaches the client of a session.
+These are the examples of `remoteterm-tests-attach-sequence' for the
+sentinel of a client: an event that does not close the client, a close
+of the client, a close of another process, and a close of a process
+after its detach."
+  (let* ((examples (list '((attach a) (event a) (draw))
+                         '((attach a) (close a) (draw))
+                         '((attach a) (close b) (draw))
+                         '((attach a) (close-peer a) (attach b))
+                         '((attach a) (detach) (close a) (attach b))))
+         (rd-gen-trials (length examples)))
+    (rd-gen-for-all (lambda () (pop examples))
+                    #'remoteterm-tests--check-attaches)))
+
+(defun remoteterm-tests--check-attaches (operations)
+  "Check that OPERATIONS on a session give what the model gives."
+  (pcase-let* (((map (:draws expected) (:errors errors)
+                     (:clients expected-clients))
+                (remoteterm-tests--attach-model operations))
+               ((map :received :refused :first :later :clients :live)
+                (rd-daemon-eval
+                 (remoteterm-tests--attach-sequence-form operations))))
+    (should (> (length later) 0))
+    (should (equal clients expected-clients))
+    (should live)
+    (should (equal refused
+                   (mapcar (lambda (error)
+                             (cons (car error)
+                                   (alist-get
+                                    (cdr error)
+                                    remoteterm-tests--attach-errors)))
+                           errors)))
+    (dolist (name '(a b))
+      (should (equal (alist-get name received)
+                     (mapconcat (lambda (draw)
+                                  (if (eq draw 'first) first later))
+                                (alist-get name expected)))))))
 
 (defun remoteterm-tests--attach-operations ()
   "Return a random list of operations on the connections A and B.
-An operation is (attach NAME), (detach), (draw), (close NAME) or
-\(close-peer NAME).  attach attaches NAME, and then runs redisplay.
-After a refused attach, that redisplay has no change to draw, so it
-sends no bytes.  close closes the connection on the side of the session.  close-peer
-closes the other end, and then draws."
+An operation is (attach NAME), (detach), (draw), (close NAME),
+\(close-peer NAME), or (event NAME).  attach attaches NAME, and then
+runs redisplay if the attach succeeds.  close closes the connection
+on the side of the session.  close-peer closes the other end, and
+then draws.  event calls the sentinel of NAME with an event that does
+not close NAME."
   (cl-loop repeat (rd-gen-integer 1 12)
-           collect (pcase (rd-gen-random 6)
+           collect (pcase (rd-gen-random 7)
                      ((or 0 1) (list 'attach (rd-gen-element '(a b))))
                      (2 '(detach))
                      (3 '(draw))
+                     (4 (list 'event (rd-gen-element '(a b))))
                      (_ (list (rd-gen-element '(close close-peer))
                               (rd-gen-element '(a b)))))))
 
 (defun remoteterm-tests--attach-model (operations)
-  "Return the model of the draws and errors of OPERATIONS.
-The value is (EXPECTED . ERRORS).  EXPECTED is an alist from each
+  "Return the model of the draws, errors, and clients of OPERATIONS.
+The value is a plist.  :draws is an alist from each
 connection name to the list of its draws.  A draw is `first' if it is
 the redisplay after an attach, which draws all of the frame, and
-`later' if not.  ERRORS is the list of (INDEX . KIND) of each refused
+`later' if not.  :errors is the list of (INDEX . KIND) of each refused
 attach, where INDEX is the position of the operation and KIND is a key
-of `remoteterm-tests--attach-errors'."
-  (let ((client nil) (closed nil) (draws nil) (errors nil) (index 0))
+of `remoteterm-tests--attach-errors'.  :clients is the list of the
+name of the client after each operation, or nil if the session has no
+client."
+  (let ((client nil) (closed nil) (draws nil) (errors nil) (clients nil)
+        (index 0))
     (cl-flet ((draw (kind)
                 (when (and client (not (memq client closed)))
                   (push kind (alist-get client draws)))))
@@ -4451,18 +4477,26 @@ of `remoteterm-tests--attach-errors'."
           ('(detach) (setq client nil))
           ('(draw) (draw 'later))
           (`(close ,name) (push name closed))
-          (`(close-peer ,name) (push name closed) (draw 'later)))
+          (`(close-peer ,name) (push name closed) (draw 'later))
+          (`(event ,_)))
+        (when (memq client closed)
+          (setq client nil))
+        (push client clients)
         (cl-incf index)))
-    (cons (mapcar (lambda (name)
-                    (cons name (reverse (alist-get name draws))))
-                  '(a b))
-          (nreverse errors))))
+    (list :draws (mapcar (lambda (name)
+                           (cons name (reverse (alist-get name draws))))
+                         '(a b))
+          :errors (nreverse errors)
+          :clients (nreverse clients))))
 
 (defun remoteterm-tests--attach-sequence-form (operations)
   "Return a form for the daemon that does OPERATIONS on a session.
 The value of the form is a plist.  :received is an alist from each
 connection name to the bytes that it got.  :refused is the list of
-\(INDEX . MESSAGE) of each refused attach.  :first and :later are the
+\(INDEX . MESSAGE) of each refused attach.  :clients is the list of
+the name of the client after each operation, nil if the session has no
+client, or the process of a client that is not A or B.  :live is t if
+the frame is live at the end.  :first and :later are the
 bytes of the first draw after an attach and of a later draw, from a
 recording client."
   (remoteterm-tests--frame-form
@@ -4483,6 +4517,7 @@ until the end."
     (let ((first (draw))
           (later (draw))
           (refused nil)
+          (clients nil)
           (index 0))
       (remote-display--detach display)
       (remoteterm-tests--with-connections
@@ -4494,18 +4529,31 @@ until the end."
              (pcase operation
                (`(attach ,name)
                 (condition-case err
-                    (remote-display-attach display (side name :server-side))
-                  (error (push (cons index (cadr err)) refused)))
-                (redisplay t))
+                    (progn
+                      (remote-display-attach display (side name :server-side))
+                      (redisplay t))
+                  (error (push (cons index (cadr err)) refused))))
                ('(detach) (remote-display--detach display))
                ('(draw) (redraw))
                (`(close ,name) (delete-process (side name :server-side)))
+               (`(event ,name)
+                (let ((process (side name :server-side)))
+                  (when (process-live-p process)
+                    (funcall (process-sentinel process) process "open\n"))))
                (`(close-peer ,name)
                 (remoteterm-tests--drain (side name :client-side)
                                          (side name :chunks))
                 (delete-process (side name :client-side))
                 (redraw)
                 (remoteterm-tests--wait-closed (side name :server-side))))
+             (let ((client (remote-display-client display)))
+               (push (or (car (rassq client
+                                     (mapcar (lambda (name)
+                                               (cons name
+                                                     (side name :server-side)))
+                                             '(a b))))
+                         client)
+                     clients))
              (cl-incf index))
            (remote-display--detach display)
            (list :received
@@ -4515,6 +4563,8 @@ until the end."
                                        (side name :chunks))))
                          '(a b))
                  :refused (nreverse refused)
+                 :clients (nreverse clients)
+                 :live (frame-live-p frame)
                  :first first
                  :later later)))))))
 

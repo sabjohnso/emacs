@@ -113,7 +113,9 @@ DEFUN ("remote-display-attach", Fremote_display_attach,
 After this call, the session sends its messages to PROCESS.  The last
 client of the session is detached.  PROCESS must be a live network
 connection, and not a server.  A process can be the client of only
-one session.  */)
+one session.  This function sets the filter and the sentinel of
+PROCESS.  When PROCESS closes, the session has no client, and keeps
+its frames.  */)
   (Lisp_Object display, Lisp_Object process)
 {
   struct remote_display_info *dpyinfo = check_x_display_info (display);
@@ -122,6 +124,34 @@ one session.  */)
   remote_set_sink (dpyinfo, remote_make_connection_sink (dpyinfo, process));
   Fset_process_coding_system (process, Qno_conversion, Qno_conversion);
   Fset_process_filter (process, Qremote_display__receive);
+  Fset_process_sentinel (process, Qremote_display__closed);
+  return Qnil;
+}
+
+DEFUN ("remote-display-client", Fremote_display_client,
+       Sremote_display_client, 1, 1, 0,
+       doc: /* Return the network connection that is the client of DISPLAY.
+Return nil if no network connection is attached to the session
+DISPLAY.  */)
+  (Lisp_Object display)
+{
+  struct remote_connection *connection
+    = remote_sink_data (check_x_display_info (display),
+			&remote_connection_ops);
+  return connection ? connection->process : Qnil;
+}
+
+DEFUN ("remote-display--closed", Fremote_display__closed,
+       Sremote_display__closed, 2, 2, 0,
+       doc: /* Detach the client PROCESS from its session if PROCESS is closed.
+`remote-display-attach' makes this function the sentinel of PROCESS.
+EVENT is the change of the status of PROCESS.  The session keeps its
+terminal and its frames.  */)
+  (Lisp_Object process, Lisp_Object event)
+{
+  struct remote_connection *connection = remote_find_connection (process);
+  if (connection && remote_connection_fd (connection) < 0)
+    remote_set_sink (connection->dpyinfo, NULL);
   return Qnil;
 }
 
@@ -362,6 +392,9 @@ syms_of_remoteproc (void)
   staticpro (&remote_connection_processes);
 
   DEFSYM (Qremote_display__receive, "remote-display--receive");
+  DEFSYM (Qremote_display__closed, "remote-display--closed");
   defsubr (&Sremote_display_attach);
+  defsubr (&Sremote_display_client);
   defsubr (&Sremote_display__receive);
+  defsubr (&Sremote_display__closed);
 }
