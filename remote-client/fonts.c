@@ -21,9 +21,21 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <cairo-ft.h>
 #include <fontconfig/fontconfig.h>
+#include <glib.h>
 
 #include "fonts.h"
 
+/* The data of a chain.  */
+struct chain
+{
+  struct rc_font_source first;
+  struct rc_font_source second;
+  rc_fallback_function *warn;
+};
+
+static cairo_font_face_t *find_in_chain (void *, const uint8_t *, int,
+					 uint32_t);
+static void destroy_chain (void *);
 static cairo_font_face_t *find_fallback (void *, const uint8_t *, int,
 					 uint32_t);
 static void destroy_fallback (void *);
@@ -34,6 +46,38 @@ rc_fallback_font_source_new (void)
 {
   return (struct rc_font_source) { find_fallback, destroy_fallback,
 				   match_face ("monospace") };
+}
+
+struct rc_font_source
+rc_font_source_chain (struct rc_font_source first,
+		      struct rc_font_source second, rc_fallback_function *warn)
+{
+  struct chain *chain = g_new (struct chain, 1);
+  *chain = (struct chain) { first, second, warn };
+  return (struct rc_font_source) { find_in_chain, destroy_chain, chain };
+}
+
+/* The FIND function of a chain.  DATA is the struct chain.  */
+static cairo_font_face_t *
+find_in_chain (void *data, const uint8_t *hash, int nhash, uint32_t index)
+{
+  struct chain *chain = data;
+  cairo_font_face_t *face = chain->first.find (chain->first.data, hash,
+					       nhash, index);
+  if (face)
+    return face;
+  chain->warn (hash, nhash, index);
+  return chain->second.find (chain->second.data, hash, nhash, index);
+}
+
+/* The DESTROY function of a chain.  DATA is the struct chain.  */
+static void
+destroy_chain (void *data)
+{
+  struct chain *chain = data;
+  rc_font_source_free (chain->first);
+  rc_font_source_free (chain->second);
+  g_free (chain);
 }
 
 /* The FIND function of the fallback source.  DATA is the face, or

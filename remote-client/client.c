@@ -47,6 +47,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <gtk/gtk.h>
 
 #include "fonts.h"
+#include "hashcache.h"
+#include "hashfonts.h"
 #include "reader.h"
 #include "render.h"
 #include "view.h"
@@ -86,6 +88,9 @@ struct window_mode
   bool failed;
 };
 
+static struct rc_font_source client_fonts (void);
+static char *cache_file_name (void);
+static void warn_fallback (const uint8_t *, int, uint32_t);
 static int render_to_file (struct rc_renderer *, int, const char *);
 static void record_first_frame (void *, const struct rd_message *);
 static int show_frames (struct rc_renderer *, int);
@@ -108,7 +113,7 @@ main (int argc, char **argv)
   int fd = connect_to (argv[arg]);
   if (fd < 0)
     return 1;
-  struct rc_font_source fonts = rc_fallback_font_source_new ();
+  struct rc_font_source fonts = client_fonts ();
   struct rc_renderer *renderer = rc_renderer_new (fonts);
   int status;
   if (png)
@@ -122,6 +127,52 @@ main (int argc, char **argv)
   rc_renderer_free (renderer);
   rc_font_source_free (fonts);
   return status;
+}
+
+/* Return the font source of the client: the font file with the hash
+   of a font, from the font files of fontconfig, or else the fallback
+   font.  */
+static struct rc_font_source
+client_fonts (void)
+{
+  char **names = rc_font_file_names ();
+  char *cache = cache_file_name ();
+  struct rc_font_source hashed
+    = rc_hash_font_source_new ((const char *const *) names,
+			       g_strv_length (names), cache, rc_sha256_file,
+			       NULL);
+  g_strfreev (names);
+  g_free (cache);
+  return rc_font_source_chain (hashed, rc_fallback_font_source_new (),
+			       warn_fallback);
+}
+
+/* Return the name of the cache file of font hashes, in a new
+   string.  */
+static char *
+cache_file_name (void)
+{
+  return g_build_filename (g_get_user_cache_dir (), "remote-client",
+			   "font-hashes", NULL);
+}
+
+/* The function of the font chain when no font file has the NHASH bytes
+   HASH.  A hash with fewer than RD_HASH_SIZE bytes means that the
+   server could not read its font file.  */
+static void
+warn_fallback (const uint8_t *hash, int nhash, uint32_t index)
+{
+  if (nhash < RD_HASH_SIZE)
+    {
+      fprintf (stderr, "remote-client: the server could not read a font "
+	       "file, so the fallback font draws its glyphs\n");
+      return;
+    }
+  char hex[2 * RD_HASH_SIZE + 1];
+  rc_hash_to_hex (hash, hex);
+  fprintf (stderr, "remote-client: no font file has the hash %s (face "
+	   "%lu), so the fallback font draws its glyphs\n", hex,
+	   (unsigned long) index);
 }
 
 /* Apply all messages from the connection FD to RENDERER, and write

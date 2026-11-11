@@ -23,7 +23,7 @@
 # the client and not a config.h of an Emacs build in ../src.
 
 PKG_CONFIG = pkg-config
-PACKAGES = cairo cairo-ft fontconfig
+PACKAGES = cairo cairo-ft fontconfig freetype2 glib-2.0
 CFLAGS = -O2 -g
 WARNINGS = -Wall -Wextra
 ALL_CFLAGS = $(WARNINGS) -I. -I../src \
@@ -36,9 +36,11 @@ GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 
 RENDER_OBJS = render.o table.o rdproto.o
 READER_OBJS = reader.o rdproto.o
-FONTS_OBJS = fonts.o
-CLIENT_OBJS = client.o view.o reader.o render.o table.o fonts.o rdproto.o
-TESTS = test-table test-render test-reader test-glyphs test-client
+FONTS_OBJS = fonts.o hashfonts.o hashcache.o
+CLIENT_OBJS = client.o view.o reader.o render.o table.o fonts.o \
+  hashfonts.o hashcache.o rdproto.o
+TESTS = test-table test-render test-reader test-glyphs test-fonts \
+  test-client
 
 all: remote-client $(TESTS)
 
@@ -50,6 +52,7 @@ check: remote-client $(TESTS)
 	./test-render
 	./test-reader
 	./test-glyphs
+	./test-fonts
 	./test-client
 
 # Build again with AddressSanitizer and UndefinedBehaviorSanitizer, and
@@ -72,6 +75,9 @@ test-reader: test-reader.o $(READER_OBJS)
 test-glyphs: test-glyphs.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+test-fonts: test-fonts.o $(RENDER_OBJS) $(FONTS_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
 test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
@@ -87,7 +93,10 @@ rdproto.o: ../src/rdproto.c ../src/rdproto.h config.h
 render.o test-render.o: render.h table.h ../src/rdproto.h
 table.o test-table.o: table.h
 reader.o test-reader.o: reader.h ../src/rdproto.h
-fonts.o test-glyphs.o test-client.o: fonts.h render.h ../src/rdproto.h
+fonts.o test-glyphs.o test-client.o test-fonts.o: fonts.h render.h \
+  ../src/rdproto.h
+hashfonts.o test-fonts.o client.o: hashfonts.h render.h ../src/rdproto.h
+hashfonts.o hashcache.o client.o: hashcache.h ../src/rdproto.h
 client.o view.o: view.h reader.h fonts.h render.h ../src/rdproto.h
 
 clean:

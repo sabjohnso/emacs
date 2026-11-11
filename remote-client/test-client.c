@@ -33,6 +33,15 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      writes no file.
    - cut: a connection that closes in a frame gives the pixels of the
      messages before that frame, and the status 0.
+   - fonts: a define-font with the hash of a font file of the system
+     draws with that file.  Another define-font draws with the fallback
+     font, also a define-font with a short hash.  The test uses the
+     fontconfig match of "sans:bold", which is not the fallback font.
+   - cache: the program writes its cache of font hashes in
+     $XDG_CACHE_HOME/remote-client/font-hashes, and a second run with
+     that cache gives the same pixels.  The test sets $XDG_CACHE_HOME
+     to the directory of the run, not to the cache directory of the
+     user.
 
    The trials do not need a display.  With no argument, the program
    runs the error example and TRIALS trials from a seed that it gets
@@ -55,8 +64,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <unistd.h>
 
 #include <cairo.h>
+#include <fontconfig/fontconfig.h>
+#include <glib.h>
 
 #include "fonts.h"
+#include "hashfonts.h"
 #include "rdproto.h"
 #include "render.h"
 
@@ -76,6 +88,10 @@ enum { FRAME_A = 5, FRAME_B = 6 };
 /* The exit status of a child that could not start the program.  */
 enum { NOT_STARTED = 127 };
 
+/* The font file of the fonts law, and its hash.  */
+static char *system_font;
+static uint8_t system_hash[RD_HASH_SIZE];
+
 /* The files of one run of the program.  */
 struct run
 {
@@ -88,16 +104,24 @@ static bool error_example (void);
 static bool run_trial (uint64_t);
 static int run_client (struct run *, const struct rd_message *, int,
 		       const unsigned char *, size_t, uint64_t *);
+static bool find_system_font (void);
+static bool fonts_example (void);
+static bool change_cache_hash (const char *, const char *);
+static void ignore_fallback (const uint8_t *, int, uint32_t);
 static int wait_for_exit (pid_t);
 static bool first_frame (const struct rd_message *, int, uint32_t *);
 static bool same_as_renderer (const char *, const struct rd_message *,
 			      int, uint32_t);
+static bool same_as_fallback (const char *, const struct rd_message *,
+			      int, uint32_t);
+static bool same_pixels (const char *, const struct rd_message *, int,
+			 uint32_t, struct rc_font_source);
 static void send_in_chunks (int, const unsigned char *, size_t,
 			    uint64_t *);
 static int listen_at (const char *);
 static void make_run (struct run *);
 static void remove_run (const struct run *);
-static struct rd_message random_message (uint64_t *, bool);
+static struct rd_message random_message (uint64_t *, bool, bool);
 static struct rd_message random_long_draw (uint64_t *);
 static void random_cut (uint64_t *, unsigned char *, size_t *);
 static void random_bad_frame (uint64_t *, unsigned char *, size_t *);
@@ -107,9 +131,14 @@ static uint64_t random_next (uint64_t *);
 int
 main (int argc, char **argv)
 {
+  if (!find_system_font ())
+    {
+      fprintf (stderr, "test-client: no match for \"sans:bold\"\n");
+      return 1;
+    }
   if (argc == 2)
     return run_trial (strtoull (argv[1], NULL, 10)) ? 0 : 1;
-  if (!error_example ())
+  if (!error_example () || !fonts_example ())
     return 1;
   uint64_t base = ((uint64_t) time (NULL) << 20 ^ getpid ()) * TRIALS;
   for (int trial = 0; trial < TRIALS; trial++)
@@ -119,8 +148,139 @@ main (int argc, char **argv)
 		 (unsigned long long) (base + trial));
 	return 1;
       }
-  printf ("test-client: the example and %d trials passed\n", TRIALS);
+  printf ("test-client: the examples and %d trials passed\n", TRIALS);
   return 0;
+}
+
+/* Set SYSTEM_FONT to the file of the fontconfig match of "sans:bold",
+   and SYSTEM_HASH to its hash.  Return false if fontconfig has no
+   match.  */
+static bool
+find_system_font (void)
+{
+  FcPattern *pattern = FcNameParse ((const FcChar8 *) "sans:bold");
+  FcConfigSubstitute (NULL, pattern, FcMatchPattern);
+  FcDefaultSubstitute (pattern);
+  FcResult result;
+  FcPattern *match = FcFontMatch (NULL, pattern, &result);
+  FcPatternDestroy (pattern);
+  FcChar8 *file;
+  bool found = (match && FcPatternGetString (match, FC_FILE, 0, &file)
+		== FcResultMatch);
+  if (found)
+    system_font = strdup ((const char *) file);
+  if (match)
+    FcPatternDestroy (match);
+  return found && rc_sha256_file (NULL, system_font, system_hash);
+}
+
+/* The fonts law and the cache law: the same glyphs with the font 0,
+   which has the hash of SYSTEM_FONT, with the font 1, which has no
+   hash, with the font 2, which has a short hash, and with the font 3,
+   which has a hash of no file.  The expected pixels must not be the
+   pixels of the fallback font only, so the example shows that the
+   program found SYSTEM_FONT.  The second run uses the cache of the
+   first.  Then the line of SYSTEM_FONT in the cache file gets another
+   hash, and the third run must draw the font 0 with the fallback font,
+   so the example shows that the program reads the cache.  */
+static bool
+fonts_example (void)
+{
+  struct rd_message messages[] =
+    {
+      { .type = RD_DEFINE_FRAME, .u.define_frame = { FRAME_A, 120, 80 } },
+      { .type = RD_CLEAR_AREA,
+	.u.clear_area = { FRAME_A, 0, 0, 120, 80, 0xffffff } },
+      { .type = RD_DEFINE_FONT, .u.define_font = { .font = 0, .size = 16,
+						   .nhash = RD_HASH_SIZE } },
+      { .type = RD_DEFINE_FONT, .u.define_font = { .font = 1, .size = 16 } },
+      { .type = RD_DRAW_GLYPHS,
+	.u.draw_glyphs = { .frame = FRAME_A, .x = 2, .y = 16,
+			   .clip_width = 120, .clip_height = 40, .font = 0,
+			   .nglyphs = 8 } },
+      { .type = RD_DRAW_GLYPHS,
+	.u.draw_glyphs = { .frame = FRAME_A, .x = 2, .y = 36,
+			   .clip_width = 120, .clip_height = 60, .font = 1,
+			   .nglyphs = 8 } },
+      { .type = RD_DEFINE_FONT, .u.define_font = { .font = 2, .size = 16,
+						   .nhash = 3 } },
+      { .type = RD_DRAW_GLYPHS,
+	.u.draw_glyphs = { .frame = FRAME_A, .x = 2, .y = 56,
+			   .clip_width = 120, .clip_height = 80, .font = 2,
+			   .nglyphs = 8 } },
+      { .type = RD_DEFINE_FONT, .u.define_font = { .font = 3, .size = 16,
+						   .nhash = RD_HASH_SIZE } },
+      { .type = RD_DRAW_GLYPHS,
+	.u.draw_glyphs = { .frame = FRAME_A, .x = 2, .y = 76,
+			   .clip_width = 120, .clip_height = 80, .font = 3,
+			   .nglyphs = 8 } },
+    };
+  enum { N = sizeof messages / sizeof *messages };
+  memcpy (messages[2].u.define_font.hash, system_hash, RD_HASH_SIZE);
+  memcpy (messages[8].u.define_font.hash, system_hash, RD_HASH_SIZE);
+  messages[8].u.define_font.hash[0] ^= 1;
+  for (int i = 0; i < 8; i++)
+    messages[4].u.draw_glyphs.glyphs[i] = messages[5].u.draw_glyphs.glyphs[i]
+      = messages[7].u.draw_glyphs.glyphs[i]
+      = messages[9].u.draw_glyphs.glyphs[i] = 40 + i;
+  uint64_t state = 2;
+  struct run run;
+  make_run (&run);
+  char cache[160];
+  snprintf (cache, sizeof cache, "%s/remote-client/font-hashes",
+	    run.directory);
+  bool passed = true;
+  for (int i = 0; passed && i < 2; i++)
+    {
+      unlink (run.socket);
+      unlink (run.png);
+      int status = run_client (&run, messages, N, NULL, 0, &state);
+      passed = (status == 0 && access (cache, F_OK) == 0
+		&& same_as_renderer (run.png, messages, N, FRAME_A)
+		&& !same_as_fallback (run.png, messages, N, FRAME_A));
+    }
+  if (!passed)
+    fprintf (stderr, "test-client: example fonts: the program did not "
+	     "draw with the font of the hash\n");
+  else
+    {
+      unlink (run.socket);
+      unlink (run.png);
+      passed = (change_cache_hash (cache, system_font)
+		&& run_client (&run, messages, N, NULL, 0, &state) == 0
+		&& same_as_fallback (run.png, messages, N, FRAME_A));
+      if (!passed)
+	fprintf (stderr, "test-client: example fonts: the program did not "
+		 "use the hash of its cache file\n");
+    }
+  remove_run (&run);
+  return passed;
+}
+
+/* Change the first digit of the hash of the line of the file NAME in
+   the cache file CACHE.  Return false if CACHE has no such line.  */
+static bool
+change_cache_hash (const char *cache, const char *name)
+{
+  gchar *text;
+  if (!g_file_get_contents (cache, &text, NULL, NULL))
+    return false;
+  gchar **lines = g_strsplit (text, "\n", -1);
+  g_free (text);
+  char *end = g_strconcat (" ", name, NULL);
+  bool changed = false;
+  for (gchar **line = lines; *line; line++)
+    if (g_str_has_suffix (*line, end))
+      {
+	(*line)[0] = (*line)[0] == '0' ? '1' : '0';
+	changed = true;
+      }
+  text = g_strjoinv ("\n", lines);
+  changed = changed && g_file_set_contents (cache, text, -1, NULL);
+  g_free (text);
+  g_free (end);
+  g_strfreev (lines);
+  return changed;
 }
 
 /* The error law: a frame with a length of 0 has no type byte.  */
@@ -143,18 +303,19 @@ error_example (void)
 }
 
 /* Run the trial of SEED.  Return true if it passes.  An eighth of the
-   trials define no frame.  A quarter of the trials close the connection
-   in a frame, a quarter end with a frame with an error, and a quarter
-   are long.  */
+   trials define no frame, and a quarter remove frames.  A quarter of
+   the trials close the connection in a frame, a quarter end with a
+   frame with an error, and a quarter are long.  */
 static bool
 run_trial (uint64_t seed)
 {
   uint64_t state = seed;
   bool defines = random_below (&state, 8) != 0;
+  bool removes = random_below (&state, 4) == 0;
   int nmessages = STEPS + (random_below (&state, 4) ? 0 : LONG_STEPS);
   static struct rd_message messages[STEPS + LONG_STEPS];
   for (int i = 0; i < nmessages; i++)
-    messages[i] = (i < STEPS ? random_message (&state, defines)
+    messages[i] = (i < STEPS ? random_message (&state, defines, removes)
 		   : random_long_draw (&state));
   unsigned char end[64];
   size_t nend = 0;
@@ -210,6 +371,7 @@ run_client (struct run *run, const struct rd_message *messages, int n,
   pid_t pid = fork ();
   if (pid == 0)
     {
+      setenv ("XDG_CACHE_HOME", run->directory, 1);
       execl ("./remote-client", "remote-client", option, run->socket,
 	     (char *) NULL);
       _exit (127);
@@ -254,14 +416,39 @@ wait_for_exit (pid_t pid)
   return -1;
 }
 
-/* Return true if FRAME exists in a renderer after the N MESSAGES, and
-   the PNG file PNG has its pixels.  The surface of a frame is opaque,
-   so the file has no alpha channel to compare.  */
+/* Return true if FRAME exists after the N MESSAGES in a renderer with
+   the fonts of the program, and the PNG file PNG has its pixels.  The
+   font source repeats the composition of client_fonts on purpose, as an
+   oracle: the hash source here has only SYSTEM_FONT.  */
 static bool
 same_as_renderer (const char *png, const struct rd_message *messages,
 		  int n, uint32_t frame)
 {
-  struct rc_font_source fonts = rc_fallback_font_source_new ();
+  const char *list[] = { system_font };
+  return same_pixels (png, messages, n, frame, rc_font_source_chain
+		      (rc_hash_font_source_new (list, 1, NULL,
+						rc_sha256_file, NULL),
+		       rc_fallback_font_source_new (), ignore_fallback));
+}
+
+/* Return true if FRAME exists after the N MESSAGES in a renderer with
+   only the fallback font, and the PNG file PNG has its pixels.  */
+static bool
+same_as_fallback (const char *png, const struct rd_message *messages,
+		  int n, uint32_t frame)
+{
+  return same_pixels (png, messages, n, frame,
+		      rc_fallback_font_source_new ());
+}
+
+/* Return true if FRAME exists after the N MESSAGES in a renderer with
+   the font source FONTS, and the PNG file PNG has its pixels.  Free
+   FONTS.  The surface of a frame is opaque, so the file has no alpha
+   channel to compare.  */
+static bool
+same_pixels (const char *png, const struct rd_message *messages, int n,
+	     uint32_t frame, struct rc_font_source fonts)
+{
   struct rc_renderer *renderer = rc_renderer_new (fonts);
   for (int i = 0; i < n; i++)
     rc_apply (renderer, &messages[i]);
@@ -295,6 +482,13 @@ same_as_renderer (const char *png, const struct rd_message *messages,
   rc_renderer_free (renderer);
   rc_font_source_free (fonts);
   return same;
+}
+
+/* The function of the chain of the expected renderer.  */
+static void
+ignore_fallback (const uint8_t *hash, int nhash, uint32_t index)
+{
+  (void) hash, (void) nhash, (void) index;
 }
 
 /* Write the SIZE BYTES to the socket FD in chunks of random sizes.  */
@@ -347,20 +541,26 @@ make_run (struct run *run)
   snprintf (run->png, sizeof run->png, "%s/frame.png", run->directory);
 }
 
-/* Remove the files and the directory of RUN.  */
+/* Remove the files and the directories of RUN.  */
 static void
 remove_run (const struct run *run)
 {
+  char cache[160];
   unlink (run->socket);
   unlink (run->png);
+  snprintf (cache, sizeof cache, "%s/remote-client/font-hashes",
+	    run->directory);
+  unlink (cache);
+  snprintf (cache, sizeof cache, "%s/remote-client", run->directory);
+  rmdir (cache);
   rmdir (run->directory);
 }
 
 /* Return a random message.  If DEFINES, some messages define the
-   frames FRAME_A and FRAME_B.  The other messages define fonts, and
-   draw in the two frames.  */
+   frames FRAME_A and FRAME_B.  If REMOVES, some messages remove them.
+   The other messages define fonts, and draw in the two frames.  */
 static struct rd_message
-random_message (uint64_t *state, bool defines)
+random_message (uint64_t *state, bool defines, bool removes)
 {
   uint32_t frame = random_below (state, 2) ? FRAME_A : FRAME_B;
   int32_t x = (int32_t) random_below (state, 70) - 5;
@@ -376,21 +576,29 @@ random_message (uint64_t *state, bool defines)
 	  .u.define_frame = { frame, 1 + random_below (state, 60),
 			      1 + random_below (state, 40) } };
     case 7:
-      if (!defines || random_below (state, 4))
+      if (!removes || random_below (state, 4))
 	return (struct rd_message) { .type = RD_HELLO };
       return (struct rd_message) { .type = RD_DELETE_FRAME,
 				   .u.delete_frame = { frame } };
     case 8:
-      if (!defines || random_below (state, 4))
+      if (!removes || random_below (state, 4))
 	return (struct rd_message) { .type = RD_HELLO };
       return (struct rd_message)
 	{ .type = RD_DEFINE_FRAME,
 	  .u.define_frame = { frame, RC_MAX_FRAME_SIZE + 1, 10 } };
     case 1:
-      return (struct rd_message)
-	{ .type = RD_DEFINE_FONT,
-	  .u.define_font = { .font = random_below (state, 3),
-			     .size = 6 + random_below (state, 24) } };
+      {
+	struct rd_message message =
+	  { .type = RD_DEFINE_FONT,
+	    .u.define_font = { .font = random_below (state, 3),
+			       .size = 6 + random_below (state, 24) } };
+	if (random_below (state, 2))
+	  {
+	    message.u.define_font.nhash = RD_HASH_SIZE;
+	    memcpy (message.u.define_font.hash, system_hash, RD_HASH_SIZE);
+	  }
+	return message;
+      }
     case 2:
       return (struct rd_message)
 	{ .type = RD_CLEAR_AREA,
