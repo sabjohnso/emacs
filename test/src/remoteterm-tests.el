@@ -360,6 +360,20 @@ OPEN-NAMES is the model: the names that are open before OPERATION."
            (should (= (frame-width frame) (car size)))
            (should (= (frame-height frame) (cdr size)))))))))
 
+(ert-deftest remoteterm-tests-set-frame-size ()
+  "`set-frame-size' gives the frame the text size that it asks for."
+  (skip-unless (featurep 'remote-test))
+  (let ((rd-gen-trials 30))
+    (remoteterm-tests--with-display "remote-test"
+      (remoteterm-tests--with-frame frame "remote-test" nil
+        (rd-gen-for-all
+         (lambda () (list (rd-gen-integer 100 2000) (rd-gen-integer 100 2000)))
+         (lambda (size)
+           (set-frame-size frame (nth 0 size) (nth 1 size) t)
+           (should (equal (list (frame-text-width frame)
+                                (frame-text-height frame))
+                          size))))))))
+
 (ert-deftest remoteterm-tests-frame-colors ()
   (skip-unless (featurep 'remote-test))
   (remoteterm-tests--with-display "remote-test"
@@ -5883,6 +5897,303 @@ of the mouse highlight of the session."
     (should (equal (remoteterm-tests--daemon-call
                     'remoteterm-tests--track-mouse-case)
                    '(mouse-movement t (11 . 7) nil)))))
+
+;;;; Focus and size input
+
+(defun remoteterm-tests--z-key (frame)
+  "Return the bytes of a key message for ?z in FRAME.
+A test sends it after other messages, and reads events until it comes."
+  (remote-display--encode
+   `(key :frame ,(remoteterm-tests--frame-id frame) :time 0
+         :keysym ?z :character ?z :modifiers 0)))
+
+(defun remoteterm-tests--random-focus-messages ()
+  "Return a list of random focus messages: (TARGET IN).
+TARGET is `first' or `second', for a frame of the session, or `other',
+for a frame that does not exist.  IN is 1 or 0."
+  (cl-loop repeat (rd-gen-integer 1 10)
+           collect (list (rd-gen-element '(first second other))
+                         (rd-gen-integer 0 1))))
+
+(defun remoteterm-tests--focus-model (messages)
+  "Return (FOCUS . EVENTS) for MESSAGES.
+FOCUS is the target that has the focus after MESSAGES, or nil.  EVENTS
+is the list of the focus events, each (in TARGET) or (out TARGET).  A
+focus-in of a frame with no focus gives a focus-out of the old focus
+frame and a focus-in.  A focus-out of the frame with the focus gives
+a focus-out.  Another message, or a message for `other', gives no
+event."
+  (let ((focus nil)
+        (events nil))
+    (pcase-dolist (`(,target ,in) messages)
+      (cond ((eq target 'other))
+            ((and (= in 1) (not (eq focus target)))
+             (when focus
+               (push (list 'out focus) events))
+             (push (list 'in target) events)
+             (setq focus target))
+            ((and (= in 0) (eq focus target))
+             (push (list 'out target) events)
+             (setq focus nil))))
+    (cons focus (nreverse events))))
+
+(defun remoteterm-tests--run-focus-messages (messages)
+  "Send the focus MESSAGES to a session with two frames.
+Return (FOCUS STATES EVENTS).  FOCUS is the list of the focus frame
+and the highlight frame of the session, and STATES is the list of the
+`frame-focus-state' of each frame.  EVENTS is the list of the focus
+events that Emacs handled, as in `remoteterm-tests--focus-model'.  The
+value has the targets of MESSAGES in place of the frames."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (let* ((second (remoteterm-tests--make-frame "remote-input" nil))
+            (frames `((first . ,frame) (second . ,second)))
+            (events nil)
+            (special-event-map (copy-keymap special-event-map)))
+       (dolist (kind '((focus-in in handle-focus-in)
+                       (focus-out out handle-focus-out)))
+         (define-key special-event-map (vector (car kind))
+                     (lambda (event)
+                       (interactive "e")
+                       (push (list (nth 1 kind)
+                                   (car (rassq (nth 1 event) frames)))
+                             events)
+                       (funcall (nth 2 kind) event))))
+       (unwind-protect
+           (progn
+             (process-send-string
+              client-side
+              (concat
+               (mapconcat
+                (lambda (message)
+                  (remote-display--encode
+                   `(focus :frame
+                           ,(if (eq (car message) 'other)
+                                (+ 1000 (remoteterm-tests--frame-id second))
+                              (remoteterm-tests--frame-id
+                               (alist-get (car message) frames)))
+                           :in ,(cadr message))))
+                messages)
+               (remoteterm-tests--z-key frame)))
+             (remoteterm-tests--read-events 1)
+             (list (mapcar (lambda (focus) (car (rassq focus frames)))
+                           (remote-display--focus-frames "remote-input"))
+                   (mapcar (lambda (target)
+                             (frame-focus-state (alist-get target frames)))
+                           '(first second))
+                   (reverse events)))
+         (delete-frame second))))))
+
+(rd-daemon-deftest remoteterm-tests-focus-events
+  "A focus-in message gives its frame the focus of the session.  A
+focus-out message of the frame with the focus leaves the session with
+no focus frame.  Emacs sees each change as a `focus-in' or a
+`focus-out' event, so at most one frame of the session has the focus
+state t.  A message that does not change the focus frame, or a
+message for a frame that does not exist, gives no event."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-focus-messages
+     (lambda (messages)
+       (pcase-let ((`(,focus . ,events)
+                    (remoteterm-tests--focus-model messages)))
+         (should (equal (remoteterm-tests--run-focus-messages messages)
+                        (list (list focus focus)
+                              (list (eq focus 'first)
+                                    (eq focus 'second))
+                              events))))))))
+
+(defun remoteterm-tests--focus-cursor-case ()
+  "Give the frame the focus, take it away, and give it back.
+Return the kind of the last cursor that the client got after each
+step.  No step does a redisplay."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (let ((chunks nil)
+           (id (remoteterm-tests--frame-id frame)))
+       (redisplay t)
+       (set-process-filter client-side
+                           (lambda (_process string) (push string chunks)))
+       (mapcar
+        (lambda (in)
+          (setq chunks nil)
+          (process-send-string
+           client-side (remote-display--encode `(focus :frame ,id :in ,in)))
+          (with-timeout (5)
+            (while (not (eq (car (remote-display--focus-frames
+                                  "remote-input"))
+                            (and (= in 1) frame)))
+              (accept-process-output nil 0.05)))
+          (accept-process-output nil 0.2)
+          (car (remoteterm-tests--last-cursor
+                (apply #'concat (reverse chunks)))))
+        '(1 0 1))))))
+
+(ert-deftest remoteterm-tests-focus-cursor ()
+  "A change of the focus draws the cursor again at once.
+With the focus, the cursor is a box.  With no focus, it is hollow."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--focus-cursor-case)
+                   (mapcar (lambda (type)
+                             (alist-get type remoteterm-tests--cursor-kinds))
+                           '(box hollow box))))))
+
+(ert-deftest remoteterm-tests-focus-redirect ()
+  "The highlight frame of a session is the frame of the focus redirection.
+A redirection to a frame of another session or terminal does not move
+the highlight frame."
+  (skip-unless (featurep 'remote-test))
+  (remoteterm-tests--with-display "remote-focus"
+    (remoteterm-tests--with-frame focused "remote-focus" nil
+      (remoteterm-tests--with-frame target "remote-focus" nil
+        (remote-display--focus focused)
+        (redirect-frame-focus focused target)
+        (should (equal (remote-display--focus-frames "remote-focus")
+                       (list focused target)))
+        (let ((foreign (seq-find (lambda (frame)
+                                   (not (eq (frame-terminal frame)
+                                            (frame-terminal focused))))
+                                 (frame-list))))
+          (should foreign)
+          (redirect-frame-focus focused foreign)
+          (should (equal (remote-display--focus-frames "remote-focus")
+                         (list focused focused))))
+        (redirect-frame-focus focused nil)
+        (should (equal (remote-display--focus-frames "remote-focus")
+                       (list focused focused)))
+        ;; Emacs keeps a redirection to a frame that it deletes.
+        (let ((gone (remoteterm-tests--make-frame "remote-focus" nil)))
+          (redirect-frame-focus focused gone)
+          (delete-frame gone)
+          (remote-display--focus focused)
+          (should (equal (remote-display--focus-frames "remote-focus")
+                         (list focused focused))))))))
+
+(defconst remoteterm-tests--frame-pixel-limit 32767
+  "The largest width or height of a resize message that a session uses.")
+
+(defun remoteterm-tests--random-frame-pixels ()
+  "Return a random width or height of a resize message.
+The value is not valid in one of four cases: 0, or more than
+`remoteterm-tests--frame-pixel-limit'.  A valid value is often small,
+below the minimum size of Emacs."
+  (pcase (rd-gen-integer 0 3)
+    (0 (rd-gen-element (list 0 (1+ remoteterm-tests--frame-pixel-limit)
+                             #xffffffff)))
+    (1 (rd-gen-integer 1 100))
+    (_ (rd-gen-integer 1 2000))))
+
+(defun remoteterm-tests--random-resizes ()
+  "Return a list of random resize messages: (TARGET WIDTH HEIGHT).
+TARGET is `frame', or `other' for a frame that does not exist."
+  (cl-loop repeat (rd-gen-integer 1 6)
+           collect (list (if (zerop (rd-gen-integer 0 3)) 'other 'frame)
+                         (remoteterm-tests--random-frame-pixels)
+                         (remoteterm-tests--random-frame-pixels))))
+
+(defun remoteterm-tests--valid-resize-p (resize)
+  "Return non-nil if RESIZE is for the frame and has a valid size."
+  (pcase-let ((`(,target ,width ,height) resize))
+    (and (eq target 'frame)
+         (<= 1 width remoteterm-tests--frame-pixel-limit)
+         (<= 1 height remoteterm-tests--frame-pixel-limit))))
+
+(defun remoteterm-tests--send-resizes (client-side frame resizes)
+  "Send RESIZES for FRAME from CLIENT-SIDE, and return the size of FRAME.
+Wait until the session handled them, and do a redisplay.  The value
+is (WIDTH . HEIGHT) in pixels."
+  (let ((id (remoteterm-tests--frame-id frame)))
+    (process-send-string
+     client-side
+     (concat (mapconcat
+              (lambda (resize)
+                (remote-display--encode
+                 `(resize :frame ,(if (eq (car resize) 'frame) id
+                                    (+ id 1000))
+                          :width ,(nth 1 resize)
+                          :height ,(nth 2 resize))))
+              resizes)
+             (remoteterm-tests--z-key frame))))
+  (remoteterm-tests--read-events 1)
+  (redraw-frame frame)
+  (redisplay t)
+  (cons (frame-pixel-width frame) (frame-pixel-height frame)))
+
+(defun remoteterm-tests--run-resizes (resizes)
+  "Send RESIZES to a session, and return the sizes of its frame.
+The value is (BEFORE AFTER DEFINED MINIMUM).  BEFORE and AFTER are the
+pixel sizes (WIDTH . HEIGHT) of the frame before the messages, and
+after them and a redisplay.  DEFINED is the size of the last
+define-frame message that the client got after it attached again.
+MINIMUM is the size of the frame after a resize to 1 by 1 pixel."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional server-side)
+     (let ((chunks nil)
+           (before (cons (frame-pixel-width frame)
+                         (frame-pixel-height frame))))
+       (set-process-filter client-side
+                           (lambda (_process string) (push string chunks)))
+       (remote-display--detach "remote-input")
+       (remote-display-attach "remote-input" server-side)
+       (let ((after (remoteterm-tests--send-resizes client-side frame
+                                                    resizes)))
+         (accept-process-output nil 0.2)
+         (let ((defined (cdar (last (seq-filter
+                                     (lambda (message)
+                                       (eq (car message) 'define-frame))
+                                     (remoteterm-tests--all-messages
+                                      (apply #'concat (reverse chunks))))))))
+           (list before after
+                 (cons (plist-get defined :width)
+                       (plist-get defined :height))
+                 (remoteterm-tests--send-resizes client-side frame
+                                                 '((frame 1 1))))))))))
+
+(rd-daemon-deftest remoteterm-tests-resize-events
+  "After resize messages, the frame has the size of the last valid
+message for it, but not less than the minimum size of Emacs.  The
+client gets a define-frame message with the size of the frame.  A
+size of 0 or above the limit, and a message for a frame that does not
+exist, change nothing."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-resizes
+     (lambda (resizes)
+       (pcase-let* ((`(,before ,after ,defined ,minimum)
+                     (remoteterm-tests--run-resizes resizes))
+                    (last (car (last (seq-filter
+                                      #'remoteterm-tests--valid-resize-p
+                                      resizes))))
+                    (expected (if last (cons (nth 1 last) (nth 2 last))
+                                before)))
+         (should (equal defined after))
+         (should (equal after
+                        (cons (max (car expected) (car minimum))
+                              (max (cdr expected) (cdr minimum))))))))))
+
+(defun remoteterm-tests--resize-limit-case ()
+  "Resize a frame to the largest width, and then above the limit.
+Return the size of the frame after each step."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (let ((limit remoteterm-tests--frame-pixel-limit))
+       (list (remoteterm-tests--send-resizes
+              client-side frame `((frame ,limit 300)))
+             (remoteterm-tests--send-resizes
+              client-side frame `((frame 400 ,(1+ limit))))
+             (remoteterm-tests--send-resizes
+              client-side frame `((frame ,(1+ limit) 400))))))))
+
+(ert-deftest remoteterm-tests-resize-limit ()
+  "A resize message can give a frame the size of the limit, but no more."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (let ((limit remoteterm-tests--frame-pixel-limit))
+      (should (equal (remoteterm-tests--daemon-call
+                      'remoteterm-tests--resize-limit-case)
+                     `((,limit . 300) (,limit . 300) (,limit . 300)))))))
 
 ;;;; The loop of the trials
 

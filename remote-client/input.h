@@ -56,4 +56,13 @@ extern struct rd_message rc_motion_message (uint32_t frame, double x,
 extern int rc_scroll_button (GdkScrollDirection direction, double dx,
 			     double dy);
 
+/* Return the focus message of the frame FRAME, which got (IN is true)
+   or lost the focus.  */
+extern struct rd_message rc_focus_message (uint32_t frame, bool in);
+
+/* Return the resize message of the frame FRAME, whose window has the
+   size WIDTH, HEIGHT in pixels now.  A negative size becomes 0.  */
+extern struct rd_message rc_resize_message (uint32_t frame, int width,
+					    int height);
+
 #endif /* REMOTE_CLIENT_INPUT_H */

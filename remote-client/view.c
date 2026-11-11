@@ -55,6 +55,8 @@ static gboolean key_pressed (GtkWidget *, GdkEventKey *, gpointer);
 static gboolean button_changed (GtkWidget *, GdkEventButton *, gpointer);
 static gboolean mouse_moved (GtkWidget *, GdkEventMotion *, gpointer);
 static gboolean scrolled (GtkWidget *, GdkEventScroll *, gpointer);
+static gboolean focus_changed (GtkWidget *, GdkEventFocus *, gpointer);
+static void area_resized (GtkWidget *, GdkRectangle *, gpointer);
 static void send (struct rc_window *, const struct rd_message *);
 
 /* The input signals of the drawing area of a frame, and their
@@ -112,7 +114,8 @@ rc_view_update (struct rc_view *view, struct rc_change change)
     }
 }
 
-/* Make the window of FRAME, or give it the size of the frame.  */
+/* Make the window of FRAME, or give it the size of the frame.  The
+   user can change the size of the window later.  */
 static void
 show_frame (struct rc_view *view, uint32_t frame)
 {
@@ -120,9 +123,9 @@ show_frame (struct rc_view *view, uint32_t frame)
   struct rc_window *window = rc_table_get (&view->windows, frame);
   if (!window)
     window = add_window (view, frame);
-  gtk_widget_set_size_request (window->area,
-			       cairo_image_surface_get_width (surface),
-			       cairo_image_surface_get_height (surface));
+  gtk_window_resize (GTK_WINDOW (window->window),
+		     cairo_image_surface_get_width (surface),
+		     cairo_image_surface_get_height (surface));
   gtk_widget_queue_draw (window->area);
 }
 
@@ -157,12 +160,17 @@ add_window (struct rc_view *view, uint32_t frame)
 		    window);
   g_signal_connect (window->window, "key-press-event",
 		    G_CALLBACK (key_pressed), window);
+  g_signal_connect (window->window, "focus-in-event",
+		    G_CALLBACK (focus_changed), window);
+  g_signal_connect (window->window, "focus-out-event",
+		    G_CALLBACK (focus_changed), window);
   gtk_widget_add_events (window->area, INPUT_EVENTS);
   for (size_t i = 0; i < G_N_ELEMENTS (input_signals); i++)
     g_signal_connect (window->area, input_signals[i].name,
 		      input_signals[i].function, window);
+  g_signal_connect (window->area, "size-allocate",
+		    G_CALLBACK (area_resized), window);
   gtk_window_set_title (GTK_WINDOW (window->window), "Emacs");
-  gtk_window_set_resizable (GTK_WINDOW (window->window), false);
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
   gtk_widget_show_all (window->window);
   rc_table_set (&view->windows, frame, window);
@@ -277,6 +285,33 @@ scrolled (GtkWidget *widget, GdkEventScroll *event, gpointer data)
 			 event->state, event->time, true);
   send (window, &message);
   return true;
+}
+
+/* The focus-in-event and focus-out-event signals of a window.  DATA
+   is the struct rc_window.  Send the focus message.  GTK also handles
+   the event, so that the window shows its focus.  */
+static gboolean
+focus_changed (GtkWidget *widget, GdkEventFocus *event, gpointer data)
+{
+  (void) widget;
+  struct rc_window *window = data;
+  struct rd_message message = rc_focus_message (window->frame, event->in);
+  send (window, &message);
+  return false;
+}
+
+/* The size-allocate signal of the drawing area of a frame.  DATA is
+   the struct rc_window.  Send the resize message of the new size of
+   the area.  */
+static void
+area_resized (GtkWidget *widget, GdkRectangle *allocation, gpointer data)
+{
+  (void) widget;
+  struct rc_window *window = data;
+  struct rd_message message = rc_resize_message (window->frame,
+						 allocation->width,
+						 allocation->height);
+  send (window, &message);
 }
 
 /* Give MESSAGE of the input of the user in WINDOW to the function of

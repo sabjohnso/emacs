@@ -47,6 +47,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <config.h>
 
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -92,6 +93,7 @@ static bool run_trial (uint64_t);
 static bool scroll_examples (void);
 static int32_t rc_message_x_of (double);
 static int expected_wheel (double, double);
+static int random_size (uint64_t *);
 static uint64_t random_below (uint64_t *, uint64_t);
 static uint64_t random_next (uint64_t *);
 
@@ -179,8 +181,9 @@ expected_wheel (double dx, double dy)
   return 0;
 }
 
-/* Run the trial of SEED: a key press, a button event, a motion, and a
-   smooth scroll, with random values.  Return true if it passes.  */
+/* Run the trial of SEED: a key press, a button event, a motion, a
+   smooth scroll, a focus change, and a resize, with random values.
+   Return true if it passes.  */
 static bool
 run_trial (uint64_t seed)
 {
@@ -217,6 +220,18 @@ run_trial (uint64_t seed)
   double dy = deltas[random_below (&state, 7)];
   if (rc_scroll_button (GDK_SCROLL_SMOOTH, dx, dy) != expected_wheel (dx, dy))
     return false;
+  bool in = random_below (&state, 2);
+  struct rd_message focus = rc_focus_message (frame, in);
+  int width = random_size (&state);
+  int height = random_size (&state);
+  struct rd_message resize = rc_resize_message (frame, width, height);
+  const struct rd_resize *r = &resize.u.resize;
+  if (!(focus.type == RD_FOCUS && focus.u.focus.frame == frame
+	&& focus.u.focus.in == in
+	&& resize.type == RD_RESIZE && r->frame == frame
+	&& r->width == (uint32_t) MAX (width, 0)
+	&& r->height == (uint32_t) MAX (height, 0)))
+    return false;
   return (message.type == RD_KEY && key->frame == frame
 	  && key->time == time && key->keysym == keyval
 	  && key->character == gdk_keyval_to_unicode (keyval)
@@ -226,6 +241,17 @@ run_trial (uint64_t seed)
 	  && b->press == press && b->modifiers == bits
 	  && move.type == RD_MOTION && m->frame == frame && m->time == time
 	  && m->x == floor (x) && m->y == floor (y));
+}
+
+/* Return a random width or height of a window for STATE.  One in four
+   is an edge: a negative size, 0, or a large size.  */
+static int
+random_size (uint64_t *state)
+{
+  static const int edges[] = { INT_MIN, -1, 0, 1, 32767, 32768, INT_MAX };
+  if (random_below (state, 4) == 0)
+    return edges[random_below (state, G_N_ELEMENTS (edges))];
+  return (int) random_below (state, 2500) - 500;
 }
 
 /* Return a random number from 0 to LIMIT - 1.  */

@@ -40,7 +40,11 @@ FONTS_OBJS = fonts.o hashfonts.o hashcache.o
 CLIENT_OBJS = client.o view.o input.o reader.o render.o table.o fonts.o \
   hashfonts.o hashcache.o rdproto.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
-  test-input test-client
+  test-input test-client test-view
+
+# The view needs a display.  Xvfb gives the test one, so no window
+# comes on the screen of the user.
+XVFB_RUN = xvfb-run -a
 
 all: remote-client $(TESTS)
 
@@ -55,6 +59,7 @@ check: remote-client $(TESTS)
 	./test-fonts
 	./test-input
 	./test-client
+	$(XVFB_RUN) ./test-view
 
 # Build again with AddressSanitizer and UndefinedBehaviorSanitizer, and
 # run the test.
@@ -85,7 +90,10 @@ test-input: test-input.o input.o rdproto.o
 test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-client.o view.o input.o test-input.o: %.o: %.c
+test-view: test-view.o view.o input.o $(RENDER_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
+
+client.o view.o input.o test-input.o test-view.o: %.o: %.c
 	$(CC) $(ALL_CFLAGS) $(GTK_CFLAGS) -c -o $@ $<
 
 rdproto.o: ../src/rdproto.c ../src/rdproto.h config.h
@@ -101,7 +109,8 @@ fonts.o test-glyphs.o test-client.o test-fonts.o: fonts.h render.h \
   ../src/rdproto.h
 hashfonts.o test-fonts.o client.o: hashfonts.h render.h ../src/rdproto.h
 hashfonts.o hashcache.o client.o: hashcache.h ../src/rdproto.h
-client.o view.o: view.h reader.h fonts.h render.h ../src/rdproto.h
+client.o view.o test-view.o: view.h reader.h fonts.h render.h \
+  ../src/rdproto.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
 
 clean:

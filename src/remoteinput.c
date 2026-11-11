@@ -34,7 +34,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    releases.  The wheel buttons of rdproto.h are those of X: a press
    gives a wheel event, and a release gives none.  A motion message
    records the position of the mouse in the session, for the
-   mouse_position_hook, and updates the mouse highlight.  */
+   mouse_position_hook, and updates the mouse highlight.
+
+   A focus message gives its frame the focus of the session, or takes
+   the focus from it.  Emacs sees each change as a focus-out event of
+   the old focus frame and a focus-in event of the new one.  A resize
+   message changes the size of its frame at the next redisplay, and the
+   redisplay sends the new size to the client.  */
 
 #include <config.h>
 
@@ -48,6 +54,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* Keysyms with this bit are vendor keys.  */
 enum { KEYSYM_VENDOR = 1 << 28 };
+
+/* The largest width or height of a frame in pixels, as for a window of
+   X.  A larger size from the client has no effect, because the glyph
+   matrices of a frame grow with its size.  */
+enum { REMOTE_FRAME_PIXEL_LIMIT = 32767 };
 
 /* The wheel buttons, and the kind and the modifier of the event of
    each, as in pgtkterm.c.  */
@@ -64,6 +75,14 @@ static void remote_button_input (struct remote_display_info *,
 				 const struct rd_message *);
 static void remote_motion_input (struct remote_display_info *,
 				 const struct rd_message *);
+static void remote_focus_input (struct remote_display_info *,
+				const struct rd_message *);
+static void remote_resize_input (struct remote_display_info *,
+				 const struct rd_message *);
+static void remote_set_focus_frame (struct remote_display_info *,
+				    struct frame *);
+static void remote_focus_event (enum event_kind, struct frame *);
+static bool remote_frame_pixels_p (uint32_t);
 static void remote_wheel_event (struct frame *, const struct rd_button *,
 				const struct remote_wheel *);
 static void remote_click_event (struct frame *, const struct rd_button *);
@@ -84,6 +103,8 @@ static void (*const remote_input_functions[RD_TYPE_LIMIT])
     [RD_KEY] = remote_key_input,
     [RD_BUTTON] = remote_button_input,
     [RD_MOTION] = remote_motion_input,
+    [RD_FOCUS] = remote_focus_input,
+    [RD_RESIZE] = remote_resize_input,
   };
 
 void
@@ -158,6 +179,38 @@ remote_motion_input (struct remote_display_info *dpyinfo,
   note_mouse_highlight (f, motion->x, motion->y);
 }
 
+/* Give the frame of the focus MESSAGE the focus of DPYINFO, or take
+   the focus from it.  A focus-out message of a frame with no focus has
+   no effect.  */
+static void
+remote_focus_input (struct remote_display_info *dpyinfo,
+		    const struct rd_message *message)
+{
+  const struct rd_focus *focus = &message->u.focus;
+  struct frame *f = remote_frame_of_id (dpyinfo, focus->frame);
+  if (!f)
+    return;
+  if (focus->in)
+    remote_set_focus_frame (dpyinfo, f);
+  else if (dpyinfo->focus_frame == f)
+    remote_set_focus_frame (dpyinfo, NULL);
+}
+
+/* Change the size of the frame of the resize MESSAGE of DPYINFO at the
+   next redisplay.  A size of 0 or above REMOTE_FRAME_PIXEL_LIMIT has
+   no effect.  */
+static void
+remote_resize_input (struct remote_display_info *dpyinfo,
+		     const struct rd_message *message)
+{
+  const struct rd_resize *resize = &message->u.resize;
+  struct frame *f = remote_frame_of_id (dpyinfo, resize->frame);
+  if (!f || !remote_frame_pixels_p (resize->width)
+      || !remote_frame_pixels_p (resize->height))
+    return;
+  change_frame_size (f, resize->width, resize->height, false, true, false);
+}
+
 void
 remote_mouse_position (struct frame **fp, int insist,
 		       Lisp_Object *bar_window, enum scroll_bar_part *part,
@@ -174,6 +227,42 @@ remote_mouse_position (struct frame **fp, int insist,
   XSETINT (*x, dpyinfo->last_mouse_motion_x);
   XSETINT (*y, dpyinfo->last_mouse_motion_y);
   *timestamp = dpyinfo->last_mouse_movement_time;
+}
+
+/* Give F the focus of DPYINFO, and store a focus-out event for the
+   old focus frame and a focus-in event for F.  F is NULL to take the
+   focus from each frame.  */
+static void
+remote_set_focus_frame (struct remote_display_info *dpyinfo,
+			struct frame *f)
+{
+  struct frame *old = dpyinfo->focus_frame;
+  if (f == old)
+    return;
+  remote_new_focus_frame (dpyinfo, f);
+  if (old)
+    remote_focus_event (FOCUS_OUT_EVENT, old);
+  if (f)
+    remote_focus_event (FOCUS_IN_EVENT, f);
+}
+
+/* Store a focus event of KIND for F.  */
+static void
+remote_focus_event (enum event_kind kind, struct frame *f)
+{
+  struct input_event ie;
+  EVENT_INIT (ie);
+  ie.kind = kind;
+  XSETFRAME (ie.frame_or_window, f);
+  ie.arg = Qnil;
+  kbd_buffer_store_event (&ie);
+}
+
+/* Return true if PIXELS is a valid width or height of a frame.  */
+static bool
+remote_frame_pixels_p (uint32_t pixels)
+{
+  return pixels > 0 && pixels <= REMOTE_FRAME_PIXEL_LIMIT;
 }
 
 /* Store the WHEEL event of a press of BUTTON in F.  */

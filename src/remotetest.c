@@ -206,8 +206,7 @@ The selected window of a focused frame shows the active cursor.  */)
   (Lisp_Object frame)
 {
   struct frame *f = remote_decode_frame (frame);
-  FRAME_DISPLAY_INFO (f)->focus_frame = f;
-  FRAME_DISPLAY_INFO (f)->highlight_frame = f;
+  remote_new_focus_frame (FRAME_DISPLAY_INFO (f), f);
   return Qnil;
 }
 

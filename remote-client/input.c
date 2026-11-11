@@ -78,6 +78,22 @@ rc_scroll_button (GdkScrollDirection direction, double dx, double dy)
     }
 }
 
+struct rd_message
+rc_focus_message (uint32_t frame, bool in)
+{
+  return (struct rd_message)
+    { .type = RD_FOCUS, .u.focus = { .frame = frame, .in = in } };
+}
+
+struct rd_message
+rc_resize_message (uint32_t frame, int width, int height)
+{
+  return (struct rd_message)
+    { .type = RD_RESIZE,
+      .u.resize = { .frame = frame, .width = MAX (width, 0),
+		    .height = MAX (height, 0) } };
+}
+
 /* Return the modifier bits of the GDK state STATE.  Mod1, the Alt key
    of most keyboards, is meta, as in pgtkterm.c with its default
    settings.  */

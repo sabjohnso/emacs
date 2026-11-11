@@ -87,6 +87,11 @@ static void remote_finish_frame (struct frame *, Lisp_Object);
 static void remote_forget_mouse_frame (struct remote_display_info *,
 				       struct frame *);
 static void remote_free_frame_resources (struct frame *);
+static void remote_frame_rehighlight_hook (struct frame *);
+static void remote_frame_rehighlight (struct remote_display_info *);
+static struct frame *remote_input_frame (struct remote_display_info *,
+					 struct frame *);
+static void remote_redraw_cursors (struct frame *);
 static void remote_delete_terminal (struct terminal *);
 static bool remote_defined_color (struct frame *, const char *,
 				  Emacs_Color *, bool, bool);
@@ -1039,6 +1044,67 @@ remote_free_frame_resources (struct frame *f)
   unblock_input ();
 }
 
+/* Give F the focus of DPYINFO.  F is NULL if no frame of DPYINFO has
+   the focus.  */
+void
+remote_new_focus_frame (struct remote_display_info *dpyinfo, struct frame *f)
+{
+  dpyinfo->focus_frame = f;
+  remote_frame_rehighlight (dpyinfo);
+}
+
+/* The frame_rehighlight_hook.  The focus redirection of a frame of
+   the session of F changed.  */
+static void
+remote_frame_rehighlight_hook (struct frame *f)
+{
+  remote_frame_rehighlight (FRAME_DISPLAY_INFO (f));
+}
+
+/* Make the highlight frame of DPYINFO the frame that gets the input of
+   its focus frame.  If the highlight frame changes, draw the cursors of
+   the old and the new highlight frame again.  */
+static void
+remote_frame_rehighlight (struct remote_display_info *dpyinfo)
+{
+  struct frame *old = dpyinfo->highlight_frame;
+  dpyinfo->highlight_frame = remote_input_frame (dpyinfo,
+						 dpyinfo->focus_frame);
+  if (old == dpyinfo->highlight_frame)
+    return;
+  if (old)
+    remote_redraw_cursors (old);
+  if (dpyinfo->highlight_frame)
+    remote_redraw_cursors (dpyinfo->highlight_frame);
+}
+
+/* Return the frame of DPYINFO that gets the input of the focus frame F:
+   the live frame of the focus redirection of F, if it is a frame of
+   DPYINFO, or else F.  Return NULL if F is NULL.  */
+static struct frame *
+remote_input_frame (struct remote_display_info *dpyinfo, struct frame *f)
+{
+  if (!f)
+    return NULL;
+  Lisp_Object redirect = FRAME_FOCUS_FRAME (f);
+  if (FRAMEP (redirect) && FRAME_LIVE_P (XFRAME (redirect))
+      && FRAME_REMOTE_P (XFRAME (redirect))
+      && FRAME_DISPLAY_INFO (XFRAME (redirect)) == dpyinfo)
+    return XFRAME (redirect);
+  return f;
+}
+
+/* Draw the cursors of F again, and send them to the client.  The type
+   of a cursor depends on the highlight frame.  */
+static void
+remote_redraw_cursors (struct frame *f)
+{
+  block_input ();
+  gui_update_cursor (f, true);
+  remote_flush_frame (f);
+  unblock_input ();
+}
+
 
 /***********************************************************************
 		    Hooks that need a client to act
@@ -1812,6 +1878,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->menu_show_hook = remote_menu_show;
   terminal->read_socket_hook = remote_read_socket;
   terminal->mouse_position_hook = remote_mouse_position;
+  terminal->frame_rehighlight_hook = remote_frame_rehighlight_hook;
   terminal->update_begin_hook = remote_no_op_frame;
   terminal->update_end_hook = remote_flush_frame;
   terminal->clear_frame_hook = remote_no_op_frame;
