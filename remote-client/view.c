@@ -24,6 +24,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <gtk/gtk.h>
 
 #include "input.h"
+#include "sizes.h"
 #include "table.h"
 #include "view.h"
 
@@ -35,19 +36,23 @@ struct rc_view
   struct rc_table windows;
 };
 
-/* The window of FRAME of VIEW, and the drawing area in it.  */
+/* The window of FRAME of VIEW, the drawing area in it, and the sizes
+   of the area.  */
 struct rc_window
 {
   struct rc_view *view;
   uint32_t frame;
   GtkWidget *window;
   GtkWidget *area;
+  struct rc_sizes sizes;
 };
 
 static void show_frame (struct rc_view *, uint32_t);
 static void remove_window (struct rc_view *, uint32_t);
 static void redraw_frame (struct rc_view *, uint32_t);
-static struct rc_window *add_window (struct rc_view *, uint32_t);
+static struct rc_window *add_window (struct rc_view *, uint32_t,
+				     struct rc_size);
+static struct rc_size surface_size (cairo_surface_t *);
 static void destroy_window (void *);
 static gboolean draw_frame (GtkWidget *, cairo_t *, gpointer);
 static void window_closed (GtkWidget *, gpointer);
@@ -115,17 +120,19 @@ rc_view_update (struct rc_view *view, struct rc_change change)
 }
 
 /* Make the window of FRAME, or give it the size of the frame.  The
-   user can change the size of the window later.  */
+   window does not take the size of an answer to a resize message, so
+   that the user can change the size of the window.  */
 static void
 show_frame (struct rc_view *view, uint32_t frame)
 {
-  cairo_surface_t *surface = rc_frame_surface (view->renderer, frame);
+  struct rc_size size
+    = surface_size (rc_frame_surface (view->renderer, frame));
   struct rc_window *window = rc_table_get (&view->windows, frame);
   if (!window)
-    window = add_window (view, frame);
-  gtk_window_resize (GTK_WINDOW (window->window),
-		     cairo_image_surface_get_width (surface),
-		     cairo_image_surface_get_height (surface));
+    window = add_window (view, frame, size);
+  else if (rc_sizes_note_definition (&window->sizes, size))
+    gtk_window_resize (GTK_WINDOW (window->window), size.width,
+		       size.height);
   gtk_widget_queue_draw (window->area);
 }
 
@@ -147,14 +154,15 @@ redraw_frame (struct rc_view *view, uint32_t frame)
     gtk_widget_queue_draw (window->area);
 }
 
-/* Make and show a window for FRAME, and return it.  */
+/* Make and show a window of the size SIZE for FRAME, and return it.  */
 static struct rc_window *
-add_window (struct rc_view *view, uint32_t frame)
+add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
 {
   struct rc_window *window = g_new (struct rc_window, 1);
   *window = (struct rc_window) { view, frame,
 				 gtk_window_new (GTK_WINDOW_TOPLEVEL),
-				 gtk_drawing_area_new () };
+				 gtk_drawing_area_new (),
+				 rc_sizes_new (size) };
   g_signal_connect (window->area, "draw", G_CALLBACK (draw_frame), window);
   g_signal_connect (window->window, "destroy", G_CALLBACK (window_closed),
 		    window);
@@ -172,9 +180,19 @@ add_window (struct rc_view *view, uint32_t frame)
 		    G_CALLBACK (area_resized), window);
   gtk_window_set_title (GTK_WINDOW (window->window), "Emacs");
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
+  gtk_window_set_default_size (GTK_WINDOW (window->window), size.width,
+			       size.height);
   gtk_widget_show_all (window->window);
   rc_table_set (&view->windows, frame, window);
   return window;
+}
+
+/* Return the size of SURFACE.  */
+static struct rc_size
+surface_size (cairo_surface_t *surface)
+{
+  return (struct rc_size) { cairo_image_surface_get_width (surface),
+			    cairo_image_surface_get_height (surface) };
 }
 
 /* Destroy the GTK window of DATA, a struct rc_window that the view
@@ -302,15 +320,17 @@ focus_changed (GtkWidget *widget, GdkEventFocus *event, gpointer data)
 
 /* The size-allocate signal of the drawing area of a frame.  DATA is
    the struct rc_window.  Send the resize message of the new size of
-   the area.  */
+   the area, if the server does not know the size.  */
 static void
 area_resized (GtkWidget *widget, GdkRectangle *allocation, gpointer data)
 {
   (void) widget;
   struct rc_window *window = data;
-  struct rd_message message = rc_resize_message (window->frame,
-						 allocation->width,
-						 allocation->height);
+  struct rc_size size = rc_size_of (allocation->width, allocation->height);
+  if (!rc_sizes_note_allocation (&window->sizes, size))
+    return;
+  struct rd_message message = rc_resize_message (window->frame, size.width,
+						 size.height);
   send (window, &message);
 }
 

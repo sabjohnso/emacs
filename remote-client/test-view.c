@@ -55,10 +55,14 @@ struct example
   struct sent sent;
 };
 
+static bool show_example (uint32_t, uint32_t);
 static bool focus_example (bool);
 static bool resize_example (uint32_t, uint32_t, int, int);
 static bool define_example (uint32_t, uint32_t, uint32_t, uint32_t);
 static bool wait_for_size (GtkWindow *, int, int);
+static bool drag_example (void);
+static void run_for (gint64);
+static int sent_index (const struct sent *, uint32_t, uint32_t);
 static struct example *start_example (uint32_t, uint32_t);
 static void end_example (struct example *);
 static void define_frame (struct example *, uint32_t, uint32_t);
@@ -83,15 +87,35 @@ main (int argc, char **argv)
       fprintf (stderr, "test-view: no display; run it in xvfb-run\n");
       return 1;
     }
-  bool passed = (focus_example (true) && focus_example (false)
+  bool passed = (show_example (300, 200) && show_example (640, 480)
+		 && focus_example (true) && focus_example (false)
 		 && resize_example (300, 200, 420, 260)
 		 && resize_example (600, 400, 300, 200)
 		 && define_example (300, 200, 500, 350)
-		 && define_example (600, 400, 250, 180));
+		 && define_example (600, 400, 250, 180)
+		 && drag_example ());
   if (!passed)
     return 1;
   printf ("test-view: the examples passed\n");
   return 0;
+}
+
+/* The server defines a new frame of WIDTH, HEIGHT.  Its window must
+   get that size, and must send no resize message.  */
+static bool
+show_example (uint32_t width, uint32_t height)
+{
+  struct example *example = start_example (width, height);
+  bool passed = wait_for_size (frame_window (), width, height);
+  run_for (WAIT_LIMIT / 10);
+  for (int i = 0; i < example->sent.count; i++)
+    if (example->sent.messages[i].type == RD_RESIZE)
+      passed = false;
+  if (!passed)
+    fprintf (stderr, "test-view: the new window of %ux%u is wrong\n",
+	     width, height);
+  end_example (example);
+  return passed;
 }
 
 /* The window of a frame gets (IN is true) or loses the focus.  The
@@ -144,8 +168,66 @@ define_example (uint32_t width, uint32_t height, uint32_t new_width,
   if (!passed)
     fprintf (stderr, "test-view: the window did not get %ux%u\n",
 	     new_width, new_height);
+  run_for (WAIT_LIMIT / 10);
+  struct rd_message echo =
+    { .type = RD_RESIZE,
+      .u.resize = { .frame = 1, .width = new_width,
+		    .height = new_height } };
+  if (passed && sent_p (&example->sent, &echo))
+    {
+      fprintf (stderr, "test-view: the size of the server came back\n");
+      passed = false;
+    }
   end_example (example);
   return passed;
+}
+
+/* The user changes the size of a window two times.  Then the answer to
+   the first resize message comes.  The window must keep the size of
+   the user.  */
+static bool
+drag_example (void)
+{
+  struct example *example = start_example (300, 200);
+  GtkWindow *window = frame_window ();
+  gtk_window_resize (window, 420, 260);
+  bool passed = wait_for_size (window, 420, 260);
+  gtk_window_resize (window, 500, 300);
+  passed = passed && wait_for_size (window, 500, 300);
+  int first = sent_index (&example->sent, 420, 260);
+  int second = sent_index (&example->sent, 500, 300);
+  passed = passed && first >= 0 && second > first;
+  define_frame (example, 420, 260);
+  run_for (WAIT_LIMIT / 10);
+  passed = (passed && gtk_widget_get_allocated_width
+	    (gtk_bin_get_child (GTK_BIN (window))) == 500);
+  if (!passed)
+    fprintf (stderr, "test-view: an answer changed the size of the user\n");
+  end_example (example);
+  return passed;
+}
+
+/* Return the index of the first resize message of WIDTH, HEIGHT in
+   SENT, or -1 if SENT has none.  */
+static int
+sent_index (const struct sent *sent, uint32_t width, uint32_t height)
+{
+  for (int i = 0; i < sent->count; i++)
+    if (sent->messages[i].type == RD_RESIZE
+	&& sent->messages[i].u.resize.width == width
+	&& sent->messages[i].u.resize.height == height)
+      return i;
+  return -1;
+}
+
+/* Run the main loop for TIME microseconds.  */
+static void
+run_for (gint64 time)
+{
+  gint64 end = g_get_monotonic_time () + time;
+  while (g_get_monotonic_time () < end)
+    if (!g_main_context_iteration (NULL, false))
+      g_usleep (1000);
 }
 
 /* Run the main loop until the content of WINDOW has the size WIDTH,

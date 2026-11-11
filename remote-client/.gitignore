@@ -7,3 +7,5 @@ remote-client
 test-table
 test-fonts
 test-input
+test-view
+test-sizes

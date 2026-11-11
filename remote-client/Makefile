@@ -37,10 +37,10 @@ GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 RENDER_OBJS = render.o table.o rdproto.o
 READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o
-CLIENT_OBJS = client.o view.o input.o reader.o render.o table.o fonts.o \
-  hashfonts.o hashcache.o rdproto.o
+CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
+  fonts.o hashfonts.o hashcache.o rdproto.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
-  test-input test-client test-view
+  test-input test-client test-sizes test-view
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -59,6 +59,7 @@ check: remote-client $(TESTS)
 	./test-fonts
 	./test-input
 	./test-client
+	./test-sizes
 	$(XVFB_RUN) ./test-view
 
 # Build again with AddressSanitizer and UndefinedBehaviorSanitizer, and
@@ -90,7 +91,10 @@ test-input: test-input.o input.o rdproto.o
 test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-test-view: test-view.o view.o input.o $(RENDER_OBJS)
+test-sizes: test-sizes.o sizes.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-view: test-view.o view.o input.o sizes.o $(RENDER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
 client.o view.o input.o test-input.o test-view.o: %.o: %.c
@@ -112,6 +116,7 @@ hashfonts.o hashcache.o client.o: hashcache.h ../src/rdproto.h
 client.o view.o test-view.o: view.h reader.h fonts.h render.h \
   ../src/rdproto.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
+sizes.o test-sizes.o view.o: sizes.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)
