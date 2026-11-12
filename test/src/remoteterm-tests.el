@@ -654,9 +654,9 @@ session sent, and :codes is a list of the glyph codes of each text."
                     (length texts))))))))
 
 (ert-deftest remoteterm-tests-no-client ()
-  "With no client, the hooks of redisplay run and a session has no sink.
-The cursor state shows that redisplay reached the hooks.  A client that
-comes later gets the text when a redraw sends it."
+  "With no client, redisplay skips the frame and a session has no sink.
+The empty cursor state shows that redisplay did not reach the hooks.  A
+client that comes later gets the text when a redraw sends it."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
     (pcase-let (((map :cursor :no-client :output)
@@ -685,7 +685,7 @@ comes later gets the text when a redraw sends it."
                                          (remote-display--take-output display)))
                        (delete-frame frame)
                        (kill-buffer buffer))))))
-      (should cursor)
+      (should-not cursor)
       (should (eq no-client 'no-client))
       (should (assq 'draw-glyphs (remoteterm-tests--messages output))))))
 
@@ -4729,10 +4729,11 @@ new client."
 (defun remoteterm-tests--detached-operations ()
   "Return a random list of operations on a frame with no client.
 An operation is (insert POSITION STRING), (delete COUNT), (goto
-POSITION), (resize COLUMNS LINES), or (redisplay).  One in three
-operations is (redisplay)."
+POSITION), (resize COLUMNS LINES), (message STRING), (redraw),
+\(sit), or (redisplay).  (sit) is `sit-for' with no time, and (redraw)
+is `redraw-frame'."
   (cl-loop repeat (rd-gen-integer 0 8)
-           collect (pcase (rd-gen-random 6)
+           collect (pcase (rd-gen-random 9)
                      (0 (list 'insert (rd-gen-integer 1 60)
                               (rd-gen-element
                                '("x" "yz\n" "\n" "\u00e9\u4e2d"
@@ -4741,6 +4742,9 @@ operations is (redisplay)."
                      (2 (list 'goto (rd-gen-integer 1 60)))
                      (3 (list 'resize (rd-gen-integer 20 40)
                               (rd-gen-integer 4 8)))
+                     (4 (list 'message (rd-gen-element '("m" "a\nb"))))
+                     (5 '(redraw))
+                     (6 '(sit))
                      (_ '(redisplay)))))
 
 (defun remoteterm-tests--attach-after (operations display frame buffer)
@@ -4750,6 +4754,18 @@ value is (ATTACHED REDRAWN).  ATTACHED is the bytes of the first
 redisplay after the attach.  REDRAWN is the bytes of `redraw-frame'
 and a redisplay for one more new client."
   (remote-display--detach display)
+  (remoteterm-tests--do-detached-operations operations frame buffer)
+  (remote-display--record display)
+  (redisplay t)
+  (let ((attached (remote-display--take-output display)))
+    (remote-display--record display)
+    (redraw-frame frame)
+    (redisplay t)
+    (list attached (remote-display--take-output display))))
+
+(defun remoteterm-tests--do-detached-operations (operations frame buffer)
+  "Do OPERATIONS of `remoteterm-tests--detached-operations' on BUFFER.
+FRAME shows BUFFER."
   (let ((window (frame-root-window frame)))
     (with-current-buffer buffer
       (dolist (operation operations)
@@ -4764,14 +4780,71 @@ and a redisplay for one more new client."
            (set-window-point window (min position (point-max))))
           (`(resize ,columns ,lines)
            (set-frame-size frame columns lines))
-          ('(redisplay) (redisplay t))))))
-  (remote-display--record display)
-  (redisplay t)
-  (let ((attached (remote-display--take-output display)))
-    (remote-display--record display)
-    (redraw-frame frame)
-    (redisplay t)
-    (list attached (remote-display--take-output display))))
+          (`(message ,string) (message "%s" string))
+          ('(redraw) (redraw-frame frame))
+          ('(sit) (sit-for 0))
+          ('(redisplay) (redisplay t)))))))
+
+;; The number of mode lines of the current buffer that redisplay drew
+;; with `remoteterm-tests--count-mode-line'.
+(defvar-local remoteterm-tests--mode-lines 0)
+
+(defun remoteterm-tests--count-mode-line ()
+  "Count a mode line that redisplay draws, and return an empty string."
+  (cl-incf remoteterm-tests--mode-lines)
+  "")
+
+(rd-daemon-deftest remoteterm-tests-detached-no-redisplay
+  "Redisplay does not draw a remote frame while no client is attached.
+A client draws the frame, and then detaches.  While no client is
+attached, random edits, moves of point, resizes, and redisplays occur.
+A mode line counts its draws.  Law: the count does not change while no
+client is attached, and it grows at the first redisplay after an
+attach.  The test does this twice."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     #'remoteterm-tests--detached-operations
+     (lambda (operations)
+       (pcase-let ((`(,before . ,cycles)
+                    (rd-daemon-eval
+                     (remoteterm-tests--frame-form
+                      '((width . 30) (height . 6))
+                      '(progn
+                         (setq-local mode-line-format
+                                     '(:eval
+                                       (remoteterm-tests--count-mode-line)))
+                         (insert "abc\ndef\n"))
+                      `(remoteterm-tests--count-detached
+                        ',operations display frame buffer)))))
+         (should (> before 0))
+         (pcase-dolist (`(,detached ,attached) cycles)
+           (should (= detached 0))
+           (should (> attached 0))))))))
+
+(defun remoteterm-tests--count-detached (operations display frame buffer)
+  "Count the mode lines that redisplay draws for OPERATIONS with no client.
+DISPLAY, FRAME, and BUFFER are as for `remoteterm-tests--attach-after'.
+Do a detach, OPERATIONS, and an attach two times.  The value is
+\(BEFORE CYCLE CYCLE).  BEFORE is the number of mode lines that
+redisplay drew before the first detach.  Each CYCLE is (DETACHED
+ATTACHED).  DETACHED is the number of mode lines that redisplay drew
+while no client was attached.  ATTACHED is the number for the first
+redisplay after the attach."
+  (cl-flet ((count ()
+              (buffer-local-value 'remoteterm-tests--mode-lines buffer)))
+    (cons (count)
+          (cl-loop
+           repeat 2
+           collect (let ((before-detach (count)))
+                     (remote-display--detach display)
+                     (remoteterm-tests--do-detached-operations
+                      operations frame buffer)
+                     (redisplay t)
+                     (let ((before-attach (count)))
+                       (remote-display--record display)
+                       (redisplay t)
+                       (list (- before-attach before-detach)
+                             (- (count) before-attach))))))))
 
 ;;;; Frame messages
 

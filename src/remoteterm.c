@@ -523,6 +523,14 @@ remote_sink_data (struct remote_display_info *dpyinfo,
   return sink && sink->ops == ops ? sink->data : NULL;
 }
 
+/* Return true if a client is attached to the session of the remote
+   frame F.  */
+bool
+remote_frame_has_client (struct frame *f)
+{
+  return FRAME_DISPLAY_INFO (f)->sink != NULL;
+}
+
 /* Free the sink of DPYINFO if it has one, and give DPYINFO the sink
    SINK.  If SINK is NULL, DPYINFO has no client after this call.  */
 void

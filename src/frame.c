@@ -476,6 +476,11 @@ frame_redisplay_p (struct frame *f)
 	 always visible.  */
       return q == r;
     }
+#ifdef HAVE_REMOTE_DISPLAY
+  /* No one can see a remote frame while no client is attached.  */
+  else if (FRAME_REMOTE_P (f) && !remote_frame_has_client (f))
+    return false;
+#endif
   else
 #ifndef HAVE_X_WINDOWS
     return FRAME_VISIBLE_P (f);

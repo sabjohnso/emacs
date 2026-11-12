@@ -190,6 +190,7 @@ extern void remote_set_sink (struct remote_display_info *,
 			     struct remote_sink *);
 extern void *remote_sink_data (struct remote_display_info *,
 			       const struct remote_sink_ops *);
+extern bool remote_frame_has_client (struct frame *);
 extern bool remote_file_hash (Lisp_Object, unsigned char *);
 extern void syms_of_remoteterm (void);
 
