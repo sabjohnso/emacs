@@ -148,7 +148,9 @@
     (button . remotefns-tests--button)
     (motion . remotefns-tests--motion)
     (focus . remotefns-tests--focus)
-    (resize . remotefns-tests--resize))
+    (resize . remotefns-tests--resize)
+    (ping . remotefns-tests--ping)
+    (pong . remotefns-tests--pong))
   "The message types, each with the function that generates a message.")
 
 (defconst remotefns-tests--clip-and-color
@@ -276,6 +278,14 @@
   "Return a random `resize' message."
   (list 'resize :frame (rd-gen-uint32) :width (rd-gen-uint32)
         :height (rd-gen-uint32)))
+
+(defun remotefns-tests--ping ()
+  "Return a random `ping' message."
+  (list 'ping :serial (rd-gen-uint32)))
+
+(defun remotefns-tests--pong ()
+  "Return a random `pong' message."
+  (list 'pong :serial (rd-gen-uint32)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -529,6 +539,18 @@
   (should (equal (remote-display--encode
                   '(resize :frame 1 :width 2 :height 3))
                  (unibyte-string 0 0 0 13 14 0 0 0 1 0 0 0 2 0 0 0 3))))
+
+(ert-deftest remotefns-tests-ping-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 5, type 15, serial #x01020304.
+  (should (equal (remote-display--encode '(ping :serial #x01020304))
+                 (unibyte-string 0 0 0 5 15 1 2 3 4))))
+
+(ert-deftest remotefns-tests-pong-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 5, type 16, serial #x01020304.
+  (should (equal (remote-display--encode '(pong :serial #x01020304))
+                 (unibyte-string 0 0 0 5 16 1 2 3 4))))
 
 (ert-deftest remotefns-tests-modifier-bits ()
   "Each modifier has one bit, and the bits are the same for each build.

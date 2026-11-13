@@ -9,3 +9,6 @@ test-fonts
 test-input
 test-view
 test-sizes
+test-link
+test-backoff
+test-reconnect

@@ -34,6 +34,8 @@ struct rc_view
   struct rc_view_functions functions;
   /* The struct rc_window of each frame that has a window.  */
   struct rc_table windows;
+  /* True if the client has a connection to its server.  */
+  bool connected;
 };
 
 /* The window of FRAME of VIEW, the drawing area in it, and the sizes
@@ -53,6 +55,7 @@ static void redraw_frame (struct rc_view *, uint32_t);
 static struct rc_window *add_window (struct rc_view *, uint32_t,
 				     struct rc_size);
 static struct rc_size surface_size (cairo_surface_t *);
+static void set_title (uint32_t, void *, void *);
 static void destroy_window (void *);
 static gboolean draw_frame (GtkWidget *, cairo_t *, gpointer);
 static void window_closed (GtkWidget *, gpointer);
@@ -90,6 +93,7 @@ rc_view_new (struct rc_renderer *renderer,
   struct rc_view *view = g_new0 (struct rc_view, 1);
   view->renderer = renderer;
   view->functions = functions;
+  view->connected = true;
   return view;
 }
 
@@ -117,6 +121,19 @@ rc_view_update (struct rc_view *view, struct rc_change change)
     case RC_NO_CHANGE:
       break;
     }
+}
+
+void
+rc_view_set_connected (struct rc_view *view, bool connected)
+{
+  view->connected = connected;
+  rc_table_each (&view->windows, set_title, NULL);
+}
+
+int
+rc_view_window_count (const struct rc_view *view)
+{
+  return rc_table_count (&view->windows);
 }
 
 /* Make the window of FRAME, or give it the size of the frame.  The
@@ -178,13 +195,25 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
 		      input_signals[i].function, window);
   g_signal_connect (window->area, "size-allocate",
 		    G_CALLBACK (area_resized), window);
-  gtk_window_set_title (GTK_WINDOW (window->window), "Emacs");
+  set_title (frame, window, NULL);
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
   gtk_window_set_default_size (GTK_WINDOW (window->window), size.width,
 			       size.height);
   gtk_widget_show_all (window->window);
   rc_table_set (&view->windows, frame, window);
   return window;
+}
+
+/* Give the window WINDOW of FRAME the title of the status of its
+   view.  DATA is not used.  This is a function of rc_table_each.  */
+static void
+set_title (uint32_t frame, void *window, void *data)
+{
+  (void) frame;
+  (void) data;
+  struct rc_window *w = window;
+  gtk_window_set_title (GTK_WINDOW (w->window),
+			w->view->connected ? "Emacs" : "Emacs (reconnecting)");
 }
 
 /* Return the size of SURFACE.  */

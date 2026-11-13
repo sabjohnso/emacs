@@ -91,7 +91,9 @@ enum rd_cursor_kind
   MESSAGE (BUTTON, button, RD_BUTTON_FIELDS)				\
   MESSAGE (MOTION, motion, RD_MOTION_FIELDS)				\
   MESSAGE (FOCUS, focus, RD_FOCUS_FIELDS)				\
-  MESSAGE (RESIZE, resize, RD_RESIZE_FIELDS)
+  MESSAGE (RESIZE, resize, RD_RESIZE_FIELDS)				\
+  MESSAGE (PING, ping, RD_PING_FIELDS)					\
+  MESSAGE (PONG, pong, RD_PONG_FIELDS)
 
 /* Each list gives the fields of a message in the order of the wire.
    FIELD (M, TYPE, NAME) is a member NAME of the C type TYPE_t.
@@ -250,6 +252,19 @@ enum rd_cursor_kind
   FIELD (M, uint32, frame)						\
   FIELD (M, uint32, width)						\
   FIELD (M, uint32, height)
+
+/* The messages that keep a connection alive follow.  A client sends
+   a ping when the connection is quiet, and the server answers with a
+   pong that has the same SERIAL.  Thus a client knows that the
+   connection is lost when no bytes come for some time.  */
+
+/* A client asks for a pong with SERIAL.  */
+#define RD_PING_FIELDS(FIELD, ARRAY, M)					\
+  FIELD (M, uint32, serial)
+
+/* The server answers the ping with SERIAL.  */
+#define RD_PONG_FIELDS(FIELD, ARRAY, M)					\
+  FIELD (M, uint32, serial)
 
 /* The buttons of a button message that are the mouse wheel.  */
 enum rd_wheel_button

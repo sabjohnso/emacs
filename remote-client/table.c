@@ -66,6 +66,20 @@ rc_table_remove (struct rc_table *table, uint32_t id)
   return value;
 }
 
+int
+rc_table_count (const struct rc_table *table)
+{
+  return table->count;
+}
+
+void
+rc_table_each (const struct rc_table *table,
+	       void (*function) (uint32_t, void *, void *), void *data)
+{
+  for (int i = 0; i < table->count; i++)
+    function (table->entries[i].id, table->entries[i].value, data);
+}
+
 void
 rc_table_free (struct rc_table *table, void (*destroy) (void *))
 {

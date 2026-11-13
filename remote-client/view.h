@@ -24,6 +24,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_VIEW_H
 #define REMOTE_CLIENT_VIEW_H
 
+#include <stdbool.h>
+
 #include "rdproto.h"
 #include "render.h"
 
@@ -48,5 +50,12 @@ extern void rc_view_free (struct rc_view *view);
    remove the window of a frame, or draw it again.  Call this function
    after each rc_apply of the renderer, before the next one.  */
 extern void rc_view_update (struct rc_view *view, struct rc_change change);
+
+/* Show in the title of each window of VIEW whether the client has a
+   connection to its server: CONNECTED.  A new view is connected.  */
+extern void rc_view_set_connected (struct rc_view *view, bool connected);
+
+/* Return the number of windows of VIEW.  */
+extern int rc_view_window_count (const struct rc_view *view);
 
 #endif /* REMOTE_CLIENT_VIEW_H */

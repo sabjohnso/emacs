@@ -53,6 +53,16 @@ extern void rc_table_set (struct rc_table *table, uint32_t id,
    does not have ID.  */
 extern void *rc_table_remove (struct rc_table *table, uint32_t id);
 
+/* Return the number of IDs of TABLE.  */
+extern int rc_table_count (const struct rc_table *table);
+
+/* Call FUNCTION with each ID of TABLE, its value, and DATA.  FUNCTION
+   must not change TABLE.  */
+extern void rc_table_each (const struct rc_table *table,
+			   void (*function) (uint32_t id, void *value,
+					     void *data),
+			   void *data);
+
 /* Call DESTROY for each value of TABLE, and free the memory of
    TABLE.  */
 extern void rc_table_free (struct rc_table *table,

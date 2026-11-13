@@ -28,6 +28,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      does not have, and get then gives NULL.
    - set and remove of one ID do not change the value of another ID.
    - rc_table_free calls its function once for each value.
+   - rc_table_count gives the number of IDs that have a value.
+   - rc_table_each calls its function once for each ID that has a
+     value, with that value.
 
    With no argument, the program runs TRIALS trials from a seed that
    it gets from the clock and the process ID.  With the argument SEED,
@@ -56,6 +59,8 @@ static char values[16];
 
 static bool run_trial (uint64_t);
 static void count_value (void *);
+static bool each_matches_p (const struct rc_table *, void *const *);
+static void visit_entry (uint32_t, void *, void *);
 static uint64_t random_below (uint64_t *, uint64_t);
 static uint64_t random_next (uint64_t *);
 
@@ -103,13 +108,58 @@ run_trial (uint64_t seed)
 	}
       for (int j = 0; passed && j < NIDS; j++)
 	passed = rc_table_get (&table, ids[j]) == model[j];
+      passed = passed && each_matches_p (&table, model);
     }
   int present = 0;
   for (int j = 0; j < NIDS; j++)
     present += model[j] != NULL;
+  passed = passed && rc_table_count (&table) == present;
   freed = 0;
   rc_table_free (&table, count_value);
   return passed && freed == present;
+}
+
+/* The visits of rc_table_each: the number of visits of each ID, and
+   true if each visit had the value of the model.  */
+struct visits
+{
+  void *const *model;
+  int count[NIDS];
+  bool same;
+};
+
+/* Return true if rc_table_each of TABLE visits each ID of MODEL that
+   has a value once, with that value, and no other ID, and if
+   rc_table_count of TABLE is the number of these IDs.  */
+static bool
+each_matches_p (const struct rc_table *table, void *const *model)
+{
+  struct visits visits = { .model = model, .same = true };
+  rc_table_each (table, visit_entry, &visits);
+  int present = 0;
+  for (int j = 0; j < NIDS; j++)
+    {
+      present += model[j] != NULL;
+      if (visits.count[j] != (model[j] != NULL))
+	return false;
+    }
+  return visits.same && rc_table_count (table) == present;
+}
+
+/* The function of rc_table_each.  DATA is the struct visits.  Record
+   the visit of ID with VALUE.  */
+static void
+visit_entry (uint32_t id, void *value, void *data)
+{
+  struct visits *visits = data;
+  for (int j = 0; j < NIDS; j++)
+    if (ids[j] == id)
+      {
+	visits->count[j]++;
+	visits->same = visits->same && visits->model[j] == value;
+	return;
+      }
+  visits->same = false;
 }
 
 /* The function of rc_table_free: count the calls.  */

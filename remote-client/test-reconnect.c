@@ -1,0 +1,492 @@
+/* Test the reconnect of remote-client.
+
+Copyright (C) 2026 Free Software Foundation, Inc.
+
+This file is part of GNU Emacs.
+
+GNU Emacs is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at
+your option) any later version.
+
+GNU Emacs is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
+
+/* The test starts "remote-client --timeout=TIMEOUT SOCKET" with a
+   socket of the test, and acts as the server.  The program shows
+   windows, so the check of the Makefile runs this test in Xvfb.  Each
+   example first defines a frame, so the program has a window.
+
+   - Ping: when the server sends nothing, the program sends a ping
+     before the timeout.
+   - Live: when the server answers each ping, the program keeps its
+     connection for several timeouts.  The serials of the pings
+     increase.
+   - Silent: when the server answers no ping, the program connects
+     again, and keeps its window.
+   - Closed: when the server closes the connection, the program
+     connects again, and keeps its window.
+   - Retry: when a connect fails, the program tries again later.
+   - Reset: after the server sends bytes on a new connection, the
+     next wait of the backoff is RC_BACKOFF_FIRST again.  With no
+     reset, the third wait is 4 * RC_BACKOFF_FIRST.
+   - End: when the server removes the last frame and then closes the
+     connection, the program exits with the status 0.
+   - Error: when a message with an error comes and the program has no
+     window, the program exits with the status 1.
+   - Usage: a timeout that is not a number, or that is less than
+     RC_LINK_PINGS_PER_TIMEOUT, makes the program exit with the
+     status 1.  */
+
+#include <config.h>
+
+#include <errno.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "backoff.h"
+#include "rdproto.h"
+
+/* The timeout of the program in the examples, in milliseconds.  */
+enum { TIMEOUT = 600 };
+
+/* The longest wait for a connection of the program: the timeout, the
+   first wait of the backoff, and a margin for a slow machine.  The
+   first connection also waits for the start of GTK.  */
+enum { CONNECT_LIMIT = TIMEOUT + RC_BACKOFF_FIRST + 5000 };
+
+/* The longest wait for the exit of the program.  */
+enum { EXIT_LIMIT = 10000 };
+
+/* The frame of each example.  */
+enum { FRAME = 7 };
+
+/* One run of the program: its process, the listening socket, and the
+   current connection.  */
+struct run
+{
+  char directory[64];
+  char socket[100];
+  pid_t pid;
+  int listener;
+  int connection;
+};
+
+static bool ping_example (void);
+static bool live_example (void);
+static bool silent_example (void);
+static bool closed_example (void);
+static bool retry_example (void);
+static bool reset_example (void);
+static bool end_example (void);
+static bool error_example (void);
+static bool usage_example (void);
+static pid_t start_program (const struct run *, const char *);
+static bool start_run (struct run *);
+static void stop_run (struct run *);
+static bool accept_next (struct run *);
+static bool alive_p (const struct run *);
+static bool send_message (int, const struct rd_message *);
+static bool send_define_frame (int);
+static int read_message (int, struct rd_message *, int);
+static bool wait_for_ping (int, int, uint32_t *);
+static int wait_for_exit (pid_t);
+static int listen_at (const char *);
+static int64_t now_ms (void);
+
+/* An example and its name.  */
+static const struct
+{
+  const char *name;
+  bool (*check) (void);
+} examples[] =
+  {
+    { "ping", ping_example },
+    { "live", live_example },
+    { "silent", silent_example },
+    { "closed", closed_example },
+    { "retry", retry_example },
+    { "reset", reset_example },
+    { "end", end_example },
+    { "error", error_example },
+    { "usage", usage_example },
+  };
+
+int
+main (void)
+{
+  signal (SIGPIPE, SIG_IGN);
+  for (size_t i = 0; i < sizeof examples / sizeof *examples; i++)
+    if (!examples[i].check ())
+      {
+	fprintf (stderr, "test-reconnect: the %s example failed\n",
+		 examples[i].name);
+	return 1;
+      }
+  printf ("test-reconnect: %zu examples passed\n",
+	  sizeof examples / sizeof *examples);
+  return 0;
+}
+
+/* The ping example.  */
+static bool
+ping_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  uint32_t serial;
+  bool passed = (send_define_frame (run.connection)
+		 && wait_for_ping (run.connection, TIMEOUT, &serial));
+  stop_run (&run);
+  return passed;
+}
+
+/* The live example.  */
+static bool
+live_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  bool passed = send_define_frame (run.connection);
+  int64_t end = now_ms () + 4 * TIMEOUT;
+  uint32_t last = 0;
+  while (passed && now_ms () < end)
+    {
+      uint32_t serial;
+      passed = (wait_for_ping (run.connection, TIMEOUT, &serial)
+		&& serial > last);
+      last = serial;
+      struct rd_message pong = { .type = RD_PONG,
+				 .u.pong = { .serial = serial } };
+      passed = passed && send_message (run.connection, &pong);
+    }
+  struct pollfd other = { .fd = run.listener, .events = POLLIN };
+  passed = passed && poll (&other, 1, 0) == 0 && alive_p (&run);
+  stop_run (&run);
+  return passed;
+}
+
+/* The silent example.  */
+static bool
+silent_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  bool passed = (send_define_frame (run.connection)
+		 && accept_next (&run) && alive_p (&run));
+  stop_run (&run);
+  return passed;
+}
+
+/* The closed example.  */
+static bool
+closed_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  bool passed = send_define_frame (run.connection);
+  shutdown (run.connection, SHUT_RDWR);
+  passed = passed && accept_next (&run) && alive_p (&run);
+  stop_run (&run);
+  return passed;
+}
+
+/* The retry example.  The socket does not exist for a time, so the
+   first connects fail.  */
+static bool
+retry_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  bool passed = send_define_frame (run.connection);
+  close (run.listener);
+  unlink (run.socket);
+  shutdown (run.connection, SHUT_RDWR);
+  poll (NULL, 0, 4 * RC_BACKOFF_FIRST);
+  run.listener = listen_at (run.socket);
+  passed = passed && accept_next (&run) && alive_p (&run);
+  stop_run (&run);
+  return passed;
+}
+
+/* The reset example: three losses, each after the server sent bytes.
+   Each new connection comes before 3 * RC_BACKOFF_FIRST.  */
+static bool
+reset_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  bool passed = true;
+  for (int loss = 0; passed && loss < 3; loss++)
+    {
+      passed = send_define_frame (run.connection);
+      poll (NULL, 0, 100);
+      int64_t start = now_ms ();
+      shutdown (run.connection, SHUT_RDWR);
+      passed = (passed && accept_next (&run)
+		&& now_ms () - start < 3 * RC_BACKOFF_FIRST);
+    }
+  stop_run (&run);
+  return passed;
+}
+
+/* The error example.  The length of the message is more than
+   RD_MAX_LENGTH.  */
+static bool
+error_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  static const unsigned char bad[] = { 0xff, 0xff, 0xff, 0xff, 1 };
+  bool passed = send (run.connection, bad, sizeof bad, MSG_NOSIGNAL) > 0;
+  passed = passed && wait_for_exit (run.pid) == 1;
+  run.pid = 0;
+  stop_run (&run);
+  return passed;
+}
+
+/* The usage example.  The program must exit before it connects.  */
+static bool
+usage_example (void)
+{
+  static const char *const options[] =
+    { "--timeout=", "--timeout=abc", "--timeout=2", "--timeout=-5",
+      "--timeout=100x" };
+  struct run run;
+  bool passed = start_run (&run);
+  for (size_t i = 0; passed && i < sizeof options / sizeof *options; i++)
+    passed = wait_for_exit (start_program (&run, options[i])) == 1;
+  stop_run (&run);
+  return passed;
+}
+
+/* The end example.  */
+static bool
+end_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  struct rd_message remove = { .type = RD_DELETE_FRAME,
+			       .u.delete_frame = { .frame = FRAME } };
+  bool passed = (send_define_frame (run.connection)
+		 && send_message (run.connection, &remove));
+  close (run.connection);
+  run.connection = -1;
+  passed = passed && wait_for_exit (run.pid) == 0;
+  run.pid = 0;
+  stop_run (&run);
+  return passed;
+}
+
+/* Start the program for RUN, and accept its first connection.  Return
+   false if the program does not connect.  */
+static bool
+start_run (struct run *run)
+{
+  snprintf (run->directory, sizeof run->directory,
+	    "/tmp/test-reconnect-XXXXXX");
+  if (!mkdtemp (run->directory))
+    {
+      perror ("test-reconnect: mkdtemp");
+      exit (2);
+    }
+  snprintf (run->socket, sizeof run->socket, "%s/socket", run->directory);
+  run->listener = listen_at (run->socket);
+  run->connection = -1;
+  char option[64];
+  snprintf (option, sizeof option, "--timeout=%d", TIMEOUT);
+  run->pid = start_program (run, option);
+  return accept_next (run);
+}
+
+/* Start the program with OPTION and the socket of RUN, and return its
+   process ID.  */
+static pid_t
+start_program (const struct run *run, const char *option)
+{
+  pid_t pid = fork ();
+  if (pid == 0)
+    {
+      setenv ("XDG_CACHE_HOME", run->directory, 1);
+      execl ("./remote-client", "remote-client", option, run->socket,
+	     (char *) NULL);
+      _exit (127);
+    }
+  return pid;
+}
+
+/* Stop the program of RUN if it runs, and remove the files of RUN.  */
+static void
+stop_run (struct run *run)
+{
+  if (run->pid > 0)
+    {
+      kill (run->pid, SIGKILL);
+      waitpid (run->pid, NULL, 0);
+    }
+  if (run->connection >= 0)
+    close (run->connection);
+  close (run->listener);
+  unlink (run->socket);
+  char cache[160];
+  snprintf (cache, sizeof cache, "%s/remote-client/font-hashes",
+	    run->directory);
+  unlink (cache);
+  snprintf (cache, sizeof cache, "%s/remote-client", run->directory);
+  rmdir (cache);
+  rmdir (run->directory);
+}
+
+/* Accept the next connection of the program of RUN in CONNECT_LIMIT
+   milliseconds, and make it the connection of RUN.  Return false if
+   no connection comes.  */
+static bool
+accept_next (struct run *run)
+{
+  struct pollfd ready = { .fd = run->listener, .events = POLLIN };
+  if (poll (&ready, 1, CONNECT_LIMIT) != 1)
+    return false;
+  int connection = accept (run->listener, NULL, NULL);
+  if (connection < 0)
+    return false;
+  if (run->connection >= 0)
+    close (run->connection);
+  run->connection = connection;
+  return true;
+}
+
+/* Return true if the program of RUN runs.  */
+static bool
+alive_p (const struct run *run)
+{
+  return waitpid (run->pid, NULL, WNOHANG) == 0;
+}
+
+/* Send MESSAGE on the connection FD.  Return false on an error.  */
+static bool
+send_message (int fd, const struct rd_message *message)
+{
+  unsigned char bytes[64];
+  size_t size = rd_encoded_size (message);
+  if (size > sizeof bytes)
+    return false;
+  rd_encode (message, bytes);
+  return send (fd, bytes, size, MSG_NOSIGNAL) == (ssize_t) size;
+}
+
+/* Define the frame FRAME on the connection FD, so the program shows
+   a window.  */
+static bool
+send_define_frame (int fd)
+{
+  struct rd_message define
+    = { .type = RD_DEFINE_FRAME,
+	.u.define_frame = { .frame = FRAME, .width = 200, .height = 100 } };
+  return send_message (fd, &define);
+}
+
+/* Wait at most LIMIT milliseconds for a ping on the connection FD.
+   Skip the other messages.  Set *SERIAL to the serial of the ping.
+   Return false if no ping comes.  */
+static bool
+wait_for_ping (int fd, int limit, uint32_t *serial)
+{
+  int64_t end = now_ms () + limit;
+  struct rd_message message;
+  int64_t left;
+  while ((left = end - now_ms ()) > 0)
+    if (read_message (fd, &message, left) == 1 && message.type == RD_PING)
+      {
+	*serial = message.u.ping.serial;
+	return true;
+      }
+  return false;
+}
+
+/* Read one message from the connection FD into MESSAGE.  Wait at most
+   LIMIT milliseconds.  Return 1 for a message, 0 for no message in
+   time, and -1 at the end of the connection or on an error.  The
+   input messages of the program are small, so a message comes in one
+   read of its length and one read of the rest.  */
+static int
+read_message (int fd, struct rd_message *message, int limit)
+{
+  unsigned char bytes[RD_MAX_LENGTH < 4096 ? RD_MAX_LENGTH : 4096];
+  struct pollfd ready = { .fd = fd, .events = POLLIN };
+  if (poll (&ready, 1, limit) != 1)
+    return 0;
+  if (recv (fd, bytes, 4, MSG_WAITALL) != 4)
+    return -1;
+  size_t length = ((size_t) bytes[0] << 24 | bytes[1] << 16
+		   | bytes[2] << 8 | bytes[3]);
+  if (length > sizeof bytes - 4
+      || recv (fd, bytes + 4, length, MSG_WAITALL) != (ssize_t) length)
+    return -1;
+  size_t used;
+  return rd_decode (bytes, length + 4, message, &used) == RD_OK ? 1 : 0;
+}
+
+/* Return the exit status of the child PID.  If it does not exit in
+   EXIT_LIMIT milliseconds, kill it and return -1.  */
+static int
+wait_for_exit (pid_t pid)
+{
+  for (int waited = 0; waited < EXIT_LIMIT; waited += 10)
+    {
+      int status;
+      if (waitpid (pid, &status, WNOHANG) == pid)
+	return WIFEXITED (status) ? WEXITSTATUS (status) : -1;
+      poll (NULL, 0, 10);
+    }
+  kill (pid, SIGKILL);
+  waitpid (pid, NULL, 0);
+  return -1;
+}
+
+/* Return a listening socket at PATH.  */
+static int
+listen_at (const char *path)
+{
+  int fd = socket (AF_UNIX, SOCK_STREAM, 0);
+  struct sockaddr_un address = { .sun_family = AF_UNIX };
+  snprintf (address.sun_path, sizeof address.sun_path, "%s", path);
+  if (fd < 0 || bind (fd, (struct sockaddr *) &address, sizeof address) != 0
+      || listen (fd, 1) != 0)
+    {
+      perror ("test-reconnect: listen");
+      exit (2);
+    }
+  return fd;
+}
+
+/* Return the time of a monotonic clock in milliseconds.  */
+static int64_t
+now_ms (void)
+{
+  struct timespec now;
+  clock_gettime (CLOCK_MONOTONIC, &now);
+  return (int64_t) now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}

@@ -38,9 +38,10 @@ RENDER_OBJS = render.o table.o rdproto.o
 READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
-  fonts.o hashfonts.o hashcache.o rdproto.o
+  fonts.o hashfonts.o hashcache.o rdproto.o link.o backoff.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
-  test-input test-client test-sizes test-view
+  test-input test-client test-sizes test-view test-link \
+  test-backoff test-reconnect
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -60,7 +61,10 @@ check: remote-client $(TESTS)
 	./test-input
 	./test-client
 	./test-sizes
+	./test-link
+	./test-backoff
 	$(XVFB_RUN) ./test-view
+	$(XVFB_RUN) ./test-reconnect
 
 # Build again with AddressSanitizer and UndefinedBehaviorSanitizer, and
 # run the test.
@@ -94,6 +98,15 @@ test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 test-sizes: test-sizes.o sizes.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
+test-reconnect: test-reconnect.o rdproto.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-backoff: test-backoff.o backoff.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-link: test-link.o link.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
 test-view: test-view.o view.o input.o sizes.o $(RENDER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
@@ -117,6 +130,9 @@ client.o view.o test-view.o: view.h reader.h fonts.h render.h \
   ../src/rdproto.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
 sizes.o test-sizes.o view.o: sizes.h
+link.o test-link.o client.o: link.h
+backoff.o test-backoff.o test-reconnect.o client.o: backoff.h
+test-reconnect.o: ../src/rdproto.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)

@@ -5913,6 +5913,58 @@ Return t if nothing failed."
                     'remoteterm-tests--input-reattach-case)
                    '(?z)))))
 
+(rd-daemon-deftest remoteterm-tests-ping-gives-pong
+  "The server answers each ping of its client with a pong of the same serial.
+The pongs come in the order of the pings, and the chunks of the bytes
+do not change them."
+  (rd-gen-for-all
+   #'remoteterm-tests--pings
+   (lambda (case)
+     (should (equal (remoteterm-tests--pongs-of case) (car case))))))
+
+(defun remoteterm-tests--pings ()
+  "Return a random list of (SERIALS CHUNKS).
+SERIALS is a list of the serials of pings, and CHUNKS is a list of the
+sizes of the parts of their bytes."
+  (list (cl-loop repeat (rd-gen-integer 1 20) collect (rd-gen-uint32))
+        (cl-loop repeat (rd-gen-integer 0 10)
+                 collect (rd-gen-integer 1 7))))
+
+(defun remoteterm-tests--pongs-of (case)
+  "Send the pings of CASE, a `remoteterm-tests--pings', to a session.
+Return the serials of the pongs that the client gets."
+  (remoteterm-tests--with-display "remote-ping"
+    (remoteterm-tests--with-connections
+     '(a)
+     (lambda (connections)
+       (let* ((connection (alist-get 'a connections))
+              (chunks (plist-get connection :chunks))
+              (pongs nil))
+         (remote-display-attach "remote-ping"
+                                (plist-get connection :server-side))
+         (remoteterm-tests--send-in-chunks
+          (plist-get connection :client-side)
+          (mapconcat (lambda (serial)
+                       (remote-display--encode (list 'ping :serial serial)))
+                     (car case))
+          (cadr case))
+         (cl-flet ((read-pongs ()
+                     (setq pongs
+                           (seq-filter
+                            (lambda (message) (eq (car message) 'pong))
+                            (remoteterm-tests--all-messages
+                             (string-to-unibyte
+                              (apply #'concat
+                                     (reverse (funcall chunks)))))))))
+           (with-timeout (10 (error "The pongs did not come: %S" pongs))
+             (while (< (length pongs) (length (car case)))
+               (accept-process-output nil 0.05)
+               (read-pongs)))
+           ;; Read once more, so that an extra pong is in the result.
+           (accept-process-output nil 0.1)
+           (read-pongs))
+         (mapcar (lambda (pong) (plist-get (cdr pong) :serial)) pongs))))))
+
 ;;;; Mouse input
 
 (defconst remoteterm-tests--wheel-buttons

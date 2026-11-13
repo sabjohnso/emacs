@@ -30,6 +30,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <gtk/gtk.h>
 
@@ -61,6 +62,10 @@ static bool resize_example (uint32_t, uint32_t, int, int);
 static bool define_example (uint32_t, uint32_t, uint32_t, uint32_t);
 static bool wait_for_size (GtkWindow *, int, int);
 static bool drag_example (void);
+static bool status_example (void);
+static bool count_example (void);
+static bool title_p (const char *);
+static void remove_frame (struct example *);
 static void run_for (gint64);
 static int sent_index (const struct sent *, uint32_t, uint32_t);
 static struct example *start_example (uint32_t, uint32_t);
@@ -93,7 +98,8 @@ main (int argc, char **argv)
 		 && resize_example (600, 400, 300, 200)
 		 && define_example (300, 200, 500, 350)
 		 && define_example (600, 400, 250, 180)
-		 && drag_example ());
+		 && drag_example () && status_example ()
+		 && count_example ());
   if (!passed)
     return 1;
   printf ("test-view: the examples passed\n");
@@ -291,6 +297,58 @@ define_frame (struct example *example, uint32_t width, uint32_t height)
   struct rd_message message =
     { .type = RD_DEFINE_FRAME,
       .u.define_frame = { .frame = 1, .width = width, .height = height } };
+  rc_view_update (example->view, rc_apply (example->renderer, &message));
+}
+
+/* The client loses its connection, and then connects again.  The
+   title of the window must show the loss, and the title must be
+   "Emacs" again after the connect.  */
+static bool
+status_example (void)
+{
+  struct example *example = start_example (300, 200);
+  bool passed = title_p ("Emacs");
+  rc_view_set_connected (example->view, false);
+  const char *lost = gtk_window_get_title (frame_window ());
+  passed = (passed && lost && strstr (lost, "Emacs")
+	    && strcmp (lost, "Emacs") != 0);
+  rc_view_set_connected (example->view, true);
+  passed = passed && title_p ("Emacs");
+  if (!passed)
+    fprintf (stderr, "test-view: the title does not show the status\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server defines a frame, and then removes it.  The view must
+   count the window of the frame while it exists.  */
+static bool
+count_example (void)
+{
+  struct example *example = start_example (300, 200);
+  bool passed = rc_view_window_count (example->view) == 1;
+  remove_frame (example);
+  passed = passed && rc_view_window_count (example->view) == 0;
+  if (!passed)
+    fprintf (stderr, "test-view: the count of the windows is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* Return true if the window of the example has the title TITLE.  */
+static bool
+title_p (const char *title)
+{
+  const char *now = gtk_window_get_title (frame_window ());
+  return now && strcmp (now, title) == 0;
+}
+
+/* Remove the frame of EXAMPLE, as the server does.  */
+static void
+remove_frame (struct example *example)
+{
+  struct rd_message message =
+    { .type = RD_DELETE_FRAME, .u.delete_frame = { .frame = 1 } };
   rc_view_update (example->view, rc_apply (example->renderer, &message));
 }
 

@@ -79,6 +79,8 @@ static struct remote_sink *remote_make_connection_sink
 static struct remote_connection *remote_find_connection (Lisp_Object);
 static void remote_connection_receive (struct remote_connection *,
 				       const unsigned char *, ptrdiff_t);
+static void remote_connection_pong (struct remote_connection *,
+				    const struct rd_ping *);
 static void remote_input_add (struct remote_input *, const unsigned char *,
 			      ptrdiff_t);
 static bool remote_input_next (struct remote_input *, struct rd_message *);
@@ -190,7 +192,28 @@ remote_connection_receive (struct remote_connection *connection,
   remote_input_add (&connection->input, bytes, size);
   struct rd_message message;
   while (remote_input_next (&connection->input, &message))
-    remote_handle_input (connection->dpyinfo, &message);
+    if (message.type == RD_PING)
+      remote_connection_pong (connection, &message.u.ping);
+    else
+      remote_handle_input (connection->dpyinfo, &message);
+}
+
+/* Answer the PING of the client of CONNECTION with a pong of the same
+   serial.  A ping is a matter of the connection and not of the
+   session, so it does not go to remoteinput.c.  */
+static void
+remote_connection_pong (struct remote_connection *connection,
+			const struct rd_ping *ping)
+{
+  struct rd_message pong = { .type = RD_PONG,
+			     .u.pong = { .serial = ping->serial } };
+  USE_SAFE_ALLOCA;
+  ptrdiff_t size = rd_encoded_size (&pong);
+  unsigned char *bytes = SAFE_ALLOCA (size);
+  rd_encode (&pong, bytes);
+  remote_connection_write (connection, bytes, size);
+  remote_connection_send (connection);
+  SAFE_FREE ();
 }
 
 /* Add the SIZE BYTES to INPUT, after the bytes of an unknown message
