@@ -4896,6 +4896,148 @@ that the value can go to the test."
                collect (list query (format "%S" a) (format "%S" d)
                              (format "%S" r))))))
 
+(defun remoteterm-tests--frame-parameters ()
+  "Return random parameters for a remote frame.
+The parameters set the size, the menu bar, and the tab bar."
+  `((width . ,(rd-gen-integer 20 80))
+    (height . ,(rd-gen-integer 6 30))
+    (menu-bar-lines . ,(rd-gen-random 2))
+    (tab-bar-lines . ,(rd-gen-random 2))))
+
+(rd-daemon-deftest remoteterm-tests-frame-geometry
+  "The edges of a remote frame agree with its windows and its size.
+Laws: the outer edges contain the native edges, and the native edges
+contain the inner edges.  The edges of no type are the native edges.
+The native size is the pixel size of the frame.  The inner edges are
+the edges of the area of the windows, from the top of the root window
+to the bottom of the minibuffer window.  The bars of `frame-geometry'
+above the windows fill the space between the native top and the inner
+top.  The outer size of `frame-geometry' is the size of the outer
+edges.  A remote frame does not show bars yet, so their heights are 0
+in each trial.  The generator sets the bar parameters, so that the
+laws apply to the bars when remote frames show them."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     #'remoteterm-tests--frame-parameters
+     (lambda (parameters)
+       (pcase-let*
+           (((map :outer :native :inner :default :size :windows :bars
+                  :outer-size)
+             (rd-daemon-eval
+              (remoteterm-tests--frame-form
+               parameters '(insert "abc\n")
+               '(remoteterm-tests--geometry frame))))
+            (`(,left ,top . ,_) native))
+         (should (remoteterm-tests--edges-within-p native outer))
+         (should (equal default native))
+         (should (remoteterm-tests--edges-within-p inner native))
+         (should (equal size (list (- (nth 2 native) left)
+                                   (- (nth 3 native) top))))
+         (should (equal inner (cl-mapcar #'+ (list left top left top)
+                                         windows)))
+         (should (= bars (- (nth 1 inner) top)))
+         (should (equal outer-size (list (- (nth 2 outer) (nth 0 outer))
+                                         (- (nth 3 outer)
+                                            (nth 1 outer))))))))))
+
+(defun remoteterm-tests--geometry (frame)
+  "Return the geometry of FRAME as a plist.
+:outer, :native, and :inner are the edges of each type from
+`frame-edges', and :default is the edges for no type.  :size is the
+pixel width and height of FRAME.
+:windows is the edges of the area of the windows of FRAME, relative to
+the native edges.  :bars is the sum of the heights of the bars of
+`frame-geometry' above the windows.  :outer-size is the outer size
+from `frame-geometry'."
+  (let* ((root (window-pixel-edges (frame-root-window frame)))
+         (minibuffer (window-pixel-edges (minibuffer-window frame)))
+         (geometry (frame-geometry frame))
+         (tool-bar-top (eq (alist-get 'tool-bar-position geometry) 'top)))
+    (list :outer (frame-edges frame 'outer-edges)
+          :native (frame-edges frame 'native-edges)
+          :inner (frame-edges frame 'inner-edges)
+          :default (frame-edges frame)
+          :size (list (frame-pixel-width frame) (frame-pixel-height frame))
+          :windows (list (nth 0 root) (nth 1 root)
+                         (nth 2 root) (nth 3 minibuffer))
+          :bars (+ (cdr (alist-get 'menu-bar-size geometry))
+                   (cdr (alist-get 'tab-bar-size geometry))
+                   (if tool-bar-top
+                       (cdr (alist-get 'tool-bar-size geometry))
+                     0))
+          :outer-size (let ((size (alist-get 'outer-size geometry)))
+                        (list (car size) (cdr size))))))
+
+(rd-daemon-deftest remoteterm-tests-frame-edges-not-remote
+  "The edges and the geometry of a remote frame refuse other frames.
+The other frame is the initial frame of the daemon."
+  (let ((rd-gen-trials 4))
+    (rd-gen-for-all
+     (lambda () (rd-gen-element '(remote-frame-edges remote-frame-geometry)))
+     (lambda (function)
+       (should (eq (rd-daemon-eval
+                    `(condition-case nil
+                         (progn (,function terminal-frame) 'no-error)
+                       (error 'error)))
+                   'error))))))
+
+(defun remoteterm-tests--edges-within-p (inner outer)
+  "Return non-nil if the edges INNER are within the edges OUTER.
+Each argument is a list (LEFT TOP RIGHT BOTTOM)."
+  (pcase-let ((`(,l1 ,t1 ,r1 ,b1) inner)
+              (`(,l2 ,t2 ,r2 ,b2) outer))
+    (and (<= l2 l1) (<= t2 t1) (<= r1 r2) (<= b1 b2))))
+
+(defconst remoteterm-tests--dots-per-inch 96
+  "The resolution of a remote session, in dots per inch.")
+
+(rd-daemon-deftest remoteterm-tests-display-answers
+  "The display queries of frame.el agree with a remote display.
+Laws: the number of colors is 2 to the power of the number of planes,
+and the visual class is `true-color'.  The size in millimeters is the
+size in pixels at `remoteterm-tests--dots-per-inch', with a tolerance
+of 1 millimeter.
+A remote display has a mouse and symbol keys.  It has no popup menus,
+because a remote frame cannot show a menu."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     #'remoteterm-tests--frame-parameters
+     (lambda (parameters)
+       (pcase-let
+           (((map :cells :planes :class :pixels :mm :mouse :popup :keys)
+             (rd-daemon-eval
+              (remoteterm-tests--frame-form
+               parameters '(insert "abc\n")
+               '(remoteterm-tests--display-answers frame)))))
+         (should (equal cells (expt 2 planes)))
+         (should (eq class 'true-color))
+         (should (cl-every (lambda (pixels mm)
+                             (and (numberp mm)
+                                  (<= (abs (- mm (remoteterm-tests--mm pixels)))
+                                      1)))
+                           pixels mm))
+         (should (eq mouse t))
+         (should-not popup)
+         (should keys))))))
+
+(defun remoteterm-tests--mm (pixels)
+  "Return the millimeters of PIXELS at `remoteterm-tests--dots-per-inch'."
+  (/ (* pixels 25.4) remoteterm-tests--dots-per-inch))
+
+(defun remoteterm-tests--display-answers (frame)
+  "Return the answers of the display queries of frame.el for FRAME.
+The value is a plist.  :pixels and :mm are each a list of the width
+and the height of the display."
+  (list :cells (display-color-cells frame)
+        :planes (display-planes frame)
+        :class (display-visual-class frame)
+        :pixels (list (display-pixel-width frame)
+                      (display-pixel-height frame))
+        :mm (list (display-mm-width frame) (display-mm-height frame))
+        :mouse (display-mouse-p frame)
+        :popup (display-popup-menus-p frame)
+        :keys (and (display-symbol-keys-p frame) t)))
+
 ;;;; Frame messages
 
 (rd-daemon-deftest remoteterm-tests-frame-messages

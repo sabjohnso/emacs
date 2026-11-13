@@ -38,6 +38,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "rdproto.h"
 
 #include <fcntl.h>
+#include <math.h>
 #include "sha256.h"
 
 struct remote_display_info *x_display_list;
@@ -69,6 +70,11 @@ struct remote_colors
 };
 
 static int remote_largest_frame_size (Lisp_Object, bool);
+static int remote_millimeters (int, double);
+static struct frame *decode_remote_frame (Lisp_Object);
+static Lisp_Object remote_frame_edges (struct frame *, Lisp_Object);
+static Lisp_Object remote_frame_geometry (struct frame *);
+static Lisp_Object remote_size_pair (int, int);
 static struct remote_display_info *remote_open_session (Lisp_Object);
 static struct remote_display_info *remote_session_by_name (Lisp_Object);
 static struct terminal *remote_create_terminal (struct remote_display_info *,
@@ -272,6 +278,64 @@ tallest frame of the session.  */)
   return make_fixnum (remote_largest_frame_size (terminal, false));
 }
 
+DEFUN ("x-display-mm-width", Fx_display_mm_width, Sx_display_mm_width,
+       0, 1, 0,
+       doc: /* Return the width in millimeters of the session TERMINAL.
+The value is the width in pixels at the resolution of the session.  */)
+  (Lisp_Object terminal)
+{
+  struct remote_display_info *dpyinfo = check_x_display_info (terminal);
+  return make_fixnum (remote_millimeters (remote_largest_frame_size
+					  (terminal, true),
+					  dpyinfo->resx));
+}
+
+DEFUN ("x-display-mm-height", Fx_display_mm_height, Sx_display_mm_height,
+       0, 1, 0,
+       doc: /* Return the height in millimeters of the session TERMINAL.
+The value is the height in pixels at the resolution of the session.  */)
+  (Lisp_Object terminal)
+{
+  struct remote_display_info *dpyinfo = check_x_display_info (terminal);
+  return make_fixnum (remote_millimeters (remote_largest_frame_size
+					  (terminal, false),
+					  dpyinfo->resy));
+}
+
+DEFUN ("x-display-planes", Fx_display_planes, Sx_display_planes, 0, 1, 0,
+       doc: /* Return the number of bit planes of the session TERMINAL.  */)
+  (Lisp_Object terminal)
+{
+  return make_fixnum (check_x_display_info (terminal)->n_planes);
+}
+
+DEFUN ("x-display-visual-class", Fx_display_visual_class,
+       Sx_display_visual_class, 0, 1, 0,
+       doc: /* Return `true-color', because a remote display shows each
+color that it gets.  TERMINAL is ignored.  */)
+  (Lisp_Object terminal)
+{
+  return Qtrue_color;
+}
+
+DEFUN ("remote-frame-geometry", Fremote_frame_geometry,
+       Sremote_frame_geometry, 0, 1, 0,
+       doc: /* Return the geometric attributes of the remote frame FRAME.
+See also `frame-geometry'.  */)
+  (Lisp_Object frame)
+{
+  return remote_frame_geometry (decode_remote_frame (frame));
+}
+
+DEFUN ("remote-frame-edges", Fremote_frame_edges, Sremote_frame_edges,
+       0, 2, 0,
+       doc: /* Return the edges of the remote frame FRAME.
+TYPE is as for `frame-edges'.  */)
+  (Lisp_Object frame, Lisp_Object type)
+{
+  return remote_frame_edges (decode_remote_frame (frame), type);
+}
+
 DEFUN ("x-hide-tip", Fx_hide_tip, Sx_hide_tip, 0, 0, 0,
        doc: /* Hide the current tooltip window.
 Remote frames have no tooltips yet, so return nil.  */)
@@ -296,6 +360,88 @@ remote_largest_frame_size (Lisp_Object terminal, bool width_p)
 			   : FRAME_PIXEL_HEIGHT (f)));
     }
   return size;
+}
+
+/* Return the number of millimeters of PIXELS at the resolution
+   DOTS_PER_INCH, rounded to the nearest millimeter.  */
+static int
+remote_millimeters (int pixels, double dots_per_inch)
+{
+  eassert (dots_per_inch > 0);
+  return lround (pixels * 25.4 / dots_per_inch);
+}
+
+/* Return the live remote frame of FRAME, or the selected frame if
+   FRAME is nil.  Signal an error for any other frame.  */
+static struct frame *
+decode_remote_frame (Lisp_Object frame)
+{
+  struct frame *f = decode_live_frame (frame);
+  if (!FRAME_REMOTE_P (f))
+    error ("Not a remote frame");
+  return f;
+}
+
+/* Return the edges of F of the type TYPE: Qouter_edges, Qinner_edges,
+   or any other value for the native edges.  The session does not know
+   the decorations that the client adds to a frame, so the outer edges
+   are the native edges.  The bars are inside the frame, as the window
+   layout puts them.  */
+static Lisp_Object
+remote_frame_edges (struct frame *f, Lisp_Object type)
+{
+  int left = f->left_pos;
+  int top = f->top_pos;
+  int right = left + FRAME_PIXEL_WIDTH (f);
+  int bottom = top + FRAME_PIXEL_HEIGHT (f);
+  int border = FRAME_INTERNAL_BORDER_WIDTH (f);
+
+  if (EQ (type, Qinner_edges))
+    return list4i (left + border,
+		   top + border + FRAME_TOP_MARGIN_HEIGHT (f),
+		   right - border,
+		   bottom - border - FRAME_TOOL_BAR_BOTTOM_HEIGHT (f));
+  return list4i (left, top, right, bottom);
+}
+
+/* Return the geometry of F as `frame-geometry' gives it.  F has no
+   decorations, no external bars, and no outer border.  */
+static Lisp_Object
+remote_frame_geometry (struct frame *f)
+{
+  int width = FRAME_PIXEL_WIDTH (f);
+  int bar_width = width - 2 * FRAME_INTERNAL_BORDER_WIDTH (f);
+  int menu_bar_height = FRAME_MENU_BAR_HEIGHT (f);
+  int tab_bar_height = FRAME_TAB_BAR_HEIGHT (f);
+  int tool_bar_height = FRAME_TOOL_BAR_HEIGHT (f);
+  return list (Fcons (Qouter_position,
+		      remote_size_pair (f->left_pos, f->top_pos)),
+	       Fcons (Qouter_size,
+		      remote_size_pair (width, FRAME_PIXEL_HEIGHT (f))),
+	       Fcons (Qouter_border_width, make_fixnum (0)),
+	       Fcons (Qexternal_border_size, remote_size_pair (0, 0)),
+	       Fcons (Qtitle_bar_size, remote_size_pair (0, 0)),
+	       Fcons (Qmenu_bar_external, Qnil),
+	       Fcons (Qmenu_bar_size,
+		      remote_size_pair (menu_bar_height ? width : 0,
+					menu_bar_height)),
+	       Fcons (Qtab_bar_size,
+		      remote_size_pair (tab_bar_height ? bar_width : 0,
+					tab_bar_height)),
+	       Fcons (Qtool_bar_external, Qnil),
+	       Fcons (Qtool_bar_position, FRAME_TOOL_BAR_POSITION (f)),
+	       Fcons (Qtool_bar_size,
+		      remote_size_pair (tool_bar_height ? bar_width : 0,
+					tool_bar_height)),
+	       Fcons (Qinternal_border_width,
+		      make_fixnum (FRAME_INTERNAL_BORDER_WIDTH (f))));
+}
+
+/* Return the cons (A . B) of two fixnums.  */
+static Lisp_Object
+remote_size_pair (int a, int b)
+{
+  return Fcons (make_fixnum (a), make_fixnum (b));
 }
 
 /* Return the session for OBJECT: a terminal, a frame, the name of a
@@ -1916,6 +2062,8 @@ syms_of_remoteterm (void)
     fatal ("remote_frame_parm_handlers has %d elements, not %d",
 	   (int) countof (remote_frame_parm_handlers), frame_parm_count);
 
+  DEFSYM (Qtrue_color, "true-color");
+
   remote_display_name_list = Qnil;
   staticpro (&remote_display_name_list);
   remote_color_map = Qnil;
@@ -1944,6 +2092,12 @@ syms_of_remoteterm (void)
   defsubr (&Sx_hide_tip);
   defsubr (&Sx_display_pixel_width);
   defsubr (&Sx_display_pixel_height);
+  defsubr (&Sx_display_mm_width);
+  defsubr (&Sx_display_mm_height);
+  defsubr (&Sx_display_planes);
+  defsubr (&Sx_display_visual_class);
+  defsubr (&Sremote_frame_geometry);
+  defsubr (&Sremote_frame_edges);
   defsubr (&Sxw_color_defined_p);
   defsubr (&Sxw_color_values);
   defsubr (&Sx_display_color_cells);
