@@ -1924,8 +1924,9 @@ lower part of the line over it."
   "Return a form for the daemon with text wider than the window.
 The value of the form is a plist: :output is the bytes that the session
 sent, :left, :right, and :bottom are the pixel positions of the edges
-of the text area, and :glyph-width is the width of a glyph.  Each glyph is 3 times the height of the frame font, and
-the window scrolls to the left by HSCROLL columns."
+of the text area, and :glyph-width is the width of a glyph.  Each
+glyph is 3 times the height of the frame font, and the window scrolls
+to the left by HSCROLL columns."
   (remoteterm-tests--frame-form
    '((width . 20) (height . 6))
    `(progn
@@ -3992,8 +3993,9 @@ Each trial uses a new size, so Emacs has not drawn with its fonts.")
 
 (defun remoteterm-tests--distinct-fonts (count frame size again)
   "Return COUNT new font objects of FRAME, each from a different file.
-Each font has the characters \"abc\", and the pixel size SIZE.  If AGAIN is non-nil, find each font
-through a new font spec, so Emacs makes a new font object for it.
+Each font has the characters \"abc\", and the pixel size SIZE.  If
+AGAIN is non-nil, find each font through a new font spec, so Emacs
+makes a new font object for it.
 Return fewer fonts if FRAME has fewer font files."
   (let ((fonts nil)
         (files nil))
@@ -4846,6 +4848,54 @@ redisplay after the attach."
                        (list (- before-attach before-detach)
                              (- (count) before-attach))))))))
 
+(defconst remoteterm-tests--display-queries
+  '(display-graphic-p display-color-p display-grayscale-p
+    display-pixel-width display-pixel-height display-mm-width
+    display-mm-height display-planes display-color-cells
+    display-visual-class display-screens display-backing-store
+    display-save-under display-monitor-attributes-list
+    frame-monitor-attributes display-images-p display-mouse-p
+    display-popup-menus-p display-selections-p font-family-list)
+  "The display queries that take a frame and that Lisp code can call.")
+
+(rd-daemon-deftest remoteterm-tests-detach-keeps-display-info
+  "A detach and an attach do not change the answers to display queries.
+A frame of a random size asks each of `remoteterm-tests--display-queries'
+with a client, with no client, and with a new client.  Law: the three
+answers are equal."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-integer 20 80) (rd-gen-integer 4 30)))
+     (lambda (size)
+       (should-not
+        (rd-daemon-eval
+         (remoteterm-tests--frame-form
+          `((width . ,(car size)) (height . ,(cadr size)))
+          '(insert "abc\n")
+          `(remoteterm-tests--display-info-changes
+            ',remoteterm-tests--display-queries display frame))))))))
+
+(defun remoteterm-tests--display-info-changes (queries display frame)
+  "Return the QUERIES that a detach or an attach of DISPLAY changes.
+Call each function of QUERIES with FRAME before a detach, after the
+detach, and after an attach.  The value is a list of (QUERY ATTACHED
+DETACHED REATTACHED) for each QUERY whose answers are not all equal.
+The list has each answer as a string from `format' with \"%S\", so
+that the value can go to the test."
+  (cl-flet ((answers ()
+              (mapcar (lambda (query) (funcall query frame)) queries)))
+    (let* ((attached (answers))
+           (detached (progn (remote-display--detach display) (answers)))
+           (reattached (progn (remote-display--record display)
+                              (answers))))
+      (cl-loop for query in queries
+               for a in attached
+               for d in detached
+               for r in reattached
+               unless (and (equal a d) (equal d r))
+               collect (list query (format "%S" a) (format "%S" d)
+                             (format "%S" r))))))
+
 ;;;; Frame messages
 
 (rd-daemon-deftest remoteterm-tests-frame-messages
@@ -5363,7 +5413,7 @@ that nothing else holds, so a weak table shows if the kboard went away."
   (remoteterm-tests--close-all)
   (should (< (remoteterm-tests--kboards-left
               (lambda ()
-                (remoteterm-tests--with-frame _frame "remote-kboard" nil)))
+                (remoteterm-tests--with-frame frame "remote-kboard" nil)))
              remoteterm-tests--kboard-cycles)))
 
 ;;;; Input
