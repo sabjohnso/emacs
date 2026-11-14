@@ -31,9 +31,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
+#include "clock.h"
 #include "flow.h"
 #include "pending.h"
 #include "relay.h"
@@ -98,7 +98,6 @@ static bool fill_flow (struct rc_flow *, int);
 static bool drain_flow (struct rc_flow *, int);
 static bool session_socket_p (const char *);
 static int listen_on_loopback (uint16_t *);
-static int64_t now_ms (void);
 
 int
 rc_relay_run (const char *session)
@@ -221,7 +220,7 @@ watch (const struct relay *relay, struct pollfd *fds)
   for (int i = 0; i < RC_PENDING_SIZE; i++)
     fds[WATCH_PENDING + i]
       = (struct pollfd) { rc_pending_fd (&relay->pending, i), POLLIN, 0 };
-  int64_t wait = rc_pending_wait (&relay->pending, now_ms ());
+  int64_t wait = rc_pending_wait (&relay->pending, rc_now_ms ());
   assert (wait <= RC_RELAY_TOKEN_LIMIT);
   return wait;
 }
@@ -301,7 +300,7 @@ accept_client (struct relay *relay)
     return;
   fcntl (fd, F_SETFL, O_NONBLOCK);
   int removed = rc_pending_add (&relay->pending, fd,
-				now_ms () + RC_RELAY_TOKEN_LIMIT);
+				rc_now_ms () + RC_RELAY_TOKEN_LIMIT);
   if (removed >= 0)
     close (removed);
 }
@@ -310,7 +309,7 @@ accept_client (struct relay *relay)
 static void
 expire_pending (struct relay *relay)
 {
-  int64_t now = now_ms ();
+  int64_t now = rc_now_ms ();
   for (int fd; (fd = rc_pending_expired (&relay->pending, now)) >= 0;)
     close (fd);
 }
@@ -437,13 +436,4 @@ listen_on_loopback (uint16_t *port)
     }
   *port = ntohs (address.sin_port);
   return fd;
-}
-
-/* Return the time of a monotonic clock in milliseconds.  */
-static int64_t
-now_ms (void)
-{
-  struct timespec now;
-  clock_gettime (CLOCK_MONOTONIC, &now);
-  return (int64_t) now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }

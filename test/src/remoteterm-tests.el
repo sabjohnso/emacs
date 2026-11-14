@@ -6117,6 +6117,70 @@ LATER-ERROR is the error of a later listen with a short name."
                                  "remote-display-listen remote-listen-a"))
                         (process-list)))))
 
+;;;; Start
+
+(rd-daemon-deftest remoteterm-tests-start-gives-session
+  "`remote-display-start' starts a new session with a frame and a socket.
+Each call gives a session with a new name.  The directory of the
+socket has the mode 700.  A client of the socket gets a define-frame
+message for the frame of its session."
+  (let ((rd-gen-trials 5))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 1 3))
+     (lambda (count)
+       (let ((results (remoteterm-tests--start-case count)))
+         (should (= (length (delete-dups
+                             (mapcar (lambda (result)
+                                       (plist-get result :socket))
+                                     results)))
+                    count))
+         (dolist (result results)
+           (should (= (plist-get result :mode) #o700))
+           (should (plist-get result :frame-defined))))))))
+
+(defun remoteterm-tests--start-case (count)
+  "Call `remote-display-start' COUNT times, and connect to each socket.
+Return a plist for each new session: :socket is the socket, :mode is
+the mode of its directory, and :frame-defined is non-nil if the client
+got a define-frame message.  Then delete the new sessions."
+  (let ((before (x-display-list)) (connections nil))
+    (unwind-protect
+        (mapcar
+         (lambda (socket)
+           (let ((connection (remoteterm-tests--connect socket)))
+             (push connection connections)
+             (list :socket socket
+                   :mode (file-modes (file-name-directory socket))
+                   :frame-defined (remoteterm-tests--frame-defined-p
+                                   connection))))
+         (cl-loop repeat count collect (remote-display-start)))
+      (dolist (connection connections)
+        (delete-process (car connection)))
+      (dolist (display (seq-difference (x-display-list) before))
+        (dolist (frame (frames-on-display-list display))
+          (delete-frame frame t))
+        (when (remoteterm-tests--terminal display)
+          (x-close-connection display))))))
+
+(defun remoteterm-tests--frame-defined-p (connection)
+  "Return non-nil if CONNECTION gets a define-frame message in 10 seconds.
+CONNECTION is (PROCESS . RECEIVED), as `remoteterm-tests--connect'
+returns.  The test has the daemon, so the daemon is not idle and does
+not redisplay: the loop calls `redisplay'."
+  (let ((end (+ (float-time) 10)) (found nil))
+    (while (and (not (setq found
+                           (seq-find
+                            (lambda (message)
+                              (eq (car message) 'define-frame))
+                            (remoteterm-tests--all-messages
+                             (string-to-unibyte
+                              (apply #'concat
+                                     (reverse (cadr connection))))))))
+                (< (float-time) end))
+      (accept-process-output (car connection) 0.05)
+      (redisplay t))
+    found))
+
 (defun remoteterm-tests--reset-and-ping (connection serial)
   "Forget the strings that CONNECTION got, and send a ping with SERIAL.
 CONNECTION is (PROCESS . RECEIVED), as `remoteterm-tests--connect'

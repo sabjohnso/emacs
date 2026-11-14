@@ -17,3 +17,5 @@ test-relay
 test-flow
 test-pending
 test-unixsocket
+test-sshargs
+test-ssh

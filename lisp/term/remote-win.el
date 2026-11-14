@@ -115,6 +115,29 @@ does not ask about the server when it exits."
 
 (add-hook 'delete-terminal-functions #'remote-display--stop-listening)
 
+;;;; Start
+
+(defun remote-display-start ()
+  "Start a new session with one frame, and return the name of its socket.
+A client of the socket shows the frame.  The command
+\"remote-client --ssh HOST\" calls this function through emacsclient on
+HOST.
+
+The new frame becomes the selected frame.  In a daemon, the selected
+frame is otherwise the initial frame, and redisplay does nothing while
+the initial frame is selected."
+  (let ((display (remote-display--new-name)))
+    (x-open-connection display)
+    (select-frame (make-frame-on-display display))
+    (remote-display-listen display)))
+
+(defun remote-display--new-name ()
+  "Return the name of a session that is not open."
+  (let ((number 0) (name nil))
+    (while (member (setq name (format "remote-%d" (cl-incf number)))
+                   (x-display-list)))
+    name))
+
 (provide 'remote-win)
 (provide 'term/remote-win)
 

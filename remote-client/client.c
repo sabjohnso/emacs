@@ -18,6 +18,7 @@ You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* Usage: remote-client [--render-to=FILE.png | --timeout=MS] SOCKET
+	  remote-client [--timeout=MS] [--ssh-command=PROGRAM] --ssh HOST
 	  remote-client --relay SOCKET
 
    The program connects to the Unix-domain socket SOCKET of a session,
@@ -37,6 +38,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    writes the surface of the first frame that the server defined to
    FILE.png, and stops.  This mode needs no display, so a test can use
    it.
+
+   With --ssh HOST, the program starts a new session on HOST through
+   SSH, and connects to it through the relay of relay.h and an SSH
+   tunnel: see bootstrap.h and tunnel.h.  PROGRAM is the SSH program,
+   "ssh" by default.  The Emacs server on HOST must run.
 
    With --relay, the program is the relay of relay.h for the session
    socket SOCKET.  It opens no window.
@@ -58,6 +64,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <glib-unix.h>
 #include <gtk/gtk.h>
 
+#include "bootstrap.h"
+#include "connector.h"
 #include "fonts.h"
 #include "hashcache.h"
 #include "hashfonts.h"
@@ -66,6 +74,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "reader.h"
 #include "relay.h"
 #include "render.h"
+#include "tunnel.h"
 #include "unixsocket.h"
 #include "view.h"
 
@@ -84,6 +93,18 @@ enum read_result
     /* The read or the stream has an error.  */
     READ_ERROR,
   };
+
+/* The options of the command line.  PNG is the file of --render-to,
+   or NULL.  HOST is the host of --ssh, or NULL; then SOCKET is the
+   session socket.  SSH is the program of --ssh-command.  */
+struct options
+{
+  const char *png;
+  int64_t timeout;
+  const char *ssh;
+  const char *host;
+  const char *socket;
+};
 
 /* The state of the mode --render-to.  */
 struct png_mode
@@ -111,15 +132,15 @@ struct connection
   bool broken;
 };
 
-/* The state of the mode with windows.  PATH is the socket of the
-   session, and TIMEOUT is the timeout of a connection.  CONNECTION is
+/* The state of the mode with windows.  CONNECTOR connects to the
+   session again, and TIMEOUT is the timeout of a connection.  CONNECTION is
    NULL while the program waits to connect again.  TICK is the timer of
    the liveness, and RETRY is the timer of the next connect, or 0.  */
 struct window_mode
 {
   struct rc_renderer *renderer;
   struct rc_view *view;
-  const char *path;
+  struct rc_connector connector;
   int64_t timeout;
   struct connection *connection;
   struct rc_backoff backoff;
@@ -129,12 +150,19 @@ struct window_mode
   bool failed;
 };
 
+static struct options parse_options (int, char **);
+static int open_session (const struct options *, struct rc_connector *,
+			 struct rc_tunnel **);
+static int open_ssh_session (const struct options *, struct rc_connector *,
+			     struct rc_tunnel **);
 static struct rc_font_source client_fonts (void);
 static char *cache_file_name (void);
 static void warn_fallback (const uint8_t *, int, uint32_t);
 static int render_to_file (struct rc_renderer *, int, const char *);
 static void record_first_frame (void *, const struct rd_message *);
-static int show_frames (struct rc_renderer *, int, const char *, int64_t);
+static int show_frames (struct rc_renderer *, int, struct rc_connector,
+			int64_t);
+static int connect_socket (void *);
 static void open_connection (struct window_mode *, int);
 static void lose_connection (struct window_mode *, bool);
 static void close_connection (struct window_mode *);
@@ -157,42 +185,99 @@ static void usage (void);
 int
 main (int argc, char **argv)
 {
-  const char *png = NULL;
-  int64_t timeout = RC_LINK_DEFAULT_TIMEOUT;
-  int arg = 1;
-  if (arg < argc && strcmp (argv[arg], "--relay") == 0)
+  if (argc > 1 && strcmp (argv[1], "--relay") == 0)
     {
       if (argc != 3)
 	usage ();
       return rc_relay_run (argv[2]);
     }
-  if (arg < argc && strncmp (argv[arg], "--render-to=", 12) == 0)
-    png = argv[arg++] + 12;
-  else if (arg < argc && strncmp (argv[arg], "--timeout=", 10) == 0)
-    {
-      char *end;
-      timeout = strtoll (argv[arg++] + 10, &end, 10);
-      if (*end || timeout < RC_LINK_PINGS_PER_TIMEOUT)
-	usage ();
-    }
-  if (arg != argc - 1)
-    usage ();
-  int fd = rc_connect_unix (argv[arg], true);
+  struct options options = parse_options (argc, argv);
+  struct rc_connector connector;
+  struct rc_tunnel *tunnel = NULL;
+  int fd = open_session (&options, &connector, &tunnel);
   if (fd < 0)
-    return 1;
+    {
+      rc_tunnel_free (tunnel);
+      return 1;
+    }
   struct rc_font_source fonts = client_fonts ();
   struct rc_renderer *renderer = rc_renderer_new (fonts);
   int status;
-  if (png)
-    status = render_to_file (renderer, fd, png);
+  if (options.png)
+    status = render_to_file (renderer, fd, options.png);
   else
     {
       gtk_init (&argc, &argv);
-      status = show_frames (renderer, fd, argv[arg], timeout);
+      status = show_frames (renderer, fd, connector, options.timeout);
     }
   rc_renderer_free (renderer);
   rc_font_source_free (fonts);
+  rc_tunnel_free (tunnel);
   return status;
+}
+
+/* Return the options of the command line ARGV with ARGC arguments.
+   Exit with a message if they are not valid.  */
+static struct options
+parse_options (int argc, char **argv)
+{
+  struct options options = { .timeout = RC_LINK_DEFAULT_TIMEOUT,
+			     .ssh = "ssh" };
+  int arg = 1;
+  for (; arg < argc && strncmp (argv[arg], "--", 2) == 0; arg++)
+    if (strncmp (argv[arg], "--render-to=", 12) == 0)
+      options.png = argv[arg] + 12;
+    else if (strncmp (argv[arg], "--timeout=", 10) == 0)
+      {
+	char *end;
+	options.timeout = strtoll (argv[arg] + 10, &end, 10);
+	if (*end || options.timeout < RC_LINK_PINGS_PER_TIMEOUT)
+	  usage ();
+      }
+    else if (strncmp (argv[arg], "--ssh-command=", 14) == 0)
+      options.ssh = argv[arg] + 14;
+    else if (strcmp (argv[arg], "--ssh") == 0 && arg + 1 < argc)
+      options.host = argv[++arg];
+    else
+      usage ();
+  if (options.host ? arg != argc || options.png : arg != argc - 1)
+    usage ();
+  options.socket = options.host ? NULL : argv[arg];
+  return options;
+}
+
+/* Connect to the session of OPTIONS, and return the connection, or -1
+   with a message.  Put the connector for later connections in
+   *CONNECTOR.  With --ssh, put the tunnel in *TUNNEL.  */
+static int
+open_session (const struct options *options, struct rc_connector *connector,
+	      struct rc_tunnel **tunnel)
+{
+  if (options->host)
+    return open_ssh_session (options, connector, tunnel);
+  *connector = (struct rc_connector) { connect_socket,
+				       (void *) options->socket };
+  return rc_connect_unix (options->socket, true);
+}
+
+/* Start a session on the host of OPTIONS through SSH, and return the
+   first connection through a new tunnel, or -1 with a message.  Put
+   the connector of the tunnel in *CONNECTOR, and the tunnel in
+   *TUNNEL.  */
+static int
+open_ssh_session (const struct options *options,
+		  struct rc_connector *connector, struct rc_tunnel **tunnel)
+{
+  struct rc_relay_line line;
+  if (!rc_bootstrap (options->ssh, options->host, &line))
+    return -1;
+  const char *base = getenv ("XDG_RUNTIME_DIR");
+  *tunnel = rc_tunnel_new (options->ssh, options->host, &line,
+			   base && *base ? base : "/tmp");
+  if (!*tunnel)
+    return -1;
+  *connector = (struct rc_connector) { rc_tunnel_connect, *tunnel };
+  return rc_tunnel_first_connect (*tunnel);
 }
 
 /* Return the font source of the client: the font file with the hash
@@ -294,10 +379,10 @@ record_first_frame (void *data, const struct rd_message *message)
    user closes a window, or when a connection ends and no window is
    left.  Return the exit status.  */
 static int
-show_frames (struct rc_renderer *renderer, int fd, const char *path,
-	     int64_t timeout)
+show_frames (struct rc_renderer *renderer, int fd,
+	     struct rc_connector connector, int64_t timeout)
 {
-  struct window_mode mode = { .renderer = renderer, .path = path,
+  struct window_mode mode = { .renderer = renderer, .connector = connector,
 			      .timeout = timeout,
 			      .backoff = rc_backoff_new () };
   mode.view = rc_view_new (renderer, (struct rc_view_functions)
@@ -381,7 +466,7 @@ retry_connect (gpointer data)
 {
   struct window_mode *mode = data;
   mode->retry = 0;
-  int fd = rc_connect_unix (mode->path, false);
+  int fd = mode->connector.connect (mode->connector.data);
   if (fd < 0)
     schedule_retry (mode);
   else
@@ -574,6 +659,14 @@ read_chunk (struct rc_reader *reader, int fd)
   return READ_MORE;
 }
 
+/* The connector of a session socket: DATA is the name of the
+   socket.  */
+static int
+connect_socket (void *data)
+{
+  return rc_connect_unix (data, false);
+}
+
 /* Return the time of a monotonic clock in milliseconds.  */
 static int64_t
 now_ms (void)
@@ -586,6 +679,8 @@ usage (void)
 {
   fprintf (stderr, "Usage: remote-client [--render-to=FILE.png | "
 	   "--timeout=MS] SOCKET\n"
+	   "       remote-client [--timeout=MS] [--ssh-command=PROGRAM] "
+	   "--ssh HOST\n"
 	   "       remote-client --relay SOCKET\n");
   exit (1);
 }

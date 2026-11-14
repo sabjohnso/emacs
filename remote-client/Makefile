@@ -39,11 +39,13 @@ READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   fonts.o hashfonts.o hashcache.o rdproto.o link.o backoff.o \
-  unixsocket.o relay.o relayline.o token.o flow.o pending.o
+  unixsocket.o relay.o relayline.o token.o flow.o pending.o \
+  sshargs.o bootstrap.o tunnel.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
   test-backoff test-reconnect test-relayline \
-  test-relay test-flow test-pending test-unixsocket
+  test-relay test-flow test-pending test-unixsocket \
+  test-sshargs test-ssh
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -70,8 +72,10 @@ check: remote-client $(TESTS)
 	./test-flow
 	./test-pending
 	./test-unixsocket
+	./test-sshargs
 	$(XVFB_RUN) ./test-view
 	$(XVFB_RUN) ./test-reconnect
+	$(XVFB_RUN) ./test-ssh
 
 # Build again with AddressSanitizer and UndefinedBehaviorSanitizer, and
 # run the test.
@@ -127,6 +131,12 @@ test-pending: test-pending.o pending.o token.o
 test-unixsocket: test-unixsocket.o unixsocket.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
+test-sshargs: test-sshargs.o sshargs.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-ssh: test-ssh.o rdproto.o relayline.o token.o | remote-client
+	$(CC) $(LDFLAGS) -o $@ $^
+
 test-link: test-link.o link.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
@@ -162,6 +172,13 @@ relay.o client.o test-relay.o: relay.h
 flow.o test-flow.o relay.o: flow.h
 pending.o test-pending.o relay.o test-relay.o: pending.h token.h
 unixsocket.o client.o relay.o test-unixsocket.o: unixsocket.h
+client.o: connector.h
+sshargs.o test-sshargs.o bootstrap.o tunnel.o: sshargs.h
+bootstrap.o client.o: bootstrap.h relayline.h token.h
+tunnel.o client.o: tunnel.h relayline.h token.h unixsocket.h
+clock.o relay.o bootstrap.o tunnel.o: clock.h
+child.o bootstrap.o tunnel.o: child.h
+test-ssh.o: relayline.h token.h ../src/rdproto.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)
