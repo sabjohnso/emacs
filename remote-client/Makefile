@@ -38,10 +38,12 @@ RENDER_OBJS = render.o table.o rdproto.o
 READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
-  fonts.o hashfonts.o hashcache.o rdproto.o link.o backoff.o
+  fonts.o hashfonts.o hashcache.o rdproto.o link.o backoff.o \
+  unixsocket.o relay.o relayline.o token.o flow.o pending.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
-  test-backoff test-reconnect
+  test-backoff test-reconnect test-relayline \
+  test-relay test-flow test-pending test-unixsocket
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -63,6 +65,11 @@ check: remote-client $(TESTS)
 	./test-sizes
 	./test-link
 	./test-backoff
+	./test-relayline
+	./test-relay
+	./test-flow
+	./test-pending
+	./test-unixsocket
 	$(XVFB_RUN) ./test-view
 	$(XVFB_RUN) ./test-reconnect
 
@@ -98,10 +105,26 @@ test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 test-sizes: test-sizes.o sizes.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-reconnect: test-reconnect.o rdproto.o
+test-reconnect: test-reconnect.o rdproto.o | remote-client
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-backoff: test-backoff.o backoff.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-relayline: test-relayline.o relayline.o token.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+# The test runs the program, so the program must be current.
+test-relay: test-relay.o relayline.o token.o | remote-client
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-flow: test-flow.o flow.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-pending: test-pending.o pending.o token.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-unixsocket: test-unixsocket.o unixsocket.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-link: test-link.o link.o
@@ -133,6 +156,12 @@ sizes.o test-sizes.o view.o: sizes.h
 link.o test-link.o client.o: link.h
 backoff.o test-backoff.o test-reconnect.o client.o: backoff.h
 test-reconnect.o: ../src/rdproto.h
+relayline.o test-relayline.o test-relay.o relay.o: relayline.h token.h
+token.o: token.h
+relay.o client.o test-relay.o: relay.h
+flow.o test-flow.o relay.o: flow.h
+pending.o test-pending.o relay.o test-relay.o: pending.h token.h
+unixsocket.o client.o relay.o test-unixsocket.o: unixsocket.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)

@@ -12,3 +12,8 @@ test-sizes
 test-link
 test-backoff
 test-reconnect
+test-relayline
+test-relay
+test-flow
+test-pending
+test-unixsocket

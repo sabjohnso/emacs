@@ -18,6 +18,7 @@ You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* Usage: remote-client [--render-to=FILE.png | --timeout=MS] SOCKET
+	  remote-client --relay SOCKET
 
    The program connects to the Unix-domain socket SOCKET of a session,
    and shows each frame of the session in a window.  It stops when the
@@ -37,6 +38,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    FILE.png, and stops.  This mode needs no display, so a test can use
    it.
 
+   With --relay, the program is the relay of relay.h for the session
+   socket SOCKET.  It opens no window.
+
    The exit status is 0 on success, and 1 on an error.  */
 
 #include <config.h>
@@ -49,7 +53,6 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include <glib-unix.h>
@@ -61,7 +64,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "link.h"
 #include "backoff.h"
 #include "reader.h"
+#include "relay.h"
 #include "render.h"
+#include "unixsocket.h"
 #include "view.h"
 
 /* The size of each read from the socket.  */
@@ -146,7 +151,6 @@ static void send_on (struct connection *, const struct rd_message *,
 		     int64_t);
 static bool write_all (int, const unsigned char *, size_t, int64_t);
 static enum read_result read_chunk (struct rc_reader *, int);
-static int connect_to (const char *, bool);
 static int64_t now_ms (void);
 static void usage (void);
 
@@ -156,6 +160,12 @@ main (int argc, char **argv)
   const char *png = NULL;
   int64_t timeout = RC_LINK_DEFAULT_TIMEOUT;
   int arg = 1;
+  if (arg < argc && strcmp (argv[arg], "--relay") == 0)
+    {
+      if (argc != 3)
+	usage ();
+      return rc_relay_run (argv[2]);
+    }
   if (arg < argc && strncmp (argv[arg], "--render-to=", 12) == 0)
     png = argv[arg++] + 12;
   else if (arg < argc && strncmp (argv[arg], "--timeout=", 10) == 0)
@@ -167,7 +177,7 @@ main (int argc, char **argv)
     }
   if (arg != argc - 1)
     usage ();
-  int fd = connect_to (argv[arg], true);
+  int fd = rc_connect_unix (argv[arg], true);
   if (fd < 0)
     return 1;
   struct rc_font_source fonts = client_fonts ();
@@ -371,7 +381,7 @@ retry_connect (gpointer data)
 {
   struct window_mode *mode = data;
   mode->retry = 0;
-  int fd = connect_to (mode->path, false);
+  int fd = rc_connect_unix (mode->path, false);
   if (fd < 0)
     schedule_retry (mode);
   else
@@ -564,31 +574,6 @@ read_chunk (struct rc_reader *reader, int fd)
   return READ_MORE;
 }
 
-/* Return a connection to the Unix-domain socket PATH, or -1 on an
-   error.  If REPORT, write the error to the standard error output.  */
-static int
-connect_to (const char *path, bool report)
-{
-  struct sockaddr_un address = { .sun_family = AF_UNIX };
-  if (strlen (path) >= sizeof address.sun_path)
-    {
-      fprintf (stderr, "remote-client: %s: the name is too long\n", path);
-      return -1;
-    }
-  strcpy (address.sun_path, path);
-  int fd = socket (AF_UNIX, SOCK_STREAM, 0);
-  if (fd < 0
-      || connect (fd, (struct sockaddr *) &address, sizeof address) != 0)
-    {
-      if (report)
-	fprintf (stderr, "remote-client: %s: %s\n", path, strerror (errno));
-      if (fd >= 0)
-	close (fd);
-      return -1;
-    }
-  return fd;
-}
-
 /* Return the time of a monotonic clock in milliseconds.  */
 static int64_t
 now_ms (void)
@@ -600,6 +585,7 @@ static void
 usage (void)
 {
   fprintf (stderr, "Usage: remote-client [--render-to=FILE.png | "
-	   "--timeout=MS] SOCKET\n");
+	   "--timeout=MS] SOCKET\n"
+	   "       remote-client --relay SOCKET\n");
   exit (1);
 }
