@@ -27,12 +27,19 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      SSH can stop.  The process that the test started exits with the
      status 0.  The relay is in a new session, so a hangup signal to
      the group of that process does not stop the relay.
-   - Relay: after a client sends the token, the relay connects to the
+   - Relay: after a client makes a TLS session with the key of the pin
+     of the line, and sends the token, the relay connects to the
      session, and copies the bytes in the two directions.  The test
      sends more bytes than the buffers of the relay and of the kernel
      can hold, so both directions must flow at the same time.
    - Wrong: the relay closes a connection with a wrong token, and does
      not connect to the session.  A next client with the token works.
+   - Plain: the relay closes a connection that sends the token with no
+     TLS, and does not connect to the session.  GnuTLS waits for more
+     bytes after some first bytes, so the close can come only at
+     RC_RELAY_TOKEN_LIMIT.
+   - Rest: when the token and the next bytes come in one record of TLS,
+     the session gets the next bytes.
    - Idle: a connection that sends no token does not stop a next
      client with the token.
    - Split: a client can send the token in two parts.
@@ -77,6 +84,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "pending.h"
 #include "relay.h"
 #include "relayline.h"
+#include "stream.h"
+#include "tls.h"
 
 /* The longest wait for an event of the relay, in milliseconds.  */
 enum { LIMIT = 5000 };
@@ -100,6 +109,8 @@ struct run
 static bool line_example (void);
 static bool relay_example (void);
 static bool wrong_example (void);
+static bool plain_example (void);
+static bool rest_example (void);
 static bool idle_example (void);
 static bool late_example (void);
 static bool split_example (void);
@@ -118,11 +129,14 @@ static int connect_idle (const struct run *);
 static bool works_p (const struct run *);
 static bool write_closed_p (int);
 static bool read_line (int, char *, size_t);
-static int connect_client (const struct run *, bool);
+static struct rc_stream *connect_client (const struct run *, bool);
+static struct rc_stream *connect_tls (const struct run *);
+static bool stream_closed_p (struct rc_stream *, int);
+static bool write_stream (struct rc_stream *, const void *, size_t);
 static int connect_to_port (struct in_addr, uint16_t);
 static int accept_session (const struct run *, int);
 static bool closed_p (int, int);
-static bool echo_through (int, int, size_t);
+static bool echo_through (struct rc_stream *, int, size_t);
 static bool other_address (struct in_addr *);
 static int wait_for_exit (pid_t);
 static int64_t now_ms (void);
@@ -137,6 +151,8 @@ static const struct
     { "line", line_example },
     { "relay", relay_example },
     { "wrong", wrong_example },
+    { "plain", plain_example },
+    { "rest", rest_example },
     { "idle", idle_example },
     { "late", late_example },
     { "split", split_example },
@@ -195,10 +211,10 @@ relay_example (void)
   struct run run;
   if (!start_run (&run))
     return false;
-  int client = connect_client (&run, true);
+  struct rc_stream *client = connect_client (&run, true);
   int session = accept_session (&run, LIMIT);
-  bool ok = session >= 0 && echo_through (client, session, BULK);
-  close (client);
+  bool ok = client && session >= 0 && echo_through (client, session, BULK);
+  rc_stream_close (client);
   close (session);
   return stop_run (&run) && ok;
 }
@@ -209,13 +225,51 @@ wrong_example (void)
   struct run run;
   if (!start_run (&run))
     return false;
-  int wrong = connect_client (&run, false);
-  bool ok = closed_p (wrong, LIMIT) && accept_session (&run, QUIET) < 0;
-  int client = connect_client (&run, true);
+  struct rc_stream *wrong = connect_client (&run, false);
+  bool ok = (wrong && stream_closed_p (wrong, LIMIT)
+	     && accept_session (&run, QUIET) < 0);
+  struct rc_stream *client = connect_client (&run, true);
   int session = accept_session (&run, LIMIT);
-  ok = ok && session >= 0 && echo_through (client, session, 1000);
-  close (wrong);
-  close (client);
+  ok = ok && client && session >= 0 && echo_through (client, session, 1000);
+  rc_stream_close (wrong);
+  rc_stream_close (client);
+  close (session);
+  return stop_run (&run) && ok;
+}
+
+static bool
+plain_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  int plain = connect_idle (&run);
+  bool ok = (plain >= 0
+	     && write (plain, run.line.token, RC_TOKEN_SIZE) == RC_TOKEN_SIZE
+	     && closed_p (plain, RC_RELAY_TOKEN_LIMIT + LIMIT)
+	     && accept_session (&run, QUIET) < 0);
+  close (plain);
+  return stop_run (&run) && ok;
+}
+
+static bool
+rest_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  unsigned char bytes[RC_TOKEN_SIZE + 100], got[100];
+  memcpy (bytes, run.line.token, RC_TOKEN_SIZE);
+  for (int i = 0; i < 100; i++)
+    bytes[RC_TOKEN_SIZE + i] = i;
+  struct rc_stream *client = connect_tls (&run);
+  bool ok = client && write_stream (client, bytes, sizeof bytes);
+  int session = accept_session (&run, LIMIT);
+  struct pollfd ready = { session, POLLIN, 0 };
+  ok = (ok && session >= 0 && poll (&ready, 1, LIMIT) == 1
+	&& read (session, got, sizeof got) == sizeof got
+	&& memcmp (got, bytes + RC_TOKEN_SIZE, sizeof got) == 0);
+  rc_stream_close (client);
   close (session);
   return stop_run (&run) && ok;
 }
@@ -227,11 +281,12 @@ idle_example (void)
   if (!start_run (&run))
     return false;
   int idle = connect_idle (&run);
-  int client = connect_client (&run, true);
+  struct rc_stream *client = connect_client (&run, true);
   int session = accept_session (&run, LIMIT);
-  bool ok = idle >= 0 && session >= 0 && echo_through (client, session, 1000);
+  bool ok = (idle >= 0 && client && session >= 0
+	     && echo_through (client, session, 1000));
   close (idle);
-  close (client);
+  rc_stream_close (client);
   close (session);
   return stop_run (&run) && ok;
 }
@@ -256,15 +311,15 @@ split_example (void)
   struct run run;
   if (!start_run (&run))
     return false;
-  int client = connect_idle (&run);
-  bool ok = (client >= 0
-	     && write (client, run.line.token, 10) == 10
+  struct rc_stream *client = connect_tls (&run);
+  bool ok = (client
+	     && write_stream (client, run.line.token, 10)
 	     && poll (NULL, 0, QUIET) == 0
-	     && write (client, run.line.token + 10, RC_TOKEN_SIZE - 10)
-		== RC_TOKEN_SIZE - 10);
+	     && write_stream (client, run.line.token + 10,
+			      RC_TOKEN_SIZE - 10));
   int session = accept_session (&run, LIMIT);
   ok = ok && session >= 0 && echo_through (client, session, 1000);
-  close (client);
+  rc_stream_close (client);
   close (session);
   return stop_run (&run) && ok;
 }
@@ -278,9 +333,9 @@ abandon_example (void)
   int idle[RC_PENDING_SIZE];
   for (int i = 0; i < RC_PENDING_SIZE - 1; i++)
     idle[i] = connect_idle (&run);
-  int part = connect_idle (&run);
-  bool ok = part >= 0 && write (part, run.line.token, 10) == 10;
-  close (part);
+  struct rc_stream *part = connect_tls (&run);
+  bool ok = part && write_stream (part, run.line.token, 10);
+  rc_stream_close (part);
   poll (NULL, 0, QUIET);
   idle[RC_PENDING_SIZE - 1] = connect_idle (&run);
   ok = ok && !closed_p (idle[0], QUIET) && works_p (&run);
@@ -315,16 +370,17 @@ replace_example (void)
   struct run run;
   if (!start_run (&run))
     return false;
-  int old_client = connect_client (&run, true);
+  struct rc_stream *old_client = connect_client (&run, true);
   int old_session = accept_session (&run, LIMIT);
-  int client = connect_client (&run, true);
+  struct rc_stream *client = connect_client (&run, true);
   int session = accept_session (&run, LIMIT);
-  bool ok = (old_session >= 0 && session >= 0
-	     && closed_p (old_client, LIMIT) && closed_p (old_session, LIMIT)
+  bool ok = (old_client && client && old_session >= 0 && session >= 0
+	     && stream_closed_p (old_client, LIMIT)
+	     && closed_p (old_session, LIMIT)
 	     && echo_through (client, session, 1000));
-  close (old_client);
+  rc_stream_close (old_client);
   close (old_session);
-  close (client);
+  rc_stream_close (client);
   close (session);
   return stop_run (&run) && ok;
 }
@@ -335,11 +391,11 @@ session_end_example (void)
   struct run run;
   if (!start_run (&run))
     return false;
-  int client = connect_client (&run, true);
+  struct rc_stream *client = connect_client (&run, true);
   int session = accept_session (&run, LIMIT);
   close (session);
-  bool ok = session >= 0 && closed_p (client, LIMIT);
-  close (client);
+  bool ok = client && session >= 0 && stream_closed_p (client, LIMIT);
+  rc_stream_close (client);
   return stop_run (&run) && ok;
 }
 
@@ -353,9 +409,9 @@ end_example (void)
   if (!start_run (&run))
     return false;
   unlink (run.socket);
-  int client = connect_client (&run, true);
-  bool ok = closed_p (client, LIMIT);
-  close (client);
+  struct rc_stream *client = connect_client (&run, true);
+  bool ok = client && stream_closed_p (client, LIMIT);
+  rc_stream_close (client);
   return stop_run (&run) && ok;
 }
 
@@ -451,10 +507,9 @@ stop_run (struct run *run)
   close (run->session);
   unlink (run->socket);
   rmdir (run->directory);
-  int client = connect_client (run, true);
-  bool ok = client < 0 || closed_p (client, LIMIT);
-  if (client >= 0)
-    close (client);
+  struct rc_stream *client = connect_client (run, true);
+  bool ok = !client || stream_closed_p (client, LIMIT);
+  rc_stream_close (client);
   for (int64_t start = now_ms (); now_ms () - start < LIMIT;
        poll (NULL, 0, 10))
     {
@@ -518,10 +573,10 @@ write_closed_p (int fd)
 static bool
 works_p (const struct run *run)
 {
-  int client = connect_client (run, true);
+  struct rc_stream *client = connect_client (run, true);
   int session = accept_session (run, LIMIT);
-  bool ok = client >= 0 && session >= 0 && echo_through (client, session, 100);
-  close (client);
+  bool ok = client && session >= 0 && echo_through (client, session, 100);
+  rc_stream_close (client);
   close (session);
   return ok;
 }
@@ -545,23 +600,65 @@ read_line (int fd, char *text, size_t size)
   return false;
 }
 
-/* Connect a client to the relay of RUN, and send the token of the
-   relay if GOOD, or else a wrong token.  Return the connection.  */
-static int
+/* Connect a client to the relay of RUN with TLS, and send the token
+   of the relay if GOOD, or else a wrong token.  Return the stream, or
+   NULL.  */
+static struct rc_stream *
 connect_client (const struct run *run, bool good)
 {
-  int fd = connect_to_port ((struct in_addr) { htonl (INADDR_LOOPBACK) },
-			    run->line.port);
+  struct rc_stream *stream = connect_tls (run);
   uint8_t token[RC_TOKEN_SIZE];
   memcpy (token, run->line.token, sizeof token);
   if (!good)
     token[RC_TOKEN_SIZE - 1] ^= 1;
-  if (fd >= 0 && write (fd, token, sizeof token) != sizeof token)
+  if (stream && !write_stream (stream, token, sizeof token))
     {
-      close (fd);
-      return -1;
+      rc_stream_close (stream);
+      return NULL;
     }
-  return fd;
+  return stream;
+}
+
+/* Connect a client to the relay of RUN with TLS, and check the pin of
+   the line.  Send nothing.  Return the stream, whose socket does not
+   block, or NULL.  */
+static struct rc_stream *
+connect_tls (const struct run *run)
+{
+  int fd = connect_to_port ((struct in_addr) { htonl (INADDR_LOOPBACK) },
+			    run->line.port);
+  struct rc_stream *stream
+    = fd < 0 ? NULL : rc_tls_connect (fd, run->line.pin, LIMIT);
+  if (stream)
+    fcntl (fd, F_SETFL, O_NONBLOCK);
+  return stream;
+}
+
+/* Write the SIZE BYTES to STREAM.  Return false if they do not all go
+   in LIMIT milliseconds.  */
+static bool
+write_stream (struct rc_stream *stream, const void *bytes, size_t size)
+{
+  const unsigned char *rest = bytes;
+  int64_t start = now_ms ();
+  while (size > 0)
+    {
+      ptrdiff_t count = rc_stream_write (stream, rest, size);
+      if (count == RC_STREAM_FAIL || now_ms () - start > LIMIT)
+	return false;
+      if (count > 0)
+	{
+	  rest += count;
+	  size -= count;
+	}
+      else
+	{
+	  struct pollfd ready = { rc_stream_fd (stream),
+				  rc_stream_events (stream, POLLOUT), 0 };
+	  poll (&ready, 1, LIMIT);
+	}
+    }
+  return true;
 }
 
 /* Connect a client to the relay of RUN, and send nothing.  Return the
@@ -623,6 +720,28 @@ closed_p (int fd, int wait)
     }
 }
 
+/* Return true if the stream STREAM ends or fails in WAIT
+   milliseconds.  Discard the bytes that come before.  */
+static bool
+stream_closed_p (struct rc_stream *stream, int wait)
+{
+  int64_t start = now_ms ();
+  for (;;)
+    {
+      char bytes[4096];
+      ptrdiff_t count = rc_stream_read (stream, bytes, sizeof bytes);
+      if (count == 0 || count == RC_STREAM_FAIL)
+	return true;
+      int left = wait - (now_ms () - start);
+      if (left <= 0)
+	return false;
+      struct pollfd ready = { rc_stream_fd (stream),
+			      rc_stream_events (stream, POLLIN), 0 };
+      if (count == RC_STREAM_WAIT && poll (&ready, 1, left) != 1)
+	return false;
+    }
+}
+
 /* Send SIZE bytes on CLIENT.  Act as a session that sends back each
    byte that comes on SESSION.  Return true if CLIENT gets the same
    bytes again.  All the sockets are nonblocking, so the bytes flow in
@@ -632,28 +751,30 @@ closed_p (int fd, int wait)
    QUIET milliseconds.  Then each buffer along the path is full, so
    the relay must also write parts of its buffers.  */
 static bool
-echo_through (int client, int session, size_t size)
+echo_through (struct rc_stream *client, int session, size_t size)
 {
   static unsigned char echo[1 << 16];
   size_t sent = 0, got = 0, echo_start = 0, echo_end = 0;
   bool stalled = true;
-  fcntl (client, F_SETFL, O_NONBLOCK);
   fcntl (session, F_SETFL, O_NONBLOCK);
   int64_t start = now_ms ();
   while (got < size)
     {
       if (now_ms () - start > 4 * LIMIT)
 	return false;
+      bool buffered = !stalled && rc_stream_buffered_p (client);
       struct pollfd fds[2]
-	= { { .fd = client,
+	= { { .fd = rc_stream_fd (client),
 	      .events = (stalled ? 0 : POLLIN) | (sent < size ? POLLOUT : 0) },
 	    { .fd = session,
 	      .events = echo_start < echo_end ? POLLOUT : POLLIN } };
-      int ready = poll (fds, 2, stalled ? QUIET : LIMIT);
-      if (ready < 0 || (ready == 0 && !stalled))
+      int ready = poll (fds, 2, buffered ? 0 : stalled ? QUIET : LIMIT);
+      if (ready < 0 || (ready == 0 && !stalled && !buffered))
 	return false;
       if (ready == 0 || sent == size)
 	stalled = false;
+      if (buffered)
+	fds[0].revents |= POLLIN;
       if (fds[0].revents & POLLOUT)
 	{
 	  unsigned char bytes[4096];
@@ -661,17 +782,21 @@ echo_through (int client, int session, size_t size)
 						    : sizeof bytes;
 	  for (size_t i = 0; i < count; i++)
 	    bytes[i] = (sent + i) * 7;
-	  ssize_t written = write (client, bytes, count);
+	  ptrdiff_t written = rc_stream_write (client, bytes, count);
+	  if (written == RC_STREAM_FAIL)
+	    return false;
 	  if (written > 0)
 	    sent += written;
 	}
       if (!stalled && fds[0].revents & (POLLIN | POLLHUP | POLLERR))
 	{
 	  unsigned char bytes[4096];
-	  ssize_t count = read (client, bytes, sizeof bytes);
+	  ptrdiff_t count = rc_stream_read (client, bytes, sizeof bytes);
+	  if (count == RC_STREAM_WAIT)
+	    continue;
 	  if (count <= 0)
 	    return false;
-	  for (ssize_t i = 0; i < count; i++)
+	  for (ptrdiff_t i = 0; i < count; i++)
 	    if (bytes[i] != (unsigned char) ((got + i) * 7))
 	      return false;
 	  got += count;

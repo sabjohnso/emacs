@@ -51,6 +51,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <config.h>
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -74,12 +75,17 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "reader.h"
 #include "relay.h"
 #include "render.h"
+#include "stream.h"
 #include "tunnel.h"
 #include "unixsocket.h"
 #include "view.h"
 
-/* The size of each read from the socket.  */
+/* The size of each read from the stream.  After a read of this size,
+   the stream holds no buffered bytes, so read_input needs no check of
+   rc_stream_buffered_p.  */
 enum { READ_SIZE = 65536 };
+static_assert ((int) READ_SIZE >= (int) RC_STREAM_RECORD_SIZE,
+	       "a read must take all the bytes of a stream");
 
 /* The results of one read from the connection.  */
 enum read_result
@@ -115,8 +121,8 @@ struct png_mode
   bool have_first;
 };
 
-/* A connection of the mode with windows: its file descriptor FD, the
-   source of the GTK main loop that reads FD, the reader of its
+/* A connection of the mode with windows: its stream, the source of
+   the GTK main loop that reads the socket of the stream, the reader of its
    messages, and its liveness.  HEARD is true after the first bytes
    from the server.  BROKEN is true after a failed write.  A write
    can come from a function that the reader calls, so the write does
@@ -124,7 +130,7 @@ struct png_mode
    later.  */
 struct connection
 {
-  int fd;
+  struct rc_stream *stream;
   guint watch;
   struct rc_reader *reader;
   struct rc_link link;
@@ -151,19 +157,22 @@ struct window_mode
 };
 
 static struct options parse_options (int, char **);
-static int open_session (const struct options *, struct rc_connector *,
-			 struct rc_tunnel **);
-static int open_ssh_session (const struct options *, struct rc_connector *,
-			     struct rc_tunnel **);
+static struct rc_stream *open_session (const struct options *,
+				       struct rc_connector *,
+				       struct rc_tunnel **);
+static struct rc_stream *open_ssh_session (const struct options *,
+					   struct rc_connector *,
+					   struct rc_tunnel **);
 static struct rc_font_source client_fonts (void);
 static char *cache_file_name (void);
 static void warn_fallback (const uint8_t *, int, uint32_t);
-static int render_to_file (struct rc_renderer *, int, const char *);
+static int render_to_file (struct rc_renderer *, struct rc_stream *,
+			   const char *);
 static void record_first_frame (void *, const struct rd_message *);
-static int show_frames (struct rc_renderer *, int, struct rc_connector,
-			int64_t);
-static int connect_socket (void *);
-static void open_connection (struct window_mode *, int);
+static int show_frames (struct rc_renderer *, struct rc_stream *,
+			struct rc_connector, int64_t);
+static struct rc_stream *connect_socket (void *);
+static void open_connection (struct window_mode *, struct rc_stream *);
 static void lose_connection (struct window_mode *, bool);
 static void close_connection (struct window_mode *);
 static void schedule_retry (struct window_mode *);
@@ -177,8 +186,9 @@ static void stop_main_loop (void *);
 static void send_message (void *, const struct rd_message *);
 static void send_on (struct connection *, const struct rd_message *,
 		     int64_t);
-static bool write_all (int, const unsigned char *, size_t, int64_t);
-static enum read_result read_chunk (struct rc_reader *, int);
+static bool write_all (struct rc_stream *, const unsigned char *, size_t,
+		       int64_t);
+static enum read_result read_chunk (struct rc_reader *, struct rc_stream *);
 static int64_t now_ms (void);
 static void usage (void);
 
@@ -194,8 +204,8 @@ main (int argc, char **argv)
   struct options options = parse_options (argc, argv);
   struct rc_connector connector;
   struct rc_tunnel *tunnel = NULL;
-  int fd = open_session (&options, &connector, &tunnel);
-  if (fd < 0)
+  struct rc_stream *stream = open_session (&options, &connector, &tunnel);
+  if (!stream)
     {
       rc_tunnel_free (tunnel);
       return 1;
@@ -204,11 +214,11 @@ main (int argc, char **argv)
   struct rc_renderer *renderer = rc_renderer_new (fonts);
   int status;
   if (options.png)
-    status = render_to_file (renderer, fd, options.png);
+    status = render_to_file (renderer, stream, options.png);
   else
     {
       gtk_init (&argc, &argv);
-      status = show_frames (renderer, fd, connector, options.timeout);
+      status = show_frames (renderer, stream, connector, options.timeout);
     }
   rc_renderer_free (renderer);
   rc_font_source_free (fonts);
@@ -246,10 +256,10 @@ parse_options (int argc, char **argv)
   return options;
 }
 
-/* Connect to the session of OPTIONS, and return the connection, or -1
+/* Connect to the session of OPTIONS, and return the stream, or NULL
    with a message.  Put the connector for later connections in
    *CONNECTOR.  With --ssh, put the tunnel in *TUNNEL.  */
-static int
+static struct rc_stream *
 open_session (const struct options *options, struct rc_connector *connector,
 	      struct rc_tunnel **tunnel)
 {
@@ -257,25 +267,26 @@ open_session (const struct options *options, struct rc_connector *connector,
     return open_ssh_session (options, connector, tunnel);
   *connector = (struct rc_connector) { connect_socket,
 				       (void *) options->socket };
-  return rc_connect_unix (options->socket, true);
+  int fd = rc_connect_unix (options->socket, true);
+  return fd < 0 ? NULL : rc_stream_socket (fd);
 }
 
 /* Start a session on the host of OPTIONS through SSH, and return the
-   first connection through a new tunnel, or -1 with a message.  Put
+   first stream through a new tunnel, or NULL with a message.  Put
    the connector of the tunnel in *CONNECTOR, and the tunnel in
    *TUNNEL.  */
-static int
+static struct rc_stream *
 open_ssh_session (const struct options *options,
 		  struct rc_connector *connector, struct rc_tunnel **tunnel)
 {
   struct rc_relay_line line;
   if (!rc_bootstrap (options->ssh, options->host, &line))
-    return -1;
+    return NULL;
   const char *base = getenv ("XDG_RUNTIME_DIR");
   *tunnel = rc_tunnel_new (options->ssh, options->host, &line,
 			   base && *base ? base : "/tmp");
   if (!*tunnel)
-    return -1;
+    return NULL;
   *connector = (struct rc_connector) { rc_tunnel_connect, *tunnel };
   return rc_tunnel_first_connect (*tunnel);
 }
@@ -326,19 +337,21 @@ warn_fallback (const uint8_t *hash, int nhash, uint32_t index)
 	   (unsigned long) index);
 }
 
-/* Apply all messages from the connection FD to RENDERER, and write
-   the first frame to the file PNG.  Return the exit status.  */
+/* Apply all messages from STREAM to RENDERER, and write the first
+   frame to the file PNG.  Return the exit status.  The socket of
+   STREAM blocks, so a wait comes only from a signal.  */
 static int
-render_to_file (struct rc_renderer *renderer, int fd, const char *png)
+render_to_file (struct rc_renderer *renderer, struct rc_stream *stream,
+		const char *png)
 {
   struct png_mode mode = { .renderer = renderer };
   struct rc_reader *reader = rc_reader_new (record_first_frame, &mode);
   enum read_result result;
   do
-    result = read_chunk (reader, fd);
-  while (result == READ_MORE);
+    result = read_chunk (reader, stream);
+  while (result == READ_MORE || result == READ_WAIT);
   rc_reader_free (reader);
-  close (fd);
+  rc_stream_close (stream);
   if (result == READ_ERROR)
     return 1;
   cairo_surface_t *surface
@@ -374,12 +387,12 @@ record_first_frame (void *data, const struct rd_message *message)
 }
 
 /* Show the frames of RENDERER in windows, and apply the messages from
-   the connection FD to the socket PATH to RENDERER.  Connect to PATH
+   STREAM to RENDERER.  Connect to PATH
    again after the loss of a connection with TIMEOUT.  Stop when the
    user closes a window, or when a connection ends and no window is
    left.  Return the exit status.  */
 static int
-show_frames (struct rc_renderer *renderer, int fd,
+show_frames (struct rc_renderer *renderer, struct rc_stream *stream,
 	     struct rc_connector connector, int64_t timeout)
 {
   struct window_mode mode = { .renderer = renderer, .connector = connector,
@@ -387,7 +400,7 @@ show_frames (struct rc_renderer *renderer, int fd,
 			      .backoff = rc_backoff_new () };
   mode.view = rc_view_new (renderer, (struct rc_view_functions)
 			   { stop_main_loop, send_message, &mode });
-  open_connection (&mode, fd);
+  open_connection (&mode, stream);
   mode.tick = g_timeout_add (rc_link_tick_interval (timeout), tick_link,
 			     &mode);
   GNetworkMonitor *monitor = g_network_monitor_get_default ();
@@ -403,13 +416,14 @@ show_frames (struct rc_renderer *renderer, int fd,
   return mode.failed ? 1 : 0;
 }
 
-/* Make the open file descriptor FD the connection of MODE.  */
+/* Make STREAM the connection of MODE.  */
 static void
-open_connection (struct window_mode *mode, int fd)
+open_connection (struct window_mode *mode, struct rc_stream *stream)
 {
+  int fd = rc_stream_fd (stream);
   struct connection *connection = g_new (struct connection, 1);
   *connection = (struct connection)
-    { .fd = fd, .reader = rc_reader_new (show_message, mode),
+    { .stream = stream, .reader = rc_reader_new (show_message, mode),
       .link = rc_link_new (now_ms (), mode->timeout) };
   fcntl (fd, F_SETFL, fcntl (fd, F_GETFL) | O_NONBLOCK);
   connection->watch = g_unix_fd_add (fd, G_IO_IN | G_IO_HUP | G_IO_ERR,
@@ -445,7 +459,7 @@ close_connection (struct window_mode *mode)
     return;
   if (connection->watch)
     g_source_remove (connection->watch);
-  close (connection->fd);
+  rc_stream_close (connection->stream);
   rc_reader_free (connection->reader);
   g_free (connection);
   mode->connection = NULL;
@@ -466,11 +480,11 @@ retry_connect (gpointer data)
 {
   struct window_mode *mode = data;
   mode->retry = 0;
-  int fd = mode->connector.connect (mode->connector.data);
-  if (fd < 0)
+  struct rc_stream *stream = mode->connector.connect (mode->connector.data);
+  if (!stream)
     schedule_retry (mode);
   else
-    open_connection (mode, fd);
+    open_connection (mode, stream);
   return G_SOURCE_REMOVE;
 }
 
@@ -536,9 +550,11 @@ show_message (void *data, const struct rd_message *message)
 static gboolean
 read_input (gint fd, GIOCondition condition, gpointer data)
 {
+  (void) fd;
   (void) condition;
   struct window_mode *mode = data;
-  enum read_result result = read_chunk (mode->connection->reader, fd);
+  enum read_result result = read_chunk (mode->connection->reader,
+					mode->connection->stream);
   if (result == READ_MORE)
     note_input (mode);
   bool broken = mode->connection->broken;
@@ -595,7 +611,7 @@ send_on (struct connection *connection, const struct rd_message *message,
   size_t size = rd_encoded_size (message);
   unsigned char *bytes = g_malloc (size);
   rd_encode (message, bytes);
-  if (!write_all (connection->fd, bytes, size, limit))
+  if (!write_all (connection->stream, bytes, size, limit))
     {
       fprintf (stderr, "remote-client: a write to the server failed\n");
       connection->broken = true;
@@ -603,28 +619,28 @@ send_on (struct connection *connection, const struct rd_message *message,
   g_free (bytes);
 }
 
-/* Write the SIZE BYTES to the connection FD, which does not block.
-   When the connection cannot take more bytes now, wait until it can,
-   but at most LIMIT milliseconds in all.  Return false on an error or
+/* Write the SIZE BYTES to STREAM, whose socket does not block.  When
+   the stream cannot take more bytes now, wait until it can, but at
+   most LIMIT milliseconds in all.  Return false on an error or
    after LIMIT.  An input message is small, so the wait is short on a
    live connection.  */
 static bool
-write_all (int fd, const unsigned char *bytes, size_t size, int64_t limit)
+write_all (struct rc_stream *stream, const unsigned char *bytes,
+	   size_t size, int64_t limit)
 {
   int64_t end = now_ms () + limit;
   while (size > 0)
     {
-      ssize_t n = send (fd, bytes, size, MSG_NOSIGNAL);
-      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      ptrdiff_t n = rc_stream_write (stream, bytes, size);
+      if (n == RC_STREAM_WAIT)
 	{
 	  int64_t left = end - now_ms ();
-	  struct pollfd ready = { .fd = fd, .events = POLLOUT };
+	  struct pollfd ready = { .fd = rc_stream_fd (stream),
+				  .events = POLLOUT };
 	  if (left <= 0 || poll (&ready, 1, left) == 0)
 	    return false;
 	  continue;
 	}
-      if (n < 0 && errno == EINTR)
-	continue;
       if (n < 0)
 	return false;
       bytes += n;
@@ -633,22 +649,20 @@ write_all (int fd, const unsigned char *bytes, size_t size, int64_t limit)
   return true;
 }
 
-/* Read one chunk from the connection FD, and give it to READER.
-   Write an error to the standard error output.  */
+/* Read one chunk from STREAM, and give it to READER.  Write an error
+   to the standard error output.  */
 static enum read_result
-read_chunk (struct rc_reader *reader, int fd)
+read_chunk (struct rc_reader *reader, struct rc_stream *stream)
 {
   unsigned char buffer[READ_SIZE];
-  ssize_t n = read (fd, buffer, sizeof buffer);
+  ptrdiff_t n = rc_stream_read (stream, buffer, sizeof buffer);
   if (n == 0)
     return READ_END;
+  if (n == RC_STREAM_WAIT)
+    return READ_WAIT;
   if (n < 0)
     {
-      if (errno == EAGAIN || errno == EWOULDBLOCK)
-	return READ_WAIT;
-      if (errno == EINTR)
-	return READ_MORE;
-      perror ("remote-client: read");
+      fprintf (stderr, "remote-client: a read from the server failed\n");
       return READ_ERROR;
     }
   if (!rc_reader_feed (reader, buffer, n))
@@ -661,10 +675,11 @@ read_chunk (struct rc_reader *reader, int fd)
 
 /* The connector of a session socket: DATA is the name of the
    socket.  */
-static int
+static struct rc_stream *
 connect_socket (void *data)
 {
-  return rc_connect_unix (data, false);
+  int fd = rc_connect_unix (data, false);
+  return fd < 0 ? NULL : rc_stream_socket (fd);
 }
 
 /* Return the time of a monotonic clock in milliseconds.  */

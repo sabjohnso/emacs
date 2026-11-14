@@ -19,3 +19,4 @@ test-pending
 test-unixsocket
 test-sshargs
 test-ssh
+test-tls

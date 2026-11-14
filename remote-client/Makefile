@@ -30,6 +30,10 @@ ALL_CFLAGS = $(WARNINGS) -I. -I../src \
   $(shell $(PKG_CONFIG) --cflags $(PACKAGES)) $(CFLAGS)
 LIBS = $(shell $(PKG_CONFIG) --libs $(PACKAGES)) -lm
 
+# The relay, the program, and the tests of TLS use GnuTLS.
+TLS_CFLAGS = $(shell $(PKG_CONFIG) --cflags gnutls)
+TLS_LIBS = $(shell $(PKG_CONFIG) --libs gnutls)
+
 # Only the program uses GTK.  The modules and their tests do not.
 GTK_CFLAGS = $(shell $(PKG_CONFIG) --cflags gtk+-3.0)
 GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
@@ -39,13 +43,13 @@ READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   fonts.o hashfonts.o hashcache.o rdproto.o link.o backoff.o \
-  unixsocket.o relay.o relayline.o token.o flow.o pending.o \
+  unixsocket.o relay.o relayline.o token.o flow.o pending.o stream.o tls.o \
   sshargs.o bootstrap.o tunnel.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
   test-backoff test-reconnect test-relayline \
   test-relay test-flow test-pending test-unixsocket \
-  test-sshargs test-ssh
+  test-sshargs test-ssh test-tls
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -54,7 +58,7 @@ XVFB_RUN = xvfb-run -a
 all: remote-client $(TESTS)
 
 remote-client: $(CLIENT_OBJS)
-	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(TLS_LIBS) $(LIBS)
 
 check: remote-client $(TESTS)
 	./test-table
@@ -73,6 +77,7 @@ check: remote-client $(TESTS)
 	./test-pending
 	./test-unixsocket
 	./test-sshargs
+	./test-tls
 	$(XVFB_RUN) ./test-view
 	$(XVFB_RUN) ./test-reconnect
 	$(XVFB_RUN) ./test-ssh
@@ -119,8 +124,8 @@ test-relayline: test-relayline.o relayline.o token.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 # The test runs the program, so the program must be current.
-test-relay: test-relay.o relayline.o token.o | remote-client
-	$(CC) $(LDFLAGS) -o $@ $^
+test-relay: test-relay.o relayline.o token.o tls.o stream.o | remote-client
+	$(CC) $(LDFLAGS) -o $@ $^ $(TLS_LIBS)
 
 test-flow: test-flow.o flow.o
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -137,6 +142,9 @@ test-sshargs: test-sshargs.o sshargs.o
 test-ssh: test-ssh.o rdproto.o relayline.o token.o | remote-client
 	$(CC) $(LDFLAGS) -o $@ $^
 
+test-tls: test-tls.o tls.o stream.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(TLS_LIBS)
+
 test-link: test-link.o link.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
@@ -145,6 +153,9 @@ test-view: test-view.o view.o input.o sizes.o $(RENDER_OBJS)
 
 client.o view.o input.o test-input.o test-view.o: %.o: %.c
 	$(CC) $(ALL_CFLAGS) $(GTK_CFLAGS) -c -o $@ $<
+
+tls.o test-tls.o test-relay.o: %.o: %.c
+	$(CC) $(ALL_CFLAGS) $(TLS_CFLAGS) -c -o $@ $<
 
 rdproto.o: ../src/rdproto.c ../src/rdproto.h config.h
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
@@ -166,18 +177,21 @@ sizes.o test-sizes.o view.o: sizes.h
 link.o test-link.o client.o: link.h
 backoff.o test-backoff.o test-reconnect.o client.o: backoff.h
 test-reconnect.o: ../src/rdproto.h
-relayline.o test-relayline.o test-relay.o relay.o: relayline.h token.h
+relayline.o test-relayline.o test-relay.o relay.o: relayline.h token.h pin.h
 token.o: token.h
 relay.o client.o test-relay.o: relay.h
 flow.o test-flow.o relay.o: flow.h
 pending.o test-pending.o relay.o test-relay.o: pending.h token.h
 unixsocket.o client.o relay.o test-unixsocket.o: unixsocket.h
-client.o: connector.h
+client.o tunnel.o: connector.h
 sshargs.o test-sshargs.o bootstrap.o tunnel.o: sshargs.h
 bootstrap.o client.o: bootstrap.h relayline.h token.h
 tunnel.o client.o: tunnel.h relayline.h token.h unixsocket.h
 clock.o relay.o bootstrap.o tunnel.o: clock.h
 child.o bootstrap.o tunnel.o: child.h
+stream.o relay.o client.o tunnel.o: stream.h
+stream.o tls.o: streamclass.h
+tls.o test-tls.o test-relay.o relay.o tunnel.o: tls.h pin.h stream.h
 test-ssh.o: relayline.h token.h ../src/rdproto.h
 
 clean:

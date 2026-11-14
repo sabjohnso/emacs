@@ -22,24 +22,20 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    of relayline.h to its standard output.  Then it closes its standard
    output, so SSH can stop, and the relay keeps running.
 
-   A client connects to the port and sends the token.  The relay then
+   A client connects to the port, makes a TLS session, and sends the
+   token.  The relay then
    connects to the Unix-domain socket of the session, and copies the
    bytes between the client and the session.  A new client with the
    token replaces the old client, as the session also does.  When the
    relay cannot connect to the session, the session has stopped, so
    the relay exits.
 
-   The relay reads and writes the connection of the client with read
-   and send.  The task of TLS will put a TLS session on that
-   connection.  That task adds the interface of a stream, because
-   until then the relay has only one kind of connection.  */
+   The client speaks TLS 1.3 with the key of tls.h, whose pin is on
+   the line.  The relay reads the token inside TLS, so a connection
+   with no TLS gets nothing.  */
 
 #ifndef REMOTE_CLIENT_RELAY_H
 #define REMOTE_CLIENT_RELAY_H
-
-/* The relay closes a connection that does not send the token in this
-   number of milliseconds.  */
-enum { RC_RELAY_TOKEN_LIMIT = 5000 };
 
 /* Run the relay of the session socket SESSION.  Return the exit status
    of the program.  The process that returns is not the process that

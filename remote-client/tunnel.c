@@ -19,6 +19,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <config.h>
 
+#include <assert.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -33,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "child.h"
 #include "clock.h"
 #include "sshargs.h"
+#include "tls.h"
 #include "tunnel.h"
 #include "unixsocket.h"
 
@@ -66,7 +68,7 @@ struct rc_tunnel
 };
 
 static enum ssh_state ensure_running (struct rc_tunnel *);
-static int connect_once (const struct rc_tunnel *);
+static struct rc_stream *connect_once (const struct rc_tunnel *);
 static bool running_p (struct rc_tunnel *);
 static bool start (struct rc_tunnel *);
 
@@ -92,15 +94,18 @@ rc_tunnel_new (const char *ssh, const char *host,
       free (tunnel);
       return NULL;
     }
-  snprintf (tunnel->socket, sizeof tunnel->socket, "%s/socket",
-	    tunnel->directory);
+  /* The check of the length above makes the name fit.  */
+  int fits = snprintf (tunnel->socket, sizeof tunnel->socket, "%s/socket",
+		       tunnel->directory) < (int) sizeof tunnel->socket;
+  assert (fits);
+  (void) fits;
   tunnel->ssh = ssh;
   tunnel->host = host;
   tunnel->line = *line;
   return tunnel;
 }
 
-int
+struct rc_stream *
 rc_tunnel_first_connect (struct rc_tunnel *tunnel)
 {
   int64_t end = rc_now_ms () + RC_TUNNEL_FIRST_LIMIT;
@@ -111,22 +116,23 @@ rc_tunnel_first_connect (struct rc_tunnel *tunnel)
       if (state == SSH_FAILED
 	  || (state == SSH_STARTED && ++starts > 1))
 	break;
-      int fd = state == SSH_RUNNING ? connect_once (tunnel) : -1;
-      if (fd >= 0)
-	return fd;
+      struct rc_stream *stream
+	= state == SSH_RUNNING ? connect_once (tunnel) : NULL;
+      if (stream)
+	return stream;
       poll (NULL, 0, FIRST_WAIT);
     }
   fprintf (stderr, "remote-client: %s: the tunnel did not connect\n",
 	   tunnel->host);
-  return -1;
+  return NULL;
 }
 
-int
+struct rc_stream *
 rc_tunnel_connect (void *data)
 {
   struct rc_tunnel *tunnel = data;
   if (ensure_running (tunnel) != SSH_RUNNING)
-    return -1;
+    return NULL;
   return connect_once (tunnel);
 }
 
@@ -154,21 +160,25 @@ ensure_running (struct rc_tunnel *tunnel)
   return start (tunnel) ? SSH_STARTED : SSH_FAILED;
 }
 
-/* Return a new connection to the local socket of TUNNEL, after the
-   token of the relay, or -1.  */
-static int
+/* Return a new TLS stream to the relay through the local socket of
+   TUNNEL, after the token of the relay, or NULL.  The relay closes a
+   connection with no token after RC_RELAY_TOKEN_LIMIT, so the
+   handshake waits no longer.  */
+static struct rc_stream *
 connect_once (const struct rc_tunnel *tunnel)
 {
   int fd = rc_connect_unix (tunnel->socket, false);
-  if (fd < 0)
-    return -1;
-  if (send (fd, tunnel->line.token, RC_TOKEN_SIZE, MSG_NOSIGNAL)
-      != RC_TOKEN_SIZE)
+  struct rc_stream *stream
+    = fd < 0 ? NULL : rc_tls_connect (fd, tunnel->line.pin,
+				      RC_RELAY_TOKEN_LIMIT);
+  if (stream
+      && rc_stream_write (stream, tunnel->line.token, RC_TOKEN_SIZE)
+	 != RC_TOKEN_SIZE)
     {
-      close (fd);
-      return -1;
+      rc_stream_close (stream);
+      return NULL;
     }
-  return fd;
+  return stream;
 }
 
 /* Return true if the SSH of TUNNEL runs.  */

@@ -226,7 +226,9 @@ start_run (struct run *run, const char *fail)
   snprintf (run->session, sizeof run->session, "%s/session",
 	    run->directory);
   struct sockaddr_un address = { .sun_family = AF_UNIX };
-  snprintf (address.sun_path, sizeof address.sun_path, "%s", run->session);
+  if (snprintf (address.sun_path, sizeof address.sun_path, "%s",
+		run->session) >= (int) sizeof address.sun_path)
+    return false;
   run->listener = socket (AF_UNIX, SOCK_STREAM, 0);
   if (run->listener < 0
       || bind (run->listener, (struct sockaddr *) &address,
@@ -582,7 +584,9 @@ fake_tunnel (const char *forward)
       fclose (file);
     }
   struct sockaddr_un address = { .sun_family = AF_UNIX };
-  snprintf (address.sun_path, sizeof address.sun_path, "%s", socket_name);
+  if (snprintf (address.sun_path, sizeof address.sun_path, "%s",
+		socket_name) >= (int) sizeof address.sun_path)
+    return 255;
   int listener = socket (AF_UNIX, SOCK_STREAM, 0);
   if (listener < 0
       || bind (listener, (struct sockaddr *) &address, sizeof address) != 0

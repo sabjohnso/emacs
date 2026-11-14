@@ -25,12 +25,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_CONNECTOR_H
 #define REMOTE_CLIENT_CONNECTOR_H
 
-/* CONNECT returns a new connection to the session, or -1 if it cannot
+struct rc_stream;
+
+/* CONNECT returns a new stream to the session, or NULL if it cannot
    connect now.  It writes no message, because the window mode tries
    again later.  DATA is its argument.  */
 struct rc_connector
 {
-  int (*connect) (void *data);
+  struct rc_stream *(*connect) (void *data);
   void *data;
 };
 

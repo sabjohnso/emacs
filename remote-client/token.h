@@ -32,6 +32,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 /* The number of bytes of a token.  */
 enum { RC_TOKEN_SIZE = 32 };
 
+/* The relay closes a connection that does not send the token in this
+   number of milliseconds, with the handshake of TLS.  */
+enum { RC_RELAY_TOKEN_LIMIT = 5000 };
+
 /* Put a new random token in TOKEN.  Return false if the system gives
    no random bytes.  */
 extern bool rc_token_new (uint8_t token[RC_TOKEN_SIZE]);

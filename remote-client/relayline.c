@@ -26,16 +26,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "relayline.h"
 
 /* The text before the port.  */
-#define PREFIX "remote-display-relay 1 "
+#define PREFIX "remote-display-relay 2 "
 
 /* The longest text: the prefix, 5 digits, a space, the token, a
-   newline, and a null byte.  */
+   space, the pin, a newline, and a null byte.  */
 static_assert (RC_RELAY_LINE_SIZE
-	       >= sizeof PREFIX - 1 + 5 + 1 + 2 * RC_TOKEN_SIZE + 1 + 1,
+	       >= (sizeof PREFIX - 1 + 5 + 1 + 2 * RC_TOKEN_SIZE + 1
+		   + 2 * RC_PIN_SIZE + 1 + 1),
 	       "RC_RELAY_LINE_SIZE is too small");
 
+static int format_hex (char *, const uint8_t *, size_t);
 static const char *parse_port (const char *, uint16_t *);
-static const char *parse_token (const char *, uint8_t *);
+static const char *parse_hex (const char *, uint8_t *, size_t);
 static int hex_digit (char);
 
 void
@@ -44,8 +46,9 @@ rc_relay_line_format (const struct rc_relay_line *line,
 {
   assert (line->port != 0);
   int length = sprintf (text, PREFIX "%u ", (unsigned) line->port);
-  for (int i = 0; i < RC_TOKEN_SIZE; i++)
-    length += sprintf (text + length, "%02x", line->token[i]);
+  length += format_hex (text + length, line->token, RC_TOKEN_SIZE);
+  text[length++] = ' ';
+  length += format_hex (text + length, line->pin, RC_PIN_SIZE);
   strcpy (text + length, "\n");
 }
 
@@ -58,11 +61,24 @@ rc_relay_line_parse (const char *text, struct rc_relay_line *line)
   const char *rest = parse_port (text + strlen (PREFIX), &parsed.port);
   if (!rest || *rest++ != ' ')
     return false;
-  rest = parse_token (rest, parsed.token);
+  rest = parse_hex (rest, parsed.token, RC_TOKEN_SIZE);
+  if (!rest || *rest++ != ' ')
+    return false;
+  rest = parse_hex (rest, parsed.pin, RC_PIN_SIZE);
   if (!rest || strcmp (rest, "\n") != 0)
     return false;
   *line = parsed;
   return true;
+}
+
+/* Write the SIZE BYTES to TEXT in hexadecimal, with lowercase
+   letters, and return the number of characters.  */
+static int
+format_hex (char *text, const uint8_t *bytes, size_t size)
+{
+  for (size_t i = 0; i < size; i++)
+    sprintf (text + 2 * i, "%02x", bytes[i]);
+  return 2 * size;
 }
 
 /* Parse the port at TEXT into PORT.  Return the text after the port,
@@ -83,18 +99,18 @@ parse_port (const char *text, uint16_t *port)
   return text;
 }
 
-/* Parse the hexadecimal token at TEXT into TOKEN.  Return the text
-   after the token, or NULL if TEXT has no valid token.  */
+/* Parse SIZE bytes in hexadecimal at TEXT into BYTES.  Return the
+   text after them, or NULL if TEXT does not start with them.  */
 static const char *
-parse_token (const char *text, uint8_t *token)
+parse_hex (const char *text, uint8_t *bytes, size_t size)
 {
-  for (int i = 0; i < RC_TOKEN_SIZE; i++, text += 2)
+  for (size_t i = 0; i < size; i++, text += 2)
     {
       int high = hex_digit (text[0]);
       int low = high < 0 ? -1 : hex_digit (text[1]);
       if (low < 0)
 	return NULL;
-      token[i] = high << 4 | low;
+      bytes[i] = high << 4 | low;
     }
   return text;
 }

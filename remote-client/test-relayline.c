@@ -45,8 +45,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      a port with a zero before it, a token with capital letters, a
      short token, a long token, a text with no newline, a text with
      bytes after the newline, another version, a sign before the
-     port, a space before the text, a letter after f, and a null
-     byte.
+     port, a space before the text, a letter after f, a null byte, a
+     line with no pin, a short pin, a long pin, and a pin with capital
+     letters.
 
    The program runs TRIALS trials of each law from a seed that it gets
    from the clock.  With one argument, it runs the trial of that seed
@@ -62,6 +63,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <time.h>
 #include <unistd.h>
 
+#include "pin.h"
 #include "relayline.h"
 #include "token.h"
 
@@ -79,7 +81,7 @@ static bool new_example (void);
 static bool reject_example (void);
 static bool golden_example (void);
 static struct rc_relay_line random_line (uint64_t *);
-static void random_token (uint64_t *, uint8_t *);
+static void random_bytes (uint64_t *, uint8_t *, size_t);
 static bool same_line (const struct rc_relay_line *,
 		       const struct rc_relay_line *);
 static uint64_t random_below (uint64_t *, uint64_t);
@@ -156,9 +158,9 @@ static bool
 token_model_law (uint64_t *state)
 {
   uint8_t a[RC_TOKEN_SIZE], b[RC_TOKEN_SIZE];
-  random_token (state, a);
+  random_bytes (state, a, RC_TOKEN_SIZE);
   if (random_below (state, 2) == 0)
-    random_token (state, b);
+    random_bytes (state, b, RC_TOKEN_SIZE);
   else
     {
       memcpy (b, a, sizeof b);
@@ -208,7 +210,7 @@ static bool
 each_byte_law (uint64_t *state)
 {
   uint8_t a[RC_TOKEN_SIZE], b[RC_TOKEN_SIZE];
-  random_token (state, a);
+  random_bytes (state, a, RC_TOKEN_SIZE);
   if (!rc_token_equal (a, a))
     return false;
   for (int i = 0; i < RC_TOKEN_SIZE; i++)
@@ -288,20 +290,23 @@ golden_example (void)
     const char *text;
   } cases[] =
     {
-      { 1, "remote-display-relay 1 1 " },
-      { 80, "remote-display-relay 1 80 " },
-      { 65535, "remote-display-relay 1 65535 " },
+      { 1, "remote-display-relay 2 1 " },
+      { 80, "remote-display-relay 2 80 " },
+      { 65535, "remote-display-relay 2 65535 " },
     };
-  static const char token[]
-    = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n";
+  static const char rest[]
+    = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff "
+      "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100\n";
   for (size_t i = 0; i < sizeof cases / sizeof *cases; i++)
     {
       struct rc_relay_line line = { .port = cases[i].port }, parsed;
       for (int j = 0; j < RC_TOKEN_SIZE; j++)
 	line.token[j] = (j % 16) * 0x11;
+      for (int j = 0; j < RC_PIN_SIZE; j++)
+	line.pin[j] = 0xff - (j % 16) * 0x11;
       char text[RC_RELAY_LINE_SIZE], expected[2 * RC_RELAY_LINE_SIZE];
       rc_relay_line_format (&line, text);
-      snprintf (expected, sizeof expected, "%s%s", cases[i].text, token);
+      snprintf (expected, sizeof expected, "%s%s", cases[i].text, rest);
       if (strcmp (text, expected) != 0
 	  || !rc_relay_line_parse (expected, &parsed)
 	  || !same_line (&line, &parsed))
@@ -316,32 +321,44 @@ reject_example (void)
 {
 #define TOKEN \
   "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+#define PIN \
+  " ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
   static const char *const texts[] =
     {
-      "remote-display-relay 1 0 " TOKEN "\n",
-      "remote-display-relay 1 65536 " TOKEN "\n",
-      "remote-display-relay 1 080 " TOKEN "\n",
-      "remote-display-relay 1 80 "
-      "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF\n",
-      "remote-display-relay 1 80 00112233\n",
-      "remote-display-relay 1 80 " TOKEN "00\n",
-      "remote-display-relay 1 80 " TOKEN,
-      "remote-display-relay 1 80 " TOKEN "\nx",
+      "remote-display-relay 2 0 " TOKEN PIN "\n",
+      "remote-display-relay 2 65536 " TOKEN PIN "\n",
+      "remote-display-relay 2 080 " TOKEN PIN "\n",
+      "remote-display-relay 2 80 "
+      "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF"
+      PIN "\n",
+      "remote-display-relay 2 80 00112233" PIN "\n",
+      "remote-display-relay 2 80 " TOKEN "00" PIN "\n",
+      "remote-display-relay 2 80 " TOKEN PIN,
+      "remote-display-relay 2 80 " TOKEN PIN "\nx",
+      "remote-display-relay 1 80 " TOKEN PIN "\n",
+      "remote-display-relay 1 80 " TOKEN "\n",
+      "remote-display-relay 2 +80 " TOKEN PIN "\n",
+      " remote-display-relay 2 80 " TOKEN PIN "\n",
+      "remote-display-relay 2 80 "
+      "g0112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+      PIN "\n",
+      "remote-display-relay 2 80 " TOKEN PIN "\0\n",
       "remote-display-relay 2 80 " TOKEN "\n",
-      "remote-display-relay 1 +80 " TOKEN "\n",
-      " remote-display-relay 1 80 " TOKEN "\n",
-      "remote-display-relay 1 80 "
-      "g0112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n",
-      "remote-display-relay 1 80 " TOKEN "\0\n",
+      "remote-display-relay 2 80 " TOKEN " ffeeddcc\n",
+      "remote-display-relay 2 80 " TOKEN PIN "00\n",
+      "remote-display-relay 2 80 " TOKEN
+      " FFEEDDCCBBAA99887766554433221100FFEEDDCCBBAA99887766554433221100\n",
     };
   struct rc_relay_line line;
-  if (!rc_relay_line_parse ("remote-display-relay 1 80 " TOKEN "\n", &line)
-      || line.port != 80 || line.token[1] != 0x11)
+  if (!rc_relay_line_parse ("remote-display-relay 2 80 " TOKEN PIN "\n",
+			    &line)
+      || line.port != 80 || line.token[1] != 0x11 || line.pin[1] != 0xee)
     return false;
   for (size_t i = 0; i < sizeof texts / sizeof *texts; i++)
     if (rc_relay_line_parse (texts[i], &line))
       return false;
   return true;
+#undef PIN
 #undef TOKEN
 }
 
@@ -355,16 +372,17 @@ random_line (uint64_t *state)
   line.port = (random_below (state, 3) == 0
 	       ? edges[random_below (state, sizeof edges / sizeof *edges)]
 	       : 1 + random_below (state, 65535));
-  random_token (state, line.token);
+  random_bytes (state, line.token, RC_TOKEN_SIZE);
+  random_bytes (state, line.pin, RC_PIN_SIZE);
   return line;
 }
 
-/* Put a random token of STATE in TOKEN.  */
+/* Put SIZE random bytes of STATE in BYTES.  */
 static void
-random_token (uint64_t *state, uint8_t *token)
+random_bytes (uint64_t *state, uint8_t *bytes, size_t size)
 {
-  for (int i = 0; i < RC_TOKEN_SIZE; i++)
-    token[i] = random_below (state, 256);
+  for (size_t i = 0; i < size; i++)
+    bytes[i] = random_below (state, 256);
 }
 
 /* Return true if the lines A and B are equal.  */
@@ -372,7 +390,8 @@ static bool
 same_line (const struct rc_relay_line *a, const struct rc_relay_line *b)
 {
   return a->port == b->port
-    && memcmp (a->token, b->token, RC_TOKEN_SIZE) == 0;
+    && memcmp (a->token, b->token, RC_TOKEN_SIZE) == 0
+    && memcmp (a->pin, b->pin, RC_PIN_SIZE) == 0;
 }
 
 /* Return a random number from 0 to LIMIT - 1.  */

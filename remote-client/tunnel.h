@@ -17,15 +17,16 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* Until the relay uses TLS, the relay listens only on the loopback
-   address of its computer.  A tunnel of SSH forwards a local socket to
+/* Until the task of the listen address, the relay listens only on the
+   loopback address of its computer.  A tunnel of SSH forwards a local socket to
    the port of the relay.  The local socket is in a new directory that
    only the user can use.
 
    The tunnel is a connector of connector.h.  Each connect starts SSH
    again if it has stopped, for example after a change of network.
    Then the connect fails, and the window mode tries again later.  A
-   connect sends the token of the relay first.  */
+   connect makes a TLS session with the key of the pin of the relay,
+   and sends the token of the relay first.  */
 
 #ifndef REMOTE_CLIENT_TUNNEL_H
 #define REMOTE_CLIENT_TUNNEL_H
@@ -33,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdint.h>
 
 #include "relayline.h"
+#include "stream.h"
 
 /* The longest wait for the first connection, in milliseconds.  SSH can
    ask the user for a password in this time.  */
@@ -48,15 +50,15 @@ extern struct rc_tunnel *rc_tunnel_new (const char *ssh, const char *host,
 					const struct rc_relay_line *line,
 					const char *base);
 
-/* Return the first connection of TUNNEL to the relay.  Wait for SSH at
-   most RC_TUNNEL_FIRST_LIMIT milliseconds.  Return -1, and write a
+/* Return the first stream of TUNNEL to the relay.  Wait for SSH at
+   most RC_TUNNEL_FIRST_LIMIT milliseconds.  Return NULL, and write a
    message, if SSH stops two times, or does not connect in that
    time.  */
-extern int rc_tunnel_first_connect (struct rc_tunnel *tunnel);
+extern struct rc_stream *rc_tunnel_first_connect (struct rc_tunnel *tunnel);
 
 /* The connect function of the connector of the tunnel DATA.  Return a
-   new connection to the relay, or -1.  */
-extern int rc_tunnel_connect (void *data);
+   new stream to the relay, or NULL.  */
+extern struct rc_stream *rc_tunnel_connect (void *data);
 
 /* Stop SSH, remove the local socket and its directory, and free
    TUNNEL.  TUNNEL can be NULL.  */

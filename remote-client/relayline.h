@@ -21,12 +21,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    SSH gives the line to the client.  The line tells the client how to
    connect to the relay.  Its text is
 
-     remote-display-relay 1 PORT TOKEN
+     remote-display-relay 2 PORT TOKEN PIN
 
-   and a newline.  1 is the version of the line.  PORT is the port of
+   and a newline.  2 is the version of the line.  PORT is the port of
    the relay in decimal, from 1 to 65535, with no zero before it.
-   TOKEN is the token in hexadecimal, with lowercase letters.  Each
-   line has only one text, so a parse accepts only that text.  */
+   TOKEN is the token and PIN is the pin of pin.h, in hexadecimal, with
+   lowercase letters.  Each line has only one text, so a parse accepts
+   only that text.  */
 
 #ifndef REMOTE_CLIENT_RELAYLINE_H
 #define REMOTE_CLIENT_RELAYLINE_H
@@ -34,16 +35,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "pin.h"
 #include "token.h"
 
 /* The size of a buffer for the text of a line, with its null byte.  */
-enum { RC_RELAY_LINE_SIZE = 96 };
+enum { RC_RELAY_LINE_SIZE = 160 };
 
 /* What the client must know to connect to the relay.  */
 struct rc_relay_line
 {
   uint16_t port;
   uint8_t token[RC_TOKEN_SIZE];
+  uint8_t pin[RC_PIN_SIZE];
 };
 
 /* Write the text of LINE and a null byte to TEXT.  The port of LINE
