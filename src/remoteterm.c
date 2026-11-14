@@ -184,7 +184,11 @@ TERMINAL is a terminal, a frame, or the name of a session.  */)
   struct remote_display_info *dpyinfo = check_x_display_info (terminal);
   if (remote_terminal_has_frames (dpyinfo->terminal))
     error ("Session still has frames on it");
-  remote_delete_terminal (dpyinfo->terminal);
+  /* Fdelete_terminal runs `delete-terminal-functions', so that a
+     listener of the session stops, and then remote_delete_terminal.  */
+  Lisp_Object object;
+  XSETTERMINAL (object, dpyinfo->terminal);
+  Fdelete_terminal (object, Qt);
   return Qnil;
 }
 

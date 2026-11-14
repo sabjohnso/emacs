@@ -55,6 +55,66 @@ DISPLAY is the name of the first session."
 (cl-defmethod frame-creation-function (params &context (window-system remote))
   (x-create-frame-with-faces params))
 
+;;;; Listeners
+
+(declare-function remote-display-attach "remoteproc.c" (display process))
+
+(defvar remote-display--listeners nil
+  "The listeners of the sessions.
+Each element is (DISPLAY SERVER DIRECTORY): the name of a session, the
+server process of its socket, and the directory of the socket.")
+
+(defun remote-display-listen (display)
+  "Make a socket for the clients of the session DISPLAY, and return its name.
+The socket is in a new directory that only the user can use.  Each
+connection to the socket becomes the client of DISPLAY, and detaches
+the client before it.  When the session closes, the socket and its
+directory are deleted.  A session can have only one socket."
+  (when (assoc display remote-display--listeners)
+    (error "Session %s already has a socket" display))
+  (let* ((directory (remote-display--make-socket-directory))
+         (socket (expand-file-name "socket" directory))
+         (server (condition-case err
+                     (remote-display--start-server display socket)
+                   (error (delete-directory directory t)
+                          (signal (car err) (cdr err))))))
+    (push (list display server directory) remote-display--listeners)
+    socket))
+
+(defun remote-display--stop-listening (terminal)
+  "Delete the server of TERMINAL, its socket, and the directory of the socket.
+This function is in `delete-terminal-functions', so it runs for each
+terminal, also for a terminal with no socket."
+  (let ((listener (assoc (terminal-name terminal) remote-display--listeners)))
+    (when listener
+      (setq remote-display--listeners
+            (delq listener remote-display--listeners))
+      (pcase-let ((`(,_display ,server ,directory) listener))
+        (unwind-protect
+            (delete-process server)
+          (delete-directory directory t))))))
+
+(defun remote-display--make-socket-directory ()
+  "Make a new directory for a socket, and return its name.
+`make-temp-file' gives a new directory the mode 700, so only the user
+can use it."
+  (make-temp-file (expand-file-name "remote-display-"
+                                    (or (getenv "XDG_RUNTIME_DIR")
+                                        temporary-file-directory))
+                  t))
+
+(defun remote-display--start-server (display socket)
+  "Start a server at the file SOCKET, and return its process.
+Each connection to the server becomes the client of DISPLAY.  Emacs
+does not ask about the server when it exits."
+  (make-network-process
+   :name (format "remote-display-listen %s" display)
+   :server t :family 'local :service socket :noquery t
+   :log (lambda (_server connection _message)
+          (remote-display-attach display connection))))
+
+(add-hook 'delete-terminal-functions #'remote-display--stop-listening)
+
 (provide 'remote-win)
 (provide 'term/remote-win)
 

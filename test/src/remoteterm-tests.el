@@ -5913,6 +5913,238 @@ Return t if nothing failed."
                     'remoteterm-tests--input-reattach-case)
                    '(?z)))))
 
+(rd-daemon-deftest remoteterm-tests-listen-attaches-newest
+  "A connection to the socket of `remote-display-listen' becomes the client.
+Each new connection replaces the client before it: a ping on the
+newest connection gets a pong, and a ping on an older live connection
+does not.  An older connection can close first.  The directory of the
+socket has the mode 700.  After the session closes, the socket and its
+directory do not exist, and a new session with the same name can
+listen."
+  (let ((rd-gen-trials 30))
+    (rd-gen-for-all
+     (lambda ()
+       (cl-loop repeat (rd-gen-integer 1 4) collect (rd-gen-random 2)))
+     (lambda (closes)
+       (let ((result (remoteterm-tests--listen-case closes)))
+         (should (equal (plist-get result :pongs)
+                        (cl-loop for i from 1 to (length closes)
+                                 collect (list i nil))))
+         (should (= (plist-get result :mode) #o700))
+         (should-not (plist-get result :left-after-close)))))))
+
+(defun remoteterm-tests--listen-case (closes)
+  "Connect to the socket of a listening session, once for each of CLOSES.
+An element of CLOSES that is 1 closes the newest connection before the
+new connection.  Return a plist.  :pongs has (SERIAL OLD-PONGS) for
+each connection: SERIAL is the serial of the pong of the new
+connection, and OLD-PONGS is the list of the pongs on the older live
+connections.  The older connections get their pings after the pong of
+the new connection, because that pong shows that the new connection
+is attached.  :mode is the mode of the directory of the socket.
+:left-after-close lists what is left after the session closes: the
+socket, its directory, or an error of a new listen with the same
+name."
+  (let ((socket nil) (mode nil) (pongs nil) (live nil) (all nil))
+    (unwind-protect
+        (progn
+          (remoteterm-tests--with-display "remote-listen"
+            (setq socket (remote-display-listen "remote-listen"))
+            (setq mode (file-modes (file-name-directory socket)))
+            (cl-loop
+             for close in closes for serial from 1 do
+             (when (and live (= close 1))
+               (delete-process (car (pop live))))
+             (let ((new (remoteterm-tests--connect socket)))
+               (push new all)
+               (remoteterm-tests--reset-and-ping new serial)
+               (let ((pong (remoteterm-tests--pong-of (car new) (cdr new))))
+                 (dolist (old live)
+                   (remoteterm-tests--reset-and-ping old 100))
+                 (when live
+                   (accept-process-output nil 0.1))
+                 (push (list pong
+                             (delq nil (mapcar (lambda (old)
+                                                 (remoteterm-tests--read-pong
+                                                  (cdr old)))
+                                               live)))
+                       pongs))
+               (push new live))))
+          (list :pongs (nreverse pongs) :mode mode
+                :left-after-close
+                (delq nil (list (file-exists-p socket)
+                                (file-exists-p (file-name-directory socket))
+                                (remoteterm-tests--listen-error
+                                 "remote-listen")))))
+      (dolist (connection all)
+        (delete-process (car connection))))))
+
+(defun remoteterm-tests--connect (socket)
+  "Connect to SOCKET, and return (PROCESS . RECEIVED).
+RECEIVED is a list whose car has the strings that PROCESS got."
+  (let ((received (list nil)))
+    (cons (make-network-process
+           :name "rd-listen" :family 'local :service socket :coding 'binary
+           :filter (lambda (_process string)
+                     (push string (car received))))
+          received)))
+
+(defun remoteterm-tests--listen-error (display)
+  "Open DISPLAY, listen, and close it.  Return the error, or nil."
+  (condition-case err
+      (remoteterm-tests--with-display display
+        (remote-display-listen display)
+        nil)
+    (error err)))
+
+(defun remoteterm-tests--listen-socket-works-p (socket)
+  "Return non-nil if a ping on a new connection to SOCKET gets its pong."
+  (let ((connection (remoteterm-tests--connect socket)))
+    (unwind-protect
+        (progn
+          (remoteterm-tests--reset-and-ping connection 7)
+          (eql (remoteterm-tests--pong-of (car connection) (cdr connection))
+               7))
+      (delete-process (car connection)))))
+
+(ert-deftest remoteterm-tests-listen-twice ()
+  "A second socket for one session is an error, and the first one works."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--listen-twice-case)
+                   '(t t)))))
+
+(defun remoteterm-tests--listen-twice-case ()
+  "Listen two times on one session.
+Return (ERROR WORKS): ERROR is t if the second listen signals an
+error, and WORKS is t if the first socket still works."
+  (remoteterm-tests--with-display "remote-listen-a"
+    (let* ((socket (remote-display-listen "remote-listen-a"))
+           (error (condition-case nil
+                      (progn (remote-display-listen "remote-listen-a") nil)
+                    (error t))))
+      (list error (and (remoteterm-tests--listen-socket-works-p socket) t)))))
+
+(ert-deftest remoteterm-tests-listen-with-frames ()
+  "A session with frames does not close, and keeps its socket."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (remoteterm-tests--daemon-call
+             'remoteterm-tests--listen-with-frames-case))))
+
+(defun remoteterm-tests--listen-with-frames-case ()
+  "Return t if the socket of a session with a frame works after a close."
+  (remoteterm-tests--with-display "remote-listen-a"
+    (let ((socket (remote-display-listen "remote-listen-a")))
+      (remoteterm-tests--with-frame _frame "remote-listen-a" nil
+        (ignore-errors (x-close-connection "remote-listen-a"))
+        (and (remoteterm-tests--listen-socket-works-p socket) t)))))
+
+(ert-deftest remoteterm-tests-listen-two-sessions ()
+  "Two sessions have sockets in different directories.
+With no XDG_RUNTIME_DIR, the directory is in `temporary-file-directory'."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (remoteterm-tests--daemon-call
+             'remoteterm-tests--listen-two-sessions-case))))
+
+(defun remoteterm-tests--listen-two-sessions-case ()
+  "Return t if two sessions have sockets in different directories.
+The second session listens with no XDG_RUNTIME_DIR, so its directory
+must be in `temporary-file-directory'."
+  (remoteterm-tests--with-display "remote-listen-a"
+    (remoteterm-tests--with-display "remote-listen-b"
+      (let ((a (file-name-directory
+                (remote-display-listen "remote-listen-a")))
+            (b (file-name-directory
+                (let ((process-environment
+                       (cons "XDG_RUNTIME_DIR" process-environment)))
+                  (remote-display-listen "remote-listen-b")))))
+        (and (not (equal a b))
+             (file-in-directory-p b temporary-file-directory))))))
+
+(ert-deftest remoteterm-tests-listen-start-fails ()
+  "When the server cannot start, the listen signals an error.
+The directory of the socket is deleted, and the session can listen
+later."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--listen-start-fails-case)
+                   '(t nil nil)))))
+
+(defun remoteterm-tests--listen-start-fails-case ()
+  "Listen with a socket name that is longer than the limit of the system.
+Return (ERROR LEFT LATER-ERROR): ERROR is t if the listen signals an
+error, LEFT is the list of the directories that are left, and
+LATER-ERROR is the error of a later listen with a short name."
+  (let* ((long (make-temp-file
+                (expand-file-name (make-string 120 ?d)
+                                  temporary-file-directory)
+                t)))
+    (unwind-protect
+        (remoteterm-tests--with-display "remote-listen-c"
+          (let ((error (let ((process-environment
+                              (cons (concat "XDG_RUNTIME_DIR=" long)
+                                    process-environment)))
+                         (condition-case nil
+                             (progn (remote-display-listen "remote-listen-c")
+                                    nil)
+                           (error t)))))
+            (list error
+                  (directory-files long nil "\\`remote-display-")
+                  (condition-case err
+                      (progn (remote-display-listen "remote-listen-c") nil)
+                    (error err)))))
+      (delete-directory long t))))
+
+(ert-deftest remoteterm-tests-listen-no-exit-query ()
+  "Emacs does not ask about the server of a socket when it exits."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--listen-query-case)
+                   '(nil)))))
+
+(defun remoteterm-tests--listen-query-case ()
+  "Return the exit query flags of the servers of a listening session."
+  (remoteterm-tests--with-display "remote-listen-a"
+    (remote-display-listen "remote-listen-a")
+    (mapcar #'process-query-on-exit-flag
+            (seq-filter (lambda (process)
+                          (equal (process-name process)
+                                 "remote-display-listen remote-listen-a"))
+                        (process-list)))))
+
+(defun remoteterm-tests--reset-and-ping (connection serial)
+  "Forget the strings that CONNECTION got, and send a ping with SERIAL.
+CONNECTION is (PROCESS . RECEIVED), as `remoteterm-tests--connect'
+returns."
+  (setcar (cdr connection) nil)
+  (process-send-string (car connection)
+                       (remote-display--encode (list 'ping :serial serial))))
+
+(defun remoteterm-tests--pong-of (process received)
+  "Return the serial of the first pong that PROCESS gets.
+RECEIVED is a list whose car has the strings that PROCESS got.  Return
+nil if no pong comes in 10 seconds."
+  (let ((end (+ (float-time) 10)))
+    (while (and (not (remoteterm-tests--read-pong received))
+                (< (float-time) end))
+      (accept-process-output process 0.05))
+    (remoteterm-tests--read-pong received)))
+
+(defun remoteterm-tests--read-pong (received)
+  "Return the serial of the first pong in RECEIVED, or nil.
+RECEIVED is a list whose car has the strings that a process got."
+  (let ((pong (seq-find
+               (lambda (message) (eq (car message) 'pong))
+               (remoteterm-tests--all-messages
+                (string-to-unibyte
+                 (apply #'concat (reverse (car received))))))))
+    (and pong (plist-get (cdr pong) :serial))))
+
 (rd-daemon-deftest remoteterm-tests-ping-gives-pong
   "The server answers each ping of its client with a pong of the same serial.
 The pongs come in the order of the pings, and the chunks of the bytes
