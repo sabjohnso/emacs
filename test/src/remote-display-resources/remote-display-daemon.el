@@ -170,12 +170,16 @@ emacsclient stops its output at a null byte, and base64 has none."
 
 (defun rd-daemon--start (socket)
   "Start a daemon with the server SOCKET, and return its process.
-Wait until the daemon accepts connections."
-  (let ((process (start-process "rd-daemon" " *rd-daemon*"
-                                (rd-daemon--program "src/emacs")
-                                "-Q" (concat "--fg-daemon=" socket)
-                                "--eval"
-                                (prin1-to-string (rd-daemon--setup-form)))))
+Wait until the daemon accepts connections.  The daemon gets pipes and
+not a terminal: a terminal holds only a few kilobytes, so a long
+report of a crash, for example of AddressSanitizer, can block the
+daemon while the test waits for it."
+  (let ((process (let ((process-connection-type nil))
+                   (start-process "rd-daemon" " *rd-daemon*"
+                                  (rd-daemon--program "src/emacs")
+                                  "-Q" (concat "--fg-daemon=" socket)
+                                  "--eval"
+                                  (prin1-to-string (rd-daemon--setup-form))))))
     (with-timeout (rd-daemon-timeout
                    (delete-process process)
                    (error "The daemon did not start"))

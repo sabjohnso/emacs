@@ -5219,6 +5219,12 @@ STEPS is as for `remoteterm-tests--run-frame-operations'."
   "Return the resident memory of this process in kilobytes, or nil."
   (alist-get 'rss (process-attributes (emacs-pid))))
 
+(defun remoteterm-tests--address-sanitizer-p ()
+  "Return non-nil if this Emacs has AddressSanitizer.
+AddressSanitizer keeps freed memory in a quarantine of 256 MB by
+default, so the resident memory grows with no leak."
+  (string-match-p "-fsanitize=address" system-configuration-options))
+
 (defun remoteterm-tests--memory-growth (cycle)
   "Return the kilobytes that the process gains from calls of CYCLE.
 First call CYCLE so that the heap reaches a steady size."
@@ -5237,6 +5243,7 @@ First call CYCLE so that the heap reaches a steady size."
   "The memory of a deleted frame goes back to the process."
   (skip-unless (featurep 'remote-test))
   (skip-unless (remoteterm-tests--resident-memory))
+  (skip-when (remoteterm-tests--address-sanitizer-p))
   (remoteterm-tests--with-display "remote-memory"
     (remoteterm-tests--with-frame kept "remote-memory" nil
       (should (< (remoteterm-tests--memory-growth
@@ -5250,6 +5257,7 @@ First call CYCLE so that the heap reaches a steady size."
   "The memory of a frame that fails after its faces goes back to the process."
   (skip-unless (featurep 'remote-test))
   (skip-unless (remoteterm-tests--resident-memory))
+  (skip-when (remoteterm-tests--address-sanitizer-p))
   (remoteterm-tests--with-display "remote-memory"
     (remoteterm-tests--with-frame kept "remote-memory" nil
       (should (< (remoteterm-tests--memory-growth
@@ -7274,6 +7282,38 @@ MINIMUM is the size of the frame after a resize to 1 by 1 pixel."
                        (plist-get defined :height))
                  (remoteterm-tests--send-resizes client-side frame
                                                  '((frame 1 1))))))))))
+
+(ert-deftest remoteterm-tests-resize-tiny ()
+  "A resize below the minimum size gives the windows their minimum size.
+Thus the frame has a text column and a line.  This is the regression
+test of a frame with no column, which made redisplay write past the
+end of its mode line buffer."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--resize-tiny-case)
+                   '(t t t t)))))
+
+(defun remoteterm-tests--resize-tiny-case ()
+  "Resize a frame to 1 by 1 pixel.
+Return a list of four values:
+ - t if the root window has at least the minimum width of the windows
+   of the frame, from `frame-windows-min-size'.
+ - t if the root window and the minibuffer window have at least the
+   minimum height of the windows of the frame.
+ - t if the frame has a text column.
+ - t if the frame has a text line."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (remoteterm-tests--send-resizes client-side frame '((frame 1 1)))
+     (let ((root (frame-root-window frame)))
+       (list (>= (window-pixel-width root)
+                 (frame-windows-min-size frame t nil t))
+             (>= (+ (window-pixel-height root)
+                    (window-pixel-height (minibuffer-window frame)))
+                 (frame-windows-min-size frame nil nil t))
+             (> (frame-width frame) 0)
+             (> (frame-height frame) 0))))))
 
 (rd-daemon-deftest remoteterm-tests-resize-events
   "After resize messages, the frame has the size of the last valid

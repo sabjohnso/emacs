@@ -82,6 +82,7 @@ static void remote_focus_input (struct remote_display_info *,
 				const struct rd_message *);
 static void remote_resize_input (struct remote_display_info *,
 				 const struct rd_message *);
+static int remote_windows_min_size (struct frame *, Lisp_Object);
 static void remote_close_input (struct remote_display_info *,
 				const struct rd_message *);
 static void remote_set_focus_frame (struct remote_display_info *,
@@ -205,7 +206,11 @@ remote_focus_input (struct remote_display_info *dpyinfo,
 
 /* Change the size of the frame of the resize MESSAGE of DPYINFO at the
    next redisplay.  A size of 0 or above REMOTE_FRAME_PIXEL_LIMIT has
-   no effect.  */
+   no effect.  A smaller size than the minimum size of the windows of
+   the frame gives that minimum size, as the size hints of X do: a
+   frame with no text column makes redisplay write past the end of its
+   mode line buffer.  A remote frame has no internal border and no
+   tool bar or tab bar height, so the windows fill the frame.  */
 static void
 remote_resize_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
@@ -215,7 +220,26 @@ remote_resize_input (struct remote_display_info *dpyinfo,
   if (!f || !remote_frame_pixels_p (resize->width)
       || !remote_frame_pixels_p (resize->height))
     return;
-  change_frame_size (f, resize->width, resize->height, false, true, false);
+  change_frame_size (f, max (resize->width,
+			      remote_windows_min_size (f, Qt)),
+		     max (resize->height,
+			  remote_windows_min_size (f, Qnil)),
+		     false, true, false);
+}
+
+/* Return the minimum size of the windows of F in pixels: the width if
+   HORIZONTAL is non-nil, and else the height.  Return 0 if the value
+   is not a fixnum.  window.el defines `frame-windows-min-size'; the C
+   function of that name is a stub.  The filter of the connection gives
+   the input, so Lisp can run.  */
+static int
+remote_windows_min_size (struct frame *f, Lisp_Object horizontal)
+{
+  Lisp_Object frame;
+  XSETFRAME (frame, f);
+  Lisp_Object size = calln (Qframe_windows_min_size, frame, horizontal,
+			    Qnil, Qt);
+  return RANGED_FIXNUMP (0, size, INT_MAX / 2) ? XFIXNUM (size) : 0;
 }
 
 /* Store the delete-frame event of the frame of the close-frame MESSAGE
