@@ -75,7 +75,7 @@ session can have only one socket."
   (when (assoc display remote-display--listeners)
     (error "Session %s already has a socket" display))
   (let* ((directory (remote-display--make-socket-directory))
-         (socket (expand-file-name "socket" directory))
+         (socket (remote-display--socket-in directory))
          (server (condition-case err
                      (remote-display--start-server display socket)
                    (error (delete-directory directory t)
@@ -165,6 +165,27 @@ the initial frame is selected."
     (x-open-connection display)
     (select-frame (make-frame-on-display display))
     (remote-display-listen display)))
+
+(defun remote-display-resume (display)
+  "Return the name of the socket of the open session DISPLAY.
+A new client of the socket shows the frames of the session again.  The
+command \"remote-client --ssh HOST --session=DISPLAY\" calls this
+function through emacsclient on HOST.  Signal an error if DISPLAY is
+not an open session with a socket."
+  (let ((listener (assoc display remote-display--listeners)))
+    (unless listener
+      (error "No open session %s" display))
+    (remote-display--listener-socket listener)))
+
+(defun remote-display--listener-socket (listener)
+  "Return the name of the socket of LISTENER.
+LISTENER is an element of `remote-display--listeners'."
+  (pcase-let ((`(,_display ,_server ,directory) listener))
+    (remote-display--socket-in directory)))
+
+(defun remote-display--socket-in (directory)
+  "Return the name of the socket of a session in DIRECTORY."
+  (expand-file-name "socket" directory))
 
 (defun remote-display--new-name ()
   "Return the name of a session that is not open."

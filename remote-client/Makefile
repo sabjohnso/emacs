@@ -206,7 +206,7 @@ flow.o test-flow.o relay.o: flow.h
 pending.o test-pending.o relay.o test-relay.o: pending.h token.h
 unixsocket.o client.o relay.o test-unixsocket.o: unixsocket.h
 client.o: connector.h
-sshargs.o test-sshargs.o bootstrap.o: sshargs.h listenspec.h
+sshargs.o test-sshargs.o bootstrap.o client.o: sshargs.h listenspec.h
 bootstrap.o client.o: bootstrap.h relayline.h token.h listenspec.h sshconfig.h
 direct.o client.o: direct.h relayline.h token.h stream.h
 clock.o relay.o bootstrap.o: clock.h

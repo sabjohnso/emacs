@@ -38,13 +38,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 enum { RC_BOOTSTRAP_LIMIT = 120000 };
 
 /* Run the bootstrap on HOST with the program SSH, and put the line of
-   the relay in LINE.  With SPEC, the relay listens at the place of
-   SPEC.  With NULL, it listens on the server address of
-   $SSH_CONNECTION on HOST.  Return false on an error, and write a
-   message to the standard error output.  */
+   the relay in LINE.  With SESSION NULL, the bootstrap starts a new
+   session; else it resumes the open session SESSION.  With SPEC, the
+   relay listens at the place of SPEC.  With NULL, it listens on the
+   server address of $SSH_CONNECTION on HOST.  Return false on an
+   error, and write a message to the standard error output.  */
 extern bool rc_bootstrap (const char *ssh, const char *host,
 			  const struct rc_listen_spec *spec,
-			  struct rc_relay_line *line);
+			  const char *session, struct rc_relay_line *line);
 
 /* Run "ssh -G HOST" with the program SSH, and put the host name that
    SSH connects to in NAME.  Wait at most RC_BOOTSTRAP_LIMIT

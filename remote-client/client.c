@@ -19,7 +19,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* Usage: remote-client [--render-to=FILE.png | --timeout=MS] SOCKET
 	  remote-client [--timeout=MS] [--ssh-command=PROGRAM]
-			[--listen=SPEC] [--connect=ADDRESS] --ssh HOST
+			[--listen=SPEC] [--connect=ADDRESS] [--session=NAME]
+			--ssh HOST
 	  remote-client --relay [--listen=SPEC] SOCKET
 
    The program connects to the Unix-domain socket SOCKET of a session,
@@ -50,6 +51,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    the place of the listen spec SPEC of listenspec.h, or on the server
    address of SSH by default.  The program connects to the relay at
    ADDRESS, or by default at the host name that "ssh -G HOST" gives.
+   With --session=NAME, the program resumes the open session NAME on
+   HOST, and does not start a new session.  NAME has letters, digits,
+   and "-" characters, as sshargs.h says.
 
    With --relay, the program is the relay of relay.h for the session
    socket SOCKET.  It opens no window.  It listens at the place of the
@@ -87,6 +91,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "reader.h"
 #include "relay.h"
 #include "render.h"
+#include "sshargs.h"
 #include "stream.h"
 #include "unixsocket.h"
 #include "view.h"
@@ -115,7 +120,7 @@ enum read_result
    or NULL.  HOST is the host of --ssh, or NULL; then SOCKET is the
    session socket.  SSH is the program of --ssh-command.  LISTEN is
    the spec of --listen, if HAS_LISTEN.  CONNECT is the address of
-   --connect, or NULL.  */
+   --connect, or NULL.  SESSION is the name of --session, or NULL.  */
 struct options
 {
   const char *png;
@@ -126,6 +131,7 @@ struct options
   bool has_listen;
   struct rc_listen_spec listen;
   const char *connect;
+  const char *session;
 };
 
 /* The state of the mode --render-to.  */
@@ -311,10 +317,21 @@ parse_options (int argc, char **argv)
       }
     else if (strncmp (argv[arg], "--connect=", 10) == 0)
       options.connect = argv[arg] + 10;
+    else if (strncmp (argv[arg], "--session=", 10) == 0)
+      {
+	options.session = argv[arg] + 10;
+	if (!rc_ssh_session_name_p (options.session))
+	  {
+	    fprintf (stderr, "remote-client: %s: not a name of a session\n",
+		     options.session);
+	    exit (1);
+	  }
+      }
     else
       usage ();
   if (options.host ? arg != argc || options.png
-      : (arg != argc - 1 || options.has_listen || options.connect))
+      : (arg != argc - 1 || options.has_listen || options.connect
+	 || options.session))
     usage ();
   options.socket = options.host ? NULL : argv[arg];
   return options;
@@ -349,7 +366,8 @@ open_ssh_session (const struct options *options,
     return NULL;
   struct rc_relay_line line;
   if (!rc_bootstrap (options->ssh, options->host,
-		     options->has_listen ? &options->listen : NULL, &line))
+		     options->has_listen ? &options->listen : NULL,
+		     options->session, &line))
     return NULL;
   *direct = rc_direct_new (address, &line);
   if (!*direct)
@@ -837,7 +855,8 @@ usage (void)
 	   "--timeout=MS] SOCKET\n"
 	   "       remote-client [--timeout=MS] [--ssh-command=PROGRAM]\n"
 	   "                     [--listen=SPEC] [--connect=ADDRESS] "
-	   "--ssh HOST\n"
+	   "[--session=NAME]\n"
+	   "                     --ssh HOST\n"
 	   "       remote-client --relay [--listen=SPEC] SOCKET\n");
   exit (1);
 }

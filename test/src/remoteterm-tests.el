@@ -6521,7 +6521,10 @@ LATER-ERROR is the error of a later listen with a short name."
   "`remote-display-start' starts a new session with a frame and a socket.
 Each call gives a session with a new name.  The directory of the
 socket has the mode 700.  A client of the socket gets a define-frame
-message for the frame of its session."
+message for the frame of its session.  The name of the session has 1
+to 32 ASCII letters, digits, and \"-\" characters, so the option
+--session of remote-client accepts it (`rc_ssh_session_name_p' in
+remote-client/sshargs.c)."
   (let ((rd-gen-trials 5))
     (rd-gen-for-all
      (lambda () (rd-gen-integer 1 3))
@@ -6534,14 +6537,24 @@ message for the frame of its session."
                     count))
          (dolist (result results)
            (should (= (plist-get result :mode) #o700))
-           (should (plist-get result :frame-defined))))))))
+           (should (plist-get result :frame-defined))
+           (should (string-match-p "\\`[A-Za-z0-9-]\\{1,32\\}\\'"
+                                   (plist-get result :display)))))))))
 
 (defun remoteterm-tests--start-case (count)
   "Call `remote-display-start' COUNT times, and connect to each socket.
 Return a plist for each new session: :socket is the socket, :mode is
-the mode of its directory, and :frame-defined is non-nil if the client
-got a define-frame message.  Then delete the new sessions."
-  (let ((before (x-display-list)) (connections nil))
+the mode of its directory, :frame-defined is non-nil if the client got
+a define-frame message, and :display is the name of the session.  Then
+delete the new sessions."
+  (let* ((before (x-display-list))
+         (connections nil)
+         (sockets (cl-loop repeat count
+                           collect (let* ((known (x-display-list))
+                                          (socket (remote-display-start)))
+                                     (cons (car (seq-difference
+                                                 (x-display-list) known))
+                                           socket)))))
     (unwind-protect
         (mapcar
          (lambda (socket)
@@ -6550,8 +6563,9 @@ got a define-frame message.  Then delete the new sessions."
              (list :socket socket
                    :mode (file-modes (file-name-directory socket))
                    :frame-defined (remoteterm-tests--frame-defined-p
-                                   connection))))
-         (cl-loop repeat count collect (remote-display-start)))
+                                   connection)
+                   :display (car (rassoc socket sockets)))))
+         (mapcar #'cdr sockets))
       (dolist (connection connections)
         (delete-process (car connection)))
       (dolist (display (seq-difference (x-display-list) before))
@@ -6559,6 +6573,53 @@ got a define-frame message.  Then delete the new sessions."
           (delete-frame frame t))
         (when (remoteterm-tests--terminal display)
           (x-close-connection display))))))
+
+(ert-deftest remoteterm-tests-resume-session ()
+  "`remote-display-resume' gives the socket of an open session.
+A new client of that socket gets the frame of the session again.  The
+name of a session that is not open is an error."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--resume-case)
+                   '(:same t :defined t
+                     :unknown (error "No open session remote-not-open"))))))
+
+(defun remoteterm-tests--resume-case ()
+  "Start two sessions, end the client of the first, and resume it.
+Return a plist.  :same is t if `remote-display-resume' gives the socket
+of `remote-display-start' for each session.  :defined is t if a new
+client of the socket of the first session gets a define-frame message.
+:unknown is the error of a resume of a session that is not open."
+  (let* ((before (x-display-list))
+         (socket (remote-display-start))
+         (display (car (seq-difference (x-display-list) before)))
+         (other-socket (remote-display-start))
+         (other (car (seq-difference (x-display-list)
+                                     (cons display before))))
+         (connections nil))
+    (unwind-protect
+        (let ((first (remoteterm-tests--connect socket)))
+          (push first connections)
+          (remoteterm-tests--frame-defined-p first)
+          (delete-process (car first))
+          (let* ((resumed (remote-display-resume display))
+                 (second (remoteterm-tests--connect resumed)))
+            (push second connections)
+            (list :same (and (equal resumed socket)
+                             (equal (remote-display-resume other)
+                                    other-socket))
+                  :defined (and (remoteterm-tests--frame-defined-p second) t)
+                  :unknown (condition-case err
+                               (remote-display-resume "remote-not-open")
+                             (error err)))))
+      (dolist (connection connections)
+        (delete-process (car connection)))
+      (dolist (session (list display other))
+        (dolist (frame (frames-on-display-list session))
+          (delete-frame frame t))
+        (when (remoteterm-tests--terminal session)
+          (x-close-connection session))))))
 
 (defun remoteterm-tests--frame-defined-p (connection)
   "Return non-nil if CONNECTION gets a define-frame message in 10 seconds.

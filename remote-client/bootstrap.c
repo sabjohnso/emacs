@@ -38,11 +38,17 @@ static bool read_output (int, bool, char *, size_t);
 
 bool
 rc_bootstrap (const char *ssh, const char *host,
-	      const struct rc_listen_spec *spec, struct rc_relay_line *line)
+	      const struct rc_listen_spec *spec, const char *session,
+	      struct rc_relay_line *line)
 {
   char command[RC_SSH_COMMAND_SIZE];
   const char *args[RC_SSH_ARGS_SIZE];
-  rc_ssh_remote_command (spec, command);
+  if (!rc_ssh_remote_command (spec, session, command))
+    {
+      fprintf (stderr, "remote-client: %s: not a name of a session\n",
+	       session);
+      return false;
+    }
   rc_ssh_bootstrap_args (ssh, host, command, args);
   char text[RC_RELAY_LINE_SIZE];
   if (read_ssh (ssh, args, true, text, sizeof text)

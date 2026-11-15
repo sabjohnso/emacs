@@ -29,20 +29,37 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_SSHARGS_H
 #define REMOTE_CLIENT_SSHARGS_H
 
+#include <stdbool.h>
+
 #include "listenspec.h"
 
 /* The most arguments, with the null pointer at the end.  */
 enum { RC_SSH_ARGS_SIZE = 16 };
 
+/* The longest name of a session, with no null byte.  */
+enum { RC_SESSION_NAME_MAX = 32 };
+
 /* The size of a buffer for the remote command, with its null byte.  */
-enum { RC_SSH_COMMAND_SIZE = 96 + sizeof " --listen=" + RC_LISTEN_TEXT_SIZE };
+enum { RC_SSH_COMMAND_SIZE = (128 + sizeof " --listen="
+			      + RC_LISTEN_TEXT_SIZE + RC_SESSION_NAME_MAX) };
+
+/* Return true if NAME can be the name of a session: 1 to
+   RC_SESSION_NAME_MAX letters, digits, and "-" characters.  Such a
+   name is safe in single quotes of the shell and in a string of
+   Lisp.  */
+extern bool rc_ssh_session_name_p (const char *name);
 
 /* Write the remote command of the bootstrap and a null byte to
-   COMMAND.  The command starts a session in the Emacs server of HOST,
-   and gives its socket to the relay.  With SPEC, the relay listens at
-   the place of SPEC.  With NULL, it listens on the server address of
-   $SSH_CONNECTION.  The format of SPEC is safe in a shell.  */
-extern void rc_ssh_remote_command (const struct rc_listen_spec *spec,
+   COMMAND, and return true.  With SESSION NULL, the command starts a
+   new session in the Emacs server of HOST.  Else it resumes the open
+   session SESSION.  The command gives the socket of the session to the
+   relay.  With SPEC, the relay listens at the place of SPEC.  With
+   NULL, it listens on the server address of $SSH_CONNECTION.  The
+   format of SPEC is safe in a shell.  Return false, and write nothing,
+   if rc_ssh_session_name_p does not accept SESSION: the command must
+   not get an unsafe name, also if a caller did not check it.  */
+extern bool rc_ssh_remote_command (const struct rc_listen_spec *spec,
+				   const char *session,
 				   char command[RC_SSH_COMMAND_SIZE]);
 
 /* Put the arguments of the bootstrap on HOST with the program SSH and

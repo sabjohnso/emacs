@@ -29,11 +29,26 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      "--relay".  The command fits in RC_SSH_COMMAND_SIZE bytes.  The
      word after "--listen=" parses to the spec, so the relay gets the
      spec of the client.
+   - Session: the remote command with the name of a session is the
+     remote command with no name, with (remote-display-resume "NAME")
+     in the place of (remote-display-start).  It fits in
+     RC_SSH_COMMAND_SIZE bytes, also with a spec.
+   - Name: rc_ssh_session_name_p accepts a text if and only if it has 1
+     to RC_SESSION_NAME_MAX ASCII letters, digits, and "-" characters.
+     Such a name has no quote, backslash, "$", "%", or space, so it is
+     safe in single quotes of the shell and in a string of Lisp.
+     rc_ssh_remote_command accepts the same names, and refuses each
+     other text.  Each name of random_name passes.
 
    The examples:
 
    - Golden: the arguments of a known host, the remote command with no
-     spec, and the remote command with a known spec.
+     spec, the remote command with a known spec, and the remote command
+     with a known session.
+   - Bytes: each byte from 1 to 255 alone, and at the start, in the
+     middle, and at the end of a valid name, gives a valid name only if
+     it is an ASCII letter, a digit, or "-".  Names of exactly 0, 1,
+     RC_SESSION_NAME_MAX, and RC_SESSION_NAME_MAX + 1 characters.
 
    The program runs TRIALS trials of each law from a seed that it gets
    from the clock.  With one argument, it runs the trial of that seed
@@ -72,6 +87,12 @@ static const char *run_trial (uint64_t);
 static bool shape_law (uint64_t *);
 static bool host_law (uint64_t *);
 static bool listen_law (uint64_t *);
+static bool session_law (uint64_t *);
+static bool name_law (uint64_t *);
+static void random_name (uint64_t *, char *);
+static bool name_model (const char *);
+static bool name_accepted_p (const char *);
+static bool bytes_example (void);
 static bool golden_example (void);
 static bool same_args (const char *const *, const char *const *);
 static struct ssh_case random_case (uint64_t *);
@@ -91,14 +112,17 @@ static const struct
     { "shape", shape_law },
     { "host", host_law },
     { "listen", listen_law },
+    { "session", session_law },
+    { "name", name_law },
   };
 
 int
 main (int argc, char **argv)
 {
-  if (!golden_example ())
+  if (!golden_example () || !bytes_example ())
     {
-      fprintf (stderr, "test-sshargs: the golden example failed\n");
+      fprintf (stderr, "test-sshargs: the golden or the bytes example "
+	       "failed\n");
       return 1;
     }
   if (argc == 2)
@@ -138,7 +162,7 @@ shape_law (uint64_t *state)
   struct ssh_case c = random_case (state);
   const char *args[RC_SSH_ARGS_SIZE];
   char command[RC_SSH_COMMAND_SIZE];
-  rc_ssh_remote_command (&c.spec, command);
+  rc_ssh_remote_command (&c.spec, NULL, command);
   int count = rc_ssh_bootstrap_args ("ssh-x", c.host, command, args);
   if (count != argument_count (args) || count >= RC_SSH_ARGS_SIZE
       || strcmp (args[0], "ssh-x") != 0)
@@ -155,7 +179,8 @@ host_law (uint64_t *state)
   struct ssh_case c = random_case (state);
   const char *args[RC_SSH_ARGS_SIZE];
   char command[RC_SSH_COMMAND_SIZE];
-  rc_ssh_remote_command (random_below (state, 2) ? &c.spec : NULL, command);
+  rc_ssh_remote_command (random_below (state, 2) ? &c.spec : NULL, NULL,
+			 command);
   int count = rc_ssh_bootstrap_args ("ssh", c.host, command, args);
   if (strcmp (args[count - 3], "--") != 0
       || strcmp (args[count - 2], c.host) != 0
@@ -176,8 +201,8 @@ listen_law (uint64_t *state)
   char command[RC_SSH_COMMAND_SIZE + 1], plain[RC_SSH_COMMAND_SIZE];
   char format[RC_LISTEN_TEXT_SIZE], expected[2 * RC_SSH_COMMAND_SIZE];
   memset (command, 'x', sizeof command);
-  rc_ssh_remote_command (&c.spec, command);
-  rc_ssh_remote_command (NULL, plain);
+  rc_ssh_remote_command (&c.spec, NULL, command);
+  rc_ssh_remote_command (NULL, NULL, plain);
   rc_listen_spec_format (&c.spec, format);
   static const char relay[] = "--relay";
   const char *after = strstr (plain, relay);
@@ -202,6 +227,118 @@ listen_law (uint64_t *state)
 	       : sizeof parsed.address.v6) == 0;
 }
 
+/* The session law, for a random case of STATE.  */
+static bool
+session_law (uint64_t *state)
+{
+  struct ssh_case c = random_case (state);
+  char name[RC_SESSION_NAME_MAX + 1];
+  random_name (state, name);
+  bool with_spec = random_below (state, 2);
+  char command[RC_SSH_COMMAND_SIZE + 1], plain[RC_SSH_COMMAND_SIZE];
+  char expected[2 * RC_SSH_COMMAND_SIZE];
+  memset (command, 'x', sizeof command);
+  if (!rc_ssh_session_name_p (name)
+      || !rc_ssh_remote_command (with_spec ? &c.spec : NULL, name, command))
+    return false;
+  rc_ssh_remote_command (with_spec ? &c.spec : NULL, NULL, plain);
+  static const char start[] = "(remote-display-start)";
+  const char *at = strstr (plain, start);
+  if (!at || command[RC_SSH_COMMAND_SIZE] != 'x')
+    return false;
+  snprintf (expected, sizeof expected, "%.*s(remote-display-resume \"%s\")%s",
+	    (int) (at - plain), plain, name, at + sizeof start - 1);
+  return strcmp (command, expected) == 0;
+}
+
+/* The name law, for a random text of STATE.  Most bytes of the text
+   are valid, so some texts are names; the others are random bytes from
+   1 to 255.  The text can be longer than a name.  */
+static bool
+name_law (uint64_t *state)
+{
+  char text[RC_SESSION_NAME_MAX + 8];
+  size_t length = random_below (state, sizeof text);
+  random_name (state, text);
+  size_t valid_length = strlen (text);
+  for (size_t i = 0; i < length; i++)
+    if (i >= valid_length || random_below (state, 8) == 0)
+      text[i] = 1 + random_below (state, 255);
+  text[length] = 0;
+  return name_accepted_p (text) == name_model (text);
+}
+
+/* Return true if TEXT is a name of a session, by the definition of the
+   name law and not by the code of the program.  */
+static bool
+name_model (const char *text)
+{
+  size_t length = strlen (text);
+  if (length < 1 || length > RC_SESSION_NAME_MAX)
+    return false;
+  for (size_t i = 0; i < length; i++)
+    {
+      unsigned char c = text[i];
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+	    || (c >= '0' && c <= '9') || c == '-'))
+	return false;
+    }
+  return true;
+}
+
+/* Return true if rc_ssh_session_name_p accepts TEXT, and also
+   rc_ssh_remote_command; return false if both refuse it.  Return the
+   opposite of the predicate if the two do not agree, so the law
+   fails.  */
+static bool
+name_accepted_p (const char *text)
+{
+  char command[RC_SSH_COMMAND_SIZE];
+  bool name = rc_ssh_session_name_p (text);
+  return rc_ssh_remote_command (NULL, text, command) == name ? name : !name;
+}
+
+/* The bytes example.  */
+static bool
+bytes_example (void)
+{
+  for (int byte = 1; byte < 256; byte++)
+    {
+      char alone[2] = { byte, 0 };
+      char first[] = "Xab", middle[] = "aXb", last[] = "abX";
+      first[0] = middle[1] = last[2] = byte;
+      if (name_accepted_p (alone) != name_model (alone)
+	  || name_accepted_p (first) != name_model (first)
+	  || name_accepted_p (middle) != name_model (middle)
+	  || name_accepted_p (last) != name_model (last))
+	return false;
+    }
+  char text[RC_SESSION_NAME_MAX + 2];
+  static const size_t lengths[] = { 0, 1, RC_SESSION_NAME_MAX,
+				    RC_SESSION_NAME_MAX + 1 };
+  for (size_t i = 0; i < sizeof lengths / sizeof *lengths; i++)
+    {
+      memset (text, 'r', lengths[i]);
+      text[lengths[i]] = 0;
+      if (name_accepted_p (text) != (lengths[i] >= 1
+				     && lengths[i] <= RC_SESSION_NAME_MAX))
+	return false;
+    }
+  return true;
+}
+
+/* Put a random valid name of a session of STATE in NAME.  */
+static void
+random_name (uint64_t *state, char *name)
+{
+  static const char alphabet[]
+    = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
+  size_t length = 1 + random_below (state, RC_SESSION_NAME_MAX);
+  for (size_t i = 0; i < length; i++)
+    name[i] = alphabet[random_below (state, sizeof alphabet - 1)];
+  name[length] = 0;
+}
+
 /* The example of known arguments.  */
 static bool
 golden_example (void)
@@ -211,7 +348,7 @@ golden_example (void)
   static const char *const config[] = { "ssh", "-G", "--", "work", NULL };
   const char *args[RC_SSH_ARGS_SIZE];
   char command[RC_SSH_COMMAND_SIZE];
-  rc_ssh_remote_command (NULL, command);
+  rc_ssh_remote_command (NULL, NULL, command);
   if (strcmp (command, BASE_COMMAND) != 0
       || rc_ssh_bootstrap_args ("ssh", "work", command, args) != 4
       || !same_args (args, bootstrap)
@@ -221,10 +358,16 @@ golden_example (void)
   struct rc_listen_spec spec = { .family = AF_INET, .low = 60001,
 				 .high = 60010 };
   inet_pton (AF_INET, "10.0.0.200", &spec.address.v4);
-  rc_ssh_remote_command (&spec, command);
+  rc_ssh_remote_command (&spec, NULL, command);
+  if (strcmp (command,
+	      "remote-client --relay --listen=10.0.0.200:60001-60010 "
+	      "\"$(emacsclient --eval '(remote-display-start)' "
+	      "| tr -d '\"')\"") != 0)
+    return false;
+  rc_ssh_remote_command (NULL, "remote-2", command);
   return strcmp (command,
-		 "remote-client --relay --listen=10.0.0.200:60001-60010 "
-		 "\"$(emacsclient --eval '(remote-display-start)' "
+		 "remote-client --relay "
+		 "\"$(emacsclient --eval '(remote-display-resume \"remote-2\")' "
 		 "| tr -d '\"')\"") == 0;
 }
 

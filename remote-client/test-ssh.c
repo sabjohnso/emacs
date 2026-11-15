@@ -27,7 +27,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    RD_TEST_HOSTNAME, or 127.0.0.1.  As the bootstrap, the fake runs the
    remote command with sh, with the loopback address as the server
    address of $SSH_CONNECTION.  A fake emacsclient gives the session
-   socket of the test.  The fake keeps a copy of the line of the relay,
+   socket of the test, and writes its arguments to the file eval of
+   the run.  The fake keeps a copy of the line of the relay,
    so the test can connect to the relay, and stop it at the end.
 
    - Start: the client runs "ssh -G" and the bootstrap, and connects to
@@ -49,9 +50,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - Listen: with --listen=SPEC, the relay listens at the place of SPEC.
    - Bad listen: with a --listen that is not a spec, the client exits
      with the status 1, and does not run SSH.
+   - Resume: with --session=NAME, the remote command asks Emacs to
+     resume the session NAME, and the client connects to its socket.
+   - Bad session: with a --session that is not a name of a session, the
+     client exits with the status 1, and does not run SSH.
    - Usage: --ssh with no host, with a socket, or with --render-to, and
-     --listen or --connect with no --ssh, make the program exit with
-     the status 1.  */
+     --listen, --connect, or --session with no --ssh, make the program
+     exit with the status 1.  */
 
 #include <config.h>
 
@@ -122,6 +127,8 @@ static bool unreachable_example (void);
 static bool connect_example (void);
 static bool listen_example (void);
 static bool bad_listen_example (void);
+static bool resume_example (void);
+static bool bad_session_example (void);
 static bool usage_example (void);
 static bool start_run (struct run *, struct setup);
 static int accept_while_running (struct run *);
@@ -162,6 +169,8 @@ static const struct
     { "connect", connect_example },
     { "listen", listen_example },
     { "bad listen", bad_listen_example },
+    { "resume", resume_example },
+    { "bad session", bad_session_example },
     { "usage", usage_example },
   };
 
@@ -276,6 +285,33 @@ bad_listen_example (void)
 }
 
 static bool
+resume_example (void)
+{
+  struct run run;
+  bool ok = (start_run (&run, (struct setup)
+			{ .options = { "--session=remote-2" } })
+	     && end_session (&run));
+  char name[160];
+  snprintf (name, sizeof name, "%s/eval", run.directory);
+  char text[256] = "";
+  FILE *file = fopen (name, "r");
+  if (file)
+    {
+      text[fread (text, 1, sizeof text - 1, file)] = 0;
+      fclose (file);
+    }
+  ok = ok && strstr (text, "(remote-display-resume \"remote-2\")");
+  stop_run (&run);
+  return ok;
+}
+
+static bool
+bad_session_example (void)
+{
+  return refused_p ((struct setup) { .options = { "--session=a b" } }, 0);
+}
+
+static bool
 usage_example (void)
 {
   static const char *const no_host[] = { "--ssh", NULL };
@@ -286,9 +322,11 @@ usage_example (void)
 					NULL };
   static const char *const connect[] = { "--connect=127.0.0.1", "socket",
 					 NULL };
+  static const char *const session[] = { "--session=remote-2", "socket",
+					 NULL };
   return (run_usage (no_host) == 1 && run_usage (socket) == 1
 	  && run_usage (png) == 1 && run_usage (listen) == 1
-	  && run_usage (connect) == 1);
+	  && run_usage (connect) == 1 && run_usage (session) == 1);
 }
 
 /* Make the directory of RUN, listen as the session, and start the
@@ -563,7 +601,8 @@ make_bin (const struct run *run)
   FILE *file = fopen (name, "w");
   if (!file)
     return false;
-  fputs ("#!/bin/sh\nprintf '\"%s\"\\n' \"$RD_TEST_SESSION\"\n", file);
+  fputs ("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$RD_TEST_DIR/eval\"\n"
+	 "printf '\"%s\"\\n' \"$RD_TEST_SESSION\"\n", file);
   fclose (file);
   return chmod (name, 0700) == 0;
 }
@@ -608,23 +647,37 @@ wait_for_exit (pid_t pid)
   return -1;
 }
 
-/* Run the program with the arguments ARGUMENTS, and return its exit
-   status.  */
+/* Run the program with ARGUMENTS, and return its exit status.  Return
+   -2 if it does not write its usage to the standard error output, so
+   another error with the status 1 does not pass for a usage error.  */
 static int
 run_usage (const char *const *arguments)
 {
+  int pipe_fds[2];
+  if (pipe (pipe_fds) != 0)
+    return -1;
   pid_t pid = fork ();
   if (pid == 0)
     {
       const char *argv[8] = { "remote-client" };
       for (int i = 0; arguments[i] && i < 6; i++)
 	argv[i + 1] = arguments[i];
-      int null = open ("/dev/null", O_WRONLY);
-      dup2 (null, STDERR_FILENO);
+      dup2 (pipe_fds[1], STDERR_FILENO);
+      close (pipe_fds[0]);
       execv ("./remote-client", (char **) argv);
       _exit (127);
     }
-  return wait_for_exit (pid);
+  close (pipe_fds[1]);
+  char text[2048];
+  size_t used = 0;
+  ssize_t n;
+  while (used < sizeof text - 1
+	 && (n = read (pipe_fds[0], text + used, sizeof text - 1 - used)) > 0)
+    used += n;
+  text[used] = 0;
+  close (pipe_fds[0]);
+  int status = wait_for_exit (pid);
+  return strstr (text, "Usage: remote-client") ? status : -2;
 }
 
 /* The fake SSH.  With -G, it writes a configuration.  Otherwise, it
