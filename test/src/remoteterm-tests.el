@@ -408,6 +408,60 @@ OPEN-NAMES is the model: the names that are open before OPERATION."
       (make-frame-visible frame)
       (should (frame-visible-p frame)))))
 
+(ert-deftest remoteterm-tests-scroll-bar-mode ()
+  "An init file can turn `scroll-bar-mode' off and on in a remote build."
+  (skip-unless (featurep 'remote-test))
+  (should (fboundp 'scroll-bar-mode))
+  (let ((mode scroll-bar-mode)
+        (alist default-frame-alist))
+    (unwind-protect
+        (remoteterm-tests--with-display "remote-test"
+          (remoteterm-tests--with-frame frame "remote-test"
+              '((scroll-bar-width . 14))
+            (with-selected-frame frame
+              (scroll-bar-mode -1)
+              (should-not scroll-bar-mode)
+              (scroll-bar-mode 1)
+              (should scroll-bar-mode)
+              (should (= (window-scroll-bar-width (frame-root-window frame))
+                         0)))))
+      (setq scroll-bar-mode mode
+            default-frame-alist alist))))
+
+(ert-deftest remoteterm-tests-no-scroll-bar-area ()
+  "A remote window keeps no area for a scroll bar.
+The client draws no scroll bars, so an area would be an empty strip.
+The law holds for each value of the scroll-bar parameters, when a frame
+starts and when the parameters change."
+  (skip-unless (featurep 'remote-test))
+  (remoteterm-tests--with-display "remote-test"
+    (dolist (bars (remoteterm-tests--scroll-bar-requests))
+      (remoteterm-tests--with-frame frame "remote-test"
+          `(,@bars (scroll-bar-width . 14) (scroll-bar-height . 14))
+        (split-window (frame-root-window frame))
+        (remoteterm-tests--should-have-no-scroll-bar-area frame bars)
+        (dolist (other (remoteterm-tests--scroll-bar-requests))
+          (modify-frame-parameters frame other)
+          (remoteterm-tests--should-have-no-scroll-bar-area
+           frame (list bars other)))))))
+
+(defun remoteterm-tests--scroll-bar-requests ()
+  "Return each combination of the two scroll-bar frame parameters."
+  (mapcan (lambda (vertical)
+            (mapcar (lambda (horizontal)
+                      `((vertical-scroll-bars . ,vertical)
+                        (horizontal-scroll-bars . ,horizontal)))
+                    '(nil t)))
+          '(nil t left right)))
+
+(defun remoteterm-tests--should-have-no-scroll-bar-area (frame request)
+  "Check that no window of FRAME has an area for a scroll bar.
+REQUEST names the case in a failure."
+  (dolist (window (window-list frame 'never))
+    (should (equal (list request (window-scroll-bar-width window)
+                         (window-scroll-bar-height window))
+                   (list request 0 0)))))
+
 (ert-deftest remoteterm-tests-display-pixel-size ()
   "The size of a display is the size of the largest frame of its session."
   (skip-unless (featurep 'remote-test))

@@ -877,7 +877,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     gui_set_scroll_bar_height,
     NULL, /* title */
     gui_set_unsplittable,
-    gui_set_vertical_scroll_bars,
+    NULL, /* vertical scroll bars: the client draws none */
     gui_set_horizontal_scroll_bars,
     gui_set_visibility,
     NULL, /* tab bar lines */
@@ -2180,6 +2180,13 @@ syms_of_remoteterm (void)
 	       x_underline_at_descent_line,
      doc: /* SKIP: real doc in xterm.c.  */);
   x_underline_at_descent_line = false;
+
+  /* The client draws no scroll bars.  loadup.el loads scroll-bar.el
+     only if this variable exists, and init files call scroll-bar-mode,
+     so the remote backend defines it, as the Android port does.  */
+  DEFVAR_LISP ("x-toolkit-scroll-bars", Vx_toolkit_scroll_bars,
+     doc: /* SKIP: real doc in xterm.c.  */);
+  Vx_toolkit_scroll_bars = Qnil;
 
   defsubr (&Sx_open_connection);
   defsubr (&Sx_close_connection);
