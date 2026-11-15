@@ -83,8 +83,8 @@ static bool same_message_p (const struct rd_message *,
 			    const struct rd_message *);
 static void record_message (void *, const struct rd_message *);
 static void record_close (void *, uint32_t);
-static cairo_font_face_t *find_no_font (void *, const uint8_t *, int,
-					uint32_t);
+static cairo_font_face_t *find_no_font (void *,
+					  const struct rc_font_key *);
 
 static const struct rc_font_source no_fonts = { find_no_font, NULL, NULL };
 
@@ -471,11 +471,9 @@ record_close (void *data, uint32_t frame)
 /* The find function of a font source with no fonts.  The examples
    draw no glyphs.  */
 static cairo_font_face_t *
-find_no_font (void *data, const uint8_t *hash, int nhash, uint32_t index)
+find_no_font (void *data, const struct rc_font_key *key)
 {
   (void) data;
-  (void) hash;
-  (void) nhash;
-  (void) index;
+  (void) key;
   return NULL;
 }

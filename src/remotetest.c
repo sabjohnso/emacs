@@ -40,6 +40,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "termhooks.h"
 #include "window.h"
 #include "font.h"
+#include "remoteinput.h"
 #include "remoteterm.h"
 #include "rdproto.h"
 
@@ -55,25 +56,31 @@ static struct remote_sink *remote_make_counting_sink (void);
 static void remote_counting_write (void *, const unsigned char *, ptrdiff_t);
 static void remote_counting_flush (void *);
 static void remote_counting_free (void *);
+static ptrdiff_t remote_recording_queued (void *);
+static ptrdiff_t remote_counting_queued (void *);
 
 static const struct remote_sink_ops remote_recording_ops =
-  { remote_recording_write, remote_recording_flush, remote_recording_free };
+  { remote_recording_write, remote_recording_flush, remote_recording_free,
+    remote_recording_queued };
 
 static const struct remote_sink_ops remote_counting_ops =
-  { remote_counting_write, remote_counting_flush, remote_counting_free };
+  { remote_counting_write, remote_counting_flush, remote_counting_free,
+    remote_counting_queued };
 
 /* The tests attach a recording client to a session, and take the
    bytes that the session sends.  A counting client is a second kind
    of sink: it shows that a session needs only the sink interface.  */
 
 /* The data of a recording sink: the encoded messages that the client
-   has not taken, and the number of bytes since the last flush.  */
+   has not taken, the number of bytes since the last flush, and the
+   number of bytes that the sink says it did not send.  */
 struct remote_recording
 {
   unsigned char *output;
   ptrdiff_t used;
   ptrdiff_t size;
   ptrdiff_t unflushed;
+  ptrdiff_t queued;
 };
 
 /* The number of recording and counting sinks that exist.  */
@@ -127,6 +134,47 @@ the session has no recording client.  */)
 					   recording->used);
   recording->used = 0;
   return bytes;
+}
+
+DEFUN ("remote-display--set-queued", Fremote_display__set_queued,
+       Sremote_display__set_queued, 2, 2, 0,
+       doc: /* Make the recording client of DISPLAY report QUEUED bytes.
+These are the bytes that a transport did not send yet.  The recording
+client keeps all bytes, so the number is only what the session sees.
+Signal an error if the session has no recording client.  */)
+  (Lisp_Object display, Lisp_Object queued)
+{
+  struct remote_recording *recording
+    = remote_sink_data (check_x_display_info (display), &remote_recording_ops);
+  if (!recording)
+    error ("The session has no recording client");
+  recording->queued = check_integer_range (queued, 0, PTRDIFF_MAX);
+  return Qnil;
+}
+
+DEFUN ("remote-display--input", Fremote_display__input,
+       Sremote_display__input, 2, 2, 0,
+       doc: /* Give the encoded message BYTES to DISPLAY as input of its client.
+BYTES is a unibyte string with one message.  */)
+  (Lisp_Object display, Lisp_Object bytes)
+{
+  CHECK_STRING (bytes);
+  struct rd_message message;
+  size_t used;
+  if (rd_decode (SDATA (bytes), SBYTES (bytes), &message, &used) != RD_OK)
+    error ("Not a message");
+  remote_handle_input (check_x_display_info (display), &message);
+  return Qnil;
+}
+
+DEFUN ("remote-display--queue-empty", Fremote_display__queue_empty,
+       Sremote_display__queue_empty, 1, 1, 0,
+       doc: /* Tell DISPLAY that its transport sent all its bytes.
+A transport does this when its queue becomes empty.  */)
+  (Lisp_Object display)
+{
+  remote_send_font_data (check_x_display_info (display));
+  return Qnil;
 }
 
 DEFUN ("remote-display--unflushed-bytes", Fremote_display__unflushed_bytes,
@@ -365,7 +413,8 @@ read or is not a string.  */)
   (Lisp_Object file)
 {
   unsigned char hash[RD_HASH_SIZE];
-  if (!remote_file_hash (file, hash))
+  uint32_t size;
+  if (!remote_file_hash (file, hash, &size))
     return make_nil_vector (0);
   Lisp_Object bytes = make_nil_vector (RD_HASH_SIZE);
   for (int i = 0; i < RD_HASH_SIZE; i++)
@@ -508,6 +557,23 @@ remote_counting_free (void *data)
   remote_live_test_sinks--;
 }
 
+/* The queued function of a recording sink.  It gives the number that
+   the test set.  */
+static ptrdiff_t
+remote_recording_queued (void *data)
+{
+  struct remote_recording *recording = data;
+  return recording->queued;
+}
+
+/* The queued function of a counting sink.  It sends each byte at
+   once.  */
+static ptrdiff_t
+remote_counting_queued (void *data)
+{
+  return 0;
+}
+
 void
 syms_of_remotetest (void)
 {
@@ -535,6 +601,9 @@ syms_of_remotetest (void)
   defsubr (&Sremote_display__draw_overlap);
   defsubr (&Sremote_display__cursor_state);
   defsubr (&Sremote_display__set_last_frame_id);
+  defsubr (&Sremote_display__set_queued);
+  defsubr (&Sremote_display__input);
+  defsubr (&Sremote_display__queue_empty);
 
   Fprovide (Qremote_test, Qnil);
 }

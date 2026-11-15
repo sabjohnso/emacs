@@ -63,6 +63,11 @@ enum { RD_MAX_FRINGE_ROWS = 255 };
    file.  */
 enum { RD_HASH_SIZE = 32 };
 
+/* The maximum number of bytes of a font file in one font-data
+   message.  Each message struct has room for the largest array, so a
+   larger chunk makes each struct larger.  */
+enum { RD_MAX_FONT_CHUNK = 8192 };
+
 /* The kinds of cursor.  A client ignores a kind that it does not
    know.  */
 enum rd_cursor_kind
@@ -94,7 +99,9 @@ enum rd_cursor_kind
   MESSAGE (RESIZE, resize, RD_RESIZE_FIELDS)				\
   MESSAGE (PING, ping, RD_PING_FIELDS)					\
   MESSAGE (PONG, pong, RD_PONG_FIELDS)					\
-  MESSAGE (CLOSE_FRAME, close_frame, RD_CLOSE_FRAME_FIELDS)
+  MESSAGE (CLOSE_FRAME, close_frame, RD_CLOSE_FRAME_FIELDS)		\
+  MESSAGE (WANT_FONT, want_font, RD_WANT_FONT_FIELDS)			\
+  MESSAGE (FONT_DATA, font_data, RD_FONT_DATA_FIELDS)
 
 /* Each list gives the fields of a message in the order of the wire.
    FIELD (M, TYPE, NAME) is a member NAME of the C type TYPE_t.
@@ -189,12 +196,14 @@ enum rd_cursor_kind
    after each attach of a client, so a client that connects again
    needs no state from an earlier connection.  An ID keeps its font
    for the life of the server.  A hash with fewer than RD_HASH_SIZE
-   bytes means that the server could not read the file.  */
+   bytes means that the server could not read the file.  The file has
+   FILE_SIZE bytes, so a client can hash only its files of that size.  */
 #define RD_DEFINE_FONT_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint32, font)						\
   FIELD (M, uint32, index)						\
   FIELD (M, uint32, size)						\
-  ARRAY (M, uint8, hash, nhash, RD_HASH_SIZE)
+  ARRAY (M, uint8, hash, nhash, RD_HASH_SIZE)				\
+  FIELD (M, uint32, file_size)
 
 /* The frame FRAME exists, and has the size WIDTH, HEIGHT in pixels.
    A session sends this before the first draw of a frame after each
@@ -273,6 +282,23 @@ enum rd_cursor_kind
    Emacs decides for the WM_DELETE_WINDOW message of X.  */
 #define RD_CLOSE_FRAME_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint32, frame)
+
+/* The messages that send a font file follow.  A client that does not
+   have the file of a define-font message asks for it with its hash.
+   The server sends the file in font-data messages, in order, from the
+   offset 0.  */
+
+/* A client message: send the font file with the hash HASH.  */
+#define RD_WANT_FONT_FIELDS(FIELD, ARRAY, M)				\
+  ARRAY (M, uint8, hash, nhash, RD_HASH_SIZE)
+
+/* The bytes BYTES of the font file with the hash HASH, from OFFSET.
+   The file has TOTAL bytes.  */
+#define RD_FONT_DATA_FIELDS(FIELD, ARRAY, M)				\
+  ARRAY (M, uint8, hash, nhash, RD_HASH_SIZE)				\
+  FIELD (M, uint32, offset)						\
+  FIELD (M, uint32, total)						\
+  ARRAY (M, uint8, bytes, nbytes, RD_MAX_FONT_CHUNK)
 
 /* The buttons of a button message that are the mouse wheel.  */
 enum rd_wheel_button

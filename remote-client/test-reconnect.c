@@ -44,6 +44,16 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      on.  The test sends the request of a window manager through X.
    - Offline close: when the user asks to close the window while the
      program has no connection, the program exits with the status 0.
+   - Font: when a define-font message has a full hash of a file that
+     the program does not have, the program sends a want-font message
+     with the hash, one time, also for a second font of the file.  The
+     font-data messages of the file put the file in
+     $XDG_CACHE_HOME/remote-client/fonts, with the hash in hexadecimal
+     as its name.  After the program connects again, a define-font
+     message for a file that did not come gives a new want-font
+     message.  A define-font message for the monospace font file of
+     fontconfig gives no want-font message, because the program has
+     the file.
    - Usage: a timeout that is not a number, or that is less than
      RC_LINK_PINGS_PER_TIMEOUT, makes the program exit with the
      status 1.  */
@@ -68,6 +78,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+#include <glib.h>
+
 #include "backoff.h"
 #include "rdproto.h"
 
@@ -84,6 +96,14 @@ enum { EXIT_LIMIT = 10000 };
 
 /* The frame of each example.  */
 enum { FRAME = 7 };
+
+/* The size of the font files of the font example, and of each chunk
+   of them.  The bytes are not a font: the program does not draw
+   them.  */
+enum { FONT_SIZE = 3000, FONT_CHUNK = 1000 };
+
+/* The wait for a message that must not come, in milliseconds.  */
+enum { QUIET_LIMIT = 300 };
 
 /* One run of the program: its process, the listening socket, and the
    current connection.  */
@@ -106,6 +126,15 @@ static bool end_example (void);
 static bool error_example (void);
 static bool close_example (void);
 static bool offline_close_example (void);
+static bool font_example (void);
+static void make_font (uint8_t *, uint8_t *, uint8_t);
+static bool send_define_font (int, uint32_t, const uint8_t *);
+static bool send_define_sized_font (int, uint32_t, const uint8_t *,
+				    uint32_t);
+static bool local_font (uint8_t *, uint32_t *);
+static bool send_font_data (int, const uint8_t *, const uint8_t *);
+static bool wait_for_want_font (int, int, const uint8_t *);
+static bool stored_p (const struct run *, const uint8_t *, const uint8_t *);
 static bool usage_example (void);
 static pid_t start_program (const struct run *, const char *);
 static bool start_run (struct run *);
@@ -142,6 +171,7 @@ static const struct
     { "error", error_example },
     { "close", close_example },
     { "offline close", offline_close_example },
+    { "font", font_example },
     { "usage", usage_example },
   };
 
@@ -356,6 +386,163 @@ offline_close_example (void)
   return passed;
 }
 
+/* The font example, with the files A and B.  */
+static bool
+font_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  uint8_t a[FONT_SIZE], a_hash[RD_HASH_SIZE];
+  uint8_t b[FONT_SIZE], b_hash[RD_HASH_SIZE];
+  make_font (a, a_hash, 1);
+  make_font (b, b_hash, 2);
+  int64_t end = now_ms () + CONNECT_LIMIT;
+  bool passed = (send_define_frame (run.connection)
+		 && send_define_font (run.connection, 1, a_hash)
+		 && wait_for_want_font (run.connection, CONNECT_LIMIT, a_hash)
+		 && send_define_font (run.connection, 2, a_hash)
+		 && !wait_for_want_font (run.connection, QUIET_LIMIT, a_hash)
+		 && send_font_data (run.connection, a, a_hash)
+		 && send_define_font (run.connection, 3, b_hash)
+		 && wait_for_want_font (run.connection, CONNECT_LIMIT,
+					b_hash));
+  while (passed && !stored_p (&run, a, a_hash) && now_ms () < end)
+    poll (NULL, 0, 20);
+  passed = passed && stored_p (&run, a, a_hash);
+  shutdown (run.connection, SHUT_RDWR);
+  passed = (passed && accept_next (&run)
+	    && send_define_font (run.connection, 3, b_hash)
+	    && wait_for_want_font (run.connection, CONNECT_LIMIT, b_hash));
+  uint8_t local_hash[RD_HASH_SIZE];
+  uint32_t local_size;
+  passed = (passed && local_font (local_hash, &local_size)
+	    && send_define_sized_font (run.connection, 4, local_hash,
+				       local_size)
+	    && !wait_for_want_font (run.connection, QUIET_LIMIT,
+				    local_hash));
+  stop_run (&run);
+  return passed;
+}
+
+/* Put the hash and the size of the monospace font file of fontconfig
+   in HASH and *SIZE.  Return false if there is no such file.  */
+static bool
+local_font (uint8_t *hash, uint32_t *size)
+{
+  gchar *name = NULL, *bytes = NULL;
+  gsize length = 0;
+  bool found = (g_spawn_command_line_sync ("fc-match -f %{file} monospace",
+					   &name, NULL, NULL, NULL)
+		&& g_file_get_contents (name, &bytes, &length, NULL));
+  if (found)
+    {
+      gsize hash_length = RD_HASH_SIZE;
+      GChecksum *checksum = g_checksum_new (G_CHECKSUM_SHA256);
+      g_checksum_update (checksum, (const guchar *) bytes, length);
+      g_checksum_get_digest (checksum, hash, &hash_length);
+      g_checksum_free (checksum);
+      *size = length;
+    }
+  g_free (bytes);
+  g_free (name);
+  return found;
+}
+
+/* Fill FONT with FONT_SIZE bytes that depend on SEED, and put their
+   SHA-256 hash in HASH.  */
+static void
+make_font (uint8_t *font, uint8_t *hash, uint8_t seed)
+{
+  for (int i = 0; i < FONT_SIZE; i++)
+    font[i] = seed * 31 + i * 7;
+  gsize length = RD_HASH_SIZE;
+  GChecksum *checksum = g_checksum_new (G_CHECKSUM_SHA256);
+  g_checksum_update (checksum, font, FONT_SIZE);
+  g_checksum_get_digest (checksum, hash, &length);
+  g_checksum_free (checksum);
+}
+
+/* Send a define-font message for the font ID FONT, a file of
+   FONT_SIZE bytes with the hash HASH, on the connection FD.  */
+static bool
+send_define_font (int fd, uint32_t font, const uint8_t *hash)
+{
+  return send_define_sized_font (fd, font, hash, FONT_SIZE);
+}
+
+/* Send a define-font message for the font ID FONT, a file of SIZE
+   bytes with the hash HASH, on the connection FD.  */
+static bool
+send_define_sized_font (int fd, uint32_t font, const uint8_t *hash,
+			uint32_t size)
+{
+  struct rd_message define
+    = { .type = RD_DEFINE_FONT,
+	.u.define_font = { .font = font, .size = 12, .nhash = RD_HASH_SIZE,
+			   .file_size = size } };
+  memcpy (define.u.define_font.hash, hash, RD_HASH_SIZE);
+  return send_message (fd, &define);
+}
+
+/* Send the FONT_SIZE bytes FONT with the hash HASH in font-data
+   messages of FONT_CHUNK bytes on the connection FD.  */
+static bool
+send_font_data (int fd, const uint8_t *font, const uint8_t *hash)
+{
+  bool sent = true;
+  for (uint32_t offset = 0; sent && offset < FONT_SIZE;
+       offset += FONT_CHUNK)
+    {
+      struct rd_message data
+	= { .type = RD_FONT_DATA,
+	    .u.font_data = { .nhash = RD_HASH_SIZE, .offset = offset,
+			     .total = FONT_SIZE, .nbytes = FONT_CHUNK } };
+      memcpy (data.u.font_data.hash, hash, RD_HASH_SIZE);
+      memcpy (data.u.font_data.bytes, font + offset, FONT_CHUNK);
+      sent = send_message (fd, &data);
+    }
+  return sent;
+}
+
+/* Wait at most LIMIT milliseconds for a want-font message with the
+   hash HASH on the connection FD.  Skip the other messages.  Return
+   false if it does not come.  */
+static bool
+wait_for_want_font (int fd, int limit, const uint8_t *hash)
+{
+  int64_t end = now_ms () + limit;
+  struct rd_message message;
+  int64_t left;
+  while ((left = end - now_ms ()) > 0)
+    if (read_message (fd, &message, left) == 1
+	&& message.type == RD_WANT_FONT
+	&& message.u.want_font.nhash == RD_HASH_SIZE
+	&& !memcmp (message.u.want_font.hash, hash, RD_HASH_SIZE))
+      return true;
+  return false;
+}
+
+/* Return true if the font directory of RUN has the file with the hash
+   HASH, and the file has the FONT_SIZE bytes FONT.  */
+static bool
+stored_p (const struct run *run, const uint8_t *font, const uint8_t *hash)
+{
+  char *hex = g_malloc (2 * RD_HASH_SIZE + 1);
+  for (int i = 0; i < RD_HASH_SIZE; i++)
+    snprintf (hex + 2 * i, 3, "%02x", hash[i]);
+  char *name = g_strdup_printf ("%s/remote-client/fonts/%s",
+				run->directory, hex);
+  gchar *bytes = NULL;
+  gsize size = 0;
+  bool stored = (g_file_get_contents (name, &bytes, &size, NULL)
+		 && size == FONT_SIZE && !memcmp (bytes, font, size));
+  g_free (bytes);
+  g_free (name);
+  g_free (hex);
+  return stored;
+}
+
 /* Start the program for RUN, and accept its first connection.  Return
    false if the program does not connect.  */
 static bool
@@ -410,6 +597,18 @@ stop_run (struct run *run)
   snprintf (cache, sizeof cache, "%s/remote-client/font-hashes",
 	    run->directory);
   unlink (cache);
+  snprintf (cache, sizeof cache, "%s/remote-client/fonts", run->directory);
+  GDir *fonts = g_dir_open (cache, 0, NULL);
+  const char *name;
+  while (fonts && (name = g_dir_read_name (fonts)))
+    {
+      char *file = g_build_filename (cache, name, NULL);
+      unlink (file);
+      g_free (file);
+    }
+  if (fonts)
+    g_dir_close (fonts);
+  rmdir (cache);
   snprintf (cache, sizeof cache, "%s/remote-client", run->directory);
   rmdir (cache);
   rmdir (run->directory);
@@ -444,12 +643,12 @@ alive_p (const struct run *run)
 static bool
 send_message (int fd, const struct rd_message *message)
 {
-  unsigned char bytes[64];
   size_t size = rd_encoded_size (message);
-  if (size > sizeof bytes)
-    return false;
+  unsigned char *bytes = g_malloc (size);
   rd_encode (message, bytes);
-  return send (fd, bytes, size, MSG_NOSIGNAL) == (ssize_t) size;
+  bool sent = send (fd, bytes, size, MSG_NOSIGNAL) == (ssize_t) size;
+  g_free (bytes);
+  return sent;
 }
 
 /* Define the frame FRAME on the connection FD, so the program shows

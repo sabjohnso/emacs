@@ -87,6 +87,7 @@ static bool remote_input_next (struct remote_input *, struct rd_message *);
 static void remote_connection_write (void *, const unsigned char *, ptrdiff_t);
 static void remote_connection_flush (void *);
 static void remote_connection_free (void *);
+static ptrdiff_t remote_connection_queued (void *);
 static void remote_connection_writable (int, void *);
 static void remote_connection_send (struct remote_connection *);
 static bool remote_would_block (int);
@@ -96,7 +97,7 @@ static void remote_check_connection (Lisp_Object);
 
 static const struct remote_sink_ops remote_connection_ops =
   { remote_connection_write, remote_connection_flush,
-    remote_connection_free };
+    remote_connection_free, remote_connection_queued };
 
 /* The processes of the connection sinks.  The sinks are not Lisp
    objects, so this list keeps their processes from the garbage
@@ -319,12 +320,24 @@ remote_connection_flush (void *data)
   remote_connection_send (data);
 }
 
+/* The queued function of a connection sink.  */
+static ptrdiff_t
+remote_connection_queued (void *data)
+{
+  struct remote_connection *connection = data;
+  return connection->used - connection->start;
+}
+
 /* The process loop calls this function when the file descriptor of
-   the connection DATA can take more bytes.  */
+   the connection DATA can take more bytes.  Tell the session when the
+   queue is empty.  */
 static void
 remote_connection_writable (int fd, void *data)
 {
-  remote_connection_send (data);
+  struct remote_connection *connection = data;
+  remote_connection_send (connection);
+  if (remote_connection_queued (connection) == 0)
+    remote_output_drained (connection->dpyinfo);
 }
 
 /* The free function of a connection sink.  */

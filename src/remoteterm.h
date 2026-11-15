@@ -32,6 +32,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <cairo.h>
 
+struct rd_message;
+struct remote_font_transfer;
+
 struct remote_bitmap_record
 {
   char *file;
@@ -45,13 +48,16 @@ struct remote_bitmap_record
    keep the bytes.  FLUSH takes DATA, and sends all the bytes that the
    sink keeps: the session calls it at the end of each update, so an
    update can reach the client as a whole.  FREE takes DATA, and frees
-   all that the sink holds.  The sinks of src/remotetest.c are two
-   kinds of sink, and each transport is another kind.  */
+   all that the sink holds.  QUEUED takes DATA.  Each sink must have
+   each operation.  The sinks of src/remotetest.c are two kinds of
+   sink, and each transport is another kind.  */
 struct remote_sink_ops
 {
   void (*write) (void *data, const unsigned char *bytes, ptrdiff_t size);
   void (*flush) (void *data);
   void (*free) (void *data);
+  /* Return the number of bytes that the sink has and did not send.  */
+  ptrdiff_t (*queued) (void *data);
 };
 
 struct remote_sink;
@@ -104,6 +110,10 @@ struct remote_display_info
      elements, and an ID outside it has no definition.  */
   bool *font_defined;
   ptrdiff_t font_defined_size;
+
+  /* The font files that the client asked for and did not get, in
+     order.  See remotefonts.c.  */
+  struct remote_font_transfer *font_transfers;
 
   /* The sink of the client that receives the messages of this
      session.  The session owns the sink.  A client is attached if
@@ -191,11 +201,26 @@ extern void remote_set_sink (struct remote_display_info *,
 extern void *remote_sink_data (struct remote_display_info *,
 			       const struct remote_sink_ops *);
 extern bool remote_frame_has_client (struct frame *);
-extern bool remote_file_hash (Lisp_Object, unsigned char *);
+extern bool remote_file_hash (Lisp_Object, unsigned char *, uint32_t *);
+extern void remote_send_message (struct remote_display_info *,
+				 const struct rd_message *);
+extern ptrdiff_t remote_queued (struct remote_display_info *);
+extern void remote_flush (struct remote_display_info *);
+extern Lisp_Object remote_font_file (const unsigned char *, uint32_t *);
+extern void remote_forget_fonts (struct remote_display_info *,
+				 const unsigned char *);
+extern void remote_redraw_frames (struct remote_display_info *);
+extern void remote_output_drained (struct remote_display_info *);
 extern void syms_of_remoteterm (void);
 
 /* Defined in remoteproc.c.  */
 extern void syms_of_remoteproc (void);
+
+/* Defined in remotefonts.c.  */
+extern void remote_want_font (struct remote_display_info *,
+			      const struct rd_message *);
+extern void remote_send_font_data (struct remote_display_info *);
+extern void remote_drop_font_transfers (struct remote_display_info *);
 
 /* In remoteterm.c.  */
 extern struct frame *remote_frame_of_id (struct remote_display_info *,

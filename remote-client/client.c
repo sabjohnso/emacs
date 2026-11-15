@@ -78,6 +78,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "connector.h"
 #include "direct.h"
 #include "fonts.h"
+#include "fontstore.h"
 #include "hashcache.h"
 #include "hashfonts.h"
 #include "link.h"
@@ -156,10 +157,12 @@ struct connection
 /* The state of the mode with windows.  CONNECTOR connects to the
    session again, and TIMEOUT is the timeout of a connection.  CONNECTION is
    NULL while the program waits to connect again.  TICK is the timer of
-   the liveness, and RETRY is the timer of the next connect, or 0.  */
+   the liveness, and RETRY is the timer of the next connect, or 0.
+   STORE keeps the font files that the server sends.  */
 struct window_mode
 {
   struct rc_renderer *renderer;
+  struct rc_font_store *store;
   struct rc_view *view;
   struct rc_connector connector;
   int64_t timeout;
@@ -180,14 +183,14 @@ static struct rc_stream *open_ssh_session (const struct options *,
 					   struct rc_direct **);
 static const char *relay_address (const struct options *,
 				  char[RC_SSH_HOSTNAME_SIZE]);
-static struct rc_font_source client_fonts (void);
-static char *cache_file_name (void);
-static void warn_fallback (const uint8_t *, int, uint32_t);
+static struct rc_font_source client_fonts (struct rc_font_store *);
+static char *cache_file_name (const char *);
+static void warn_fallback (const struct rc_font_key *);
 static int render_to_file (struct rc_renderer *, struct rc_stream *,
 			   const char *);
 static void record_first_frame (void *, const struct rd_message *);
-static int show_frames (struct rc_renderer *, struct rc_stream *,
-			struct rc_connector, int64_t);
+static int show_frames (struct rc_renderer *, struct rc_font_store *,
+			struct rc_stream *, struct rc_connector, int64_t);
 static struct rc_stream *connect_socket (void *);
 static void open_connection (struct window_mode *, struct rc_stream *);
 static void lose_connection (struct window_mode *, bool);
@@ -197,6 +200,9 @@ static gboolean retry_connect (gpointer);
 static gboolean tick_link (gpointer);
 static void network_changed (GNetworkMonitor *, gboolean, gpointer);
 static void show_message (void *, const struct rd_message *);
+static void want_font (struct window_mode *, const struct rd_define_font *);
+static void receive_font (struct window_mode *,
+			  const struct rd_font_data *);
 static gboolean read_input (gint, GIOCondition, gpointer);
 static void note_input (struct window_mode *);
 static void close_frame (void *, uint32_t);
@@ -224,7 +230,10 @@ main (int argc, char **argv)
       rc_direct_free (direct);
       return 1;
     }
-  struct rc_font_source fonts = client_fonts ();
+  char *fonts_directory = cache_file_name ("fonts");
+  struct rc_font_store *store = rc_font_store_new (fonts_directory);
+  g_free (fonts_directory);
+  struct rc_font_source fonts = client_fonts (store);
   struct rc_renderer *renderer = rc_renderer_new (fonts);
   int status;
   if (options.png)
@@ -232,10 +241,12 @@ main (int argc, char **argv)
   else
     {
       gtk_init (&argc, &argv);
-      status = show_frames (renderer, stream, connector, options.timeout);
+      status = show_frames (renderer, store, stream, connector,
+			    options.timeout);
     }
   rc_renderer_free (renderer);
   rc_font_source_free (fonts);
+  rc_font_store_free (store);
   rc_direct_free (direct);
   return status;
 }
@@ -367,50 +378,57 @@ relay_address (const struct options *options,
     ? hostname : NULL;
 }
 
-/* Return the font source of the client: the font file with the hash
-   of a font, from the font files of fontconfig, or else the fallback
-   font.  */
+/* Return the font source of the client: the file of a font from
+   STORE, or the font file with its hash from the font files of
+   fontconfig.  Only a font whose file the server could not read gets
+   the fallback font.  The server sends a file that the client does
+   not have, so the client does not draw a font with the glyphs of
+   another font.  */
 static struct rc_font_source
-client_fonts (void)
+client_fonts (struct rc_font_store *store)
 {
   char **names = rc_font_file_names ();
-  char *cache = cache_file_name ();
+  char *cache = cache_file_name ("font-hashes");
   struct rc_font_source hashed
     = rc_hash_font_source_new ((const char *const *) names,
 			       g_strv_length (names), cache, rc_sha256_file,
 			       NULL);
   g_strfreev (names);
   g_free (cache);
-  return rc_font_source_chain (hashed, rc_fallback_font_source_new (),
-			       warn_fallback);
+  struct rc_font_source local
+    = rc_font_source_chain (hashed,
+			    rc_unhashed_font_source
+			    (rc_fallback_font_source_new ()),
+			    warn_fallback);
+  return rc_font_source_chain (rc_font_store_source (store), local, NULL);
 }
 
-/* Return the name of the cache file of font hashes, in a new
-   string.  */
+/* Return the name of the file NAME in the cache directory of the
+   client, in a new string.  */
 static char *
-cache_file_name (void)
+cache_file_name (const char *name)
 {
-  return g_build_filename (g_get_user_cache_dir (), "remote-client",
-			   "font-hashes", NULL);
+  return g_build_filename (g_get_user_cache_dir (), "remote-client", name,
+			   NULL);
 }
 
-/* The function of the font chain when no font file has the NHASH bytes
-   HASH.  A hash with fewer than RD_HASH_SIZE bytes means that the
-   server could not read its font file.  */
+/* The function of the font chain when no font file of fontconfig has
+   the hash of KEY.  A hash with fewer than RD_HASH_SIZE bytes means
+   that the server could not read its font file.  */
 static void
-warn_fallback (const uint8_t *hash, int nhash, uint32_t index)
+warn_fallback (const struct rc_font_key *key)
 {
-  if (nhash < RD_HASH_SIZE)
+  if (key->nhash < RD_HASH_SIZE)
     {
       fprintf (stderr, "remote-client: the server could not read a font "
 	       "file, so the fallback font draws its glyphs\n");
       return;
     }
   char hex[2 * RD_HASH_SIZE + 1];
-  rc_hash_to_hex (hash, hex);
+  rc_hash_to_hex (key->hash, hex);
   fprintf (stderr, "remote-client: no font file has the hash %s (face "
-	   "%lu), so the fallback font draws its glyphs\n", hex,
-	   (unsigned long) index);
+	   "%lu), so the client asks the server for the file\n", hex,
+	   (unsigned long) key->index);
 }
 
 /* Apply all messages from STREAM to RENDERER, and write the first
@@ -468,11 +486,12 @@ record_first_frame (void *data, const struct rd_message *message)
    connection ends and no window is left, or when the user asks to
    close a window with no connection.  Return the exit status.  */
 static int
-show_frames (struct rc_renderer *renderer, struct rc_stream *stream,
-	     struct rc_connector connector, int64_t timeout)
+show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
+	     struct rc_stream *stream, struct rc_connector connector,
+	     int64_t timeout)
 {
-  struct window_mode mode = { .renderer = renderer, .connector = connector,
-			      .timeout = timeout,
+  struct window_mode mode = { .renderer = renderer, .store = store,
+			      .connector = connector, .timeout = timeout,
 			      .backoff = rc_backoff_new () };
   mode.view = rc_view_new (renderer, (struct rc_view_functions)
 			   { close_frame, send_message, &mode });
@@ -492,10 +511,12 @@ show_frames (struct rc_renderer *renderer, struct rc_stream *stream,
   return mode.failed ? 1 : 0;
 }
 
-/* Make STREAM the connection of MODE.  */
+/* Make STREAM the connection of MODE.  The server sends a font file
+   only on the connection of its request, so forget the requests.  */
 static void
 open_connection (struct window_mode *mode, struct rc_stream *stream)
 {
+  rc_font_store_reset (mode->store);
   int fd = rc_stream_fd (stream);
   struct connection *connection = g_new (struct connection, 1);
   *connection = (struct connection)
@@ -610,12 +631,45 @@ network_changed (GNetworkMonitor *monitor, gboolean available,
 }
 
 /* The function of the reader of the mode with windows.  DATA is the
-   struct window_mode.  Apply MESSAGE, and show its change.  */
+   struct window_mode.  Apply MESSAGE, and show its change.  Ask the
+   server for the file of a font that has no face, and keep the bytes
+   of a font file.  */
 static void
 show_message (void *data, const struct rd_message *message)
 {
   struct window_mode *mode = data;
   rc_view_update (mode->view, rc_apply (mode->renderer, message));
+  if (message->type == RD_DEFINE_FONT)
+    want_font (mode, &message->u.define_font);
+  else if (message->type == RD_FONT_DATA)
+    receive_font (mode, &message->u.font_data);
+}
+
+/* Send a want-font message for the file of DEFINE, if the renderer of
+   MODE has no face for it, and the store did not ask for it.  */
+static void
+want_font (struct window_mode *mode, const struct rd_define_font *define)
+{
+  struct rc_font_key key = { define->hash, define->nhash, define->index,
+			     define->file_size };
+  if (rc_renderer_has_font (mode->renderer, define->font)
+      || !rc_font_store_want (mode->store, &key))
+    return;
+  struct rd_message message = { .type = RD_WANT_FONT,
+				.u.want_font = { .nhash = RD_HASH_SIZE } };
+  memcpy (message.u.want_font.hash, define->hash, RD_HASH_SIZE);
+  send_on (mode->connection, &message, mode->timeout);
+}
+
+/* Give the bytes of DATA to the store of MODE.  The server defines the
+   fonts of the file again after the last bytes, so the renderer finds
+   the file then.  */
+static void
+receive_font (struct window_mode *mode, const struct rd_font_data *data)
+{
+  if (rc_font_store_receive (mode->store, data) == RC_FONT_REFUSED)
+    fprintf (stderr, "remote-client: a font file from the server is not "
+	     "correct, so the client does not draw its glyphs\n");
 }
 
 /* The function of the GTK main loop for the connection FD.  DATA is

@@ -44,9 +44,9 @@ X11_LIBS = $(shell $(PKG_CONFIG) --libs x11)
 
 RENDER_OBJS = render.o table.o rdproto.o
 READER_OBJS = reader.o rdproto.o
-FONTS_OBJS = fonts.o hashfonts.o hashcache.o
+FONTS_OBJS = fonts.o hashfonts.o hashcache.o fontstore.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
-  fonts.o hashfonts.o hashcache.o rdproto.o link.o backoff.o \
+  fonts.o hashfonts.o hashcache.o fontstore.o rdproto.o link.o backoff.o \
   unixsocket.o relay.o relayline.o token.o flow.o pending.o stream.o tls.o \
   listenspec.o \
   sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
@@ -54,7 +54,8 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
   test-backoff test-reconnect test-relayline \
   test-relay test-flow test-pending test-unixsocket \
-  test-sshargs test-ssh test-tls test-listenspec test-sshconfig
+  test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
+  test-fontstore
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -71,6 +72,7 @@ check: remote-client $(TESTS)
 	./test-reader
 	./test-glyphs
 	./test-fonts
+	./test-fontstore
 	./test-input
 	./test-client
 	./test-sizes
@@ -112,6 +114,9 @@ test-glyphs: test-glyphs.o $(RENDER_OBJS) $(FONTS_OBJS)
 test-fonts: test-fonts.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+test-fontstore: test-fontstore.o $(RENDER_OBJS) $(FONTS_OBJS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
 test-input: test-input.o input.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
@@ -122,7 +127,7 @@ test-sizes: test-sizes.o sizes.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-reconnect: test-reconnect.o rdproto.o | remote-client
-	$(CC) $(LDFLAGS) -o $@ $^ $(X11_LIBS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(X11_LIBS) $(LIBS)
 
 test-backoff: test-backoff.o backoff.o
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -185,6 +190,8 @@ fonts.o test-glyphs.o test-client.o test-fonts.o: fonts.h render.h \
   ../src/rdproto.h
 hashfonts.o test-fonts.o client.o: hashfonts.h render.h ../src/rdproto.h
 hashfonts.o hashcache.o client.o: hashcache.h ../src/rdproto.h
+fontstore.o test-fontstore.o client.o: fontstore.h fonts.h render.h \
+  hashcache.h ../src/rdproto.h
 client.o view.o test-view.o: view.h reader.h fonts.h render.h \
   ../src/rdproto.h
 input.o test-input.o view.o: input.h ../src/rdproto.h

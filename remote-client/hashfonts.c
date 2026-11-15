@@ -30,37 +30,42 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <fontconfig/fontconfig.h>
 #include <glib.h>
 
+#include "fonts.h"
 #include "hashcache.h"
 #include "hashfonts.h"
 
-/* A file of the list of a source.  READABLE is true if HASH has its
-   hash.  */
+/* A file of the list of a source.  After the first stat, STATTED is
+   true, and EXISTS tells if ST has the status of the file.  After the
+   first hash, TRIED is true, and READABLE tells if HASH has the hash
+   of the file.  */
 struct listed_file
 {
   char *name;
+  bool statted;
+  bool exists;
+  struct stat st;
+  bool tried;
   bool readable;
   uint8_t hash[RD_HASH_SIZE];
 };
 
-/* The data of a hash source.  The source has tried to hash each file
-   of FILES before NEXT, and no file after it.  The cache has each file
-   that the source hashed, so a name that comes again in the list needs
-   no new hash.  */
+/* The data of a hash source.  The cache has each file that the source
+   hashed, so a name that comes again in the list needs no new
+   hash.  */
 struct hash_source
 {
   struct listed_file *files;
   int nfiles;
-  int next;
   rc_hash_function *hash;
   void *data;
   struct rc_hash_cache *cache;
 };
 
-static cairo_font_face_t *find_by_hash (void *, const uint8_t *, int,
-					uint32_t);
+static cairo_font_face_t *find_by_hash (void *,
+					const struct rc_font_key *);
 static void destroy_hash_source (void *);
+static bool size_matches (struct listed_file *, uint32_t);
 static void hash_listed_file (struct hash_source *, struct listed_file *);
-static cairo_font_face_t *file_face (const char *, uint32_t);
 
 struct rc_font_source
 rc_hash_font_source_new (const char *const *files, int nfiles,
@@ -124,26 +129,29 @@ rc_font_file_names (void)
 }
 
 /* The FIND function of a hash source.  DATA is the struct
-   hash_source.  Look at the files in order, and hash a file when the
-   search gets to it for the first time.  Then write the cache, if a
-   file got a hash.  */
+   hash_source.  Look at the files of the file size of KEY in order,
+   and hash a file when the search gets to it for the first time.  The
+   file size 0 matches each file.  Then write the cache, if a file got
+   a hash.  */
 static cairo_font_face_t *
-find_by_hash (void *data, const uint8_t *hash, int nhash, uint32_t index)
+find_by_hash (void *data, const struct rc_font_key *key)
 {
   struct hash_source *source = data;
-  if (nhash != RD_HASH_SIZE)
+  if (key->nhash != RD_HASH_SIZE)
     return NULL;
   cairo_font_face_t *face = NULL;
   for (int i = 0; !face && i < source->nfiles; i++)
     {
       struct listed_file *file = &source->files[i];
-      if (i == source->next)
+      if (!size_matches (file, key->file_size))
+	continue;
+      if (!file->tried)
 	{
 	  hash_listed_file (source, file);
-	  source->next++;
+	  file->tried = true;
 	}
-      if (file->readable && !memcmp (file->hash, hash, RD_HASH_SIZE))
-	face = file_face (file->name, index);
+      if (file->readable && !memcmp (file->hash, key->hash, RD_HASH_SIZE))
+	face = rc_file_face (file->name, key->index);
     }
   rc_hash_cache_save (source->cache);
   return face;
@@ -162,33 +170,30 @@ destroy_hash_source (void *data)
   g_free (source);
 }
 
-/* Set the hash of FILE from the cache of SOURCE.  If the cache has no
-   valid hash, hash FILE, and put the hash in the cache.  A file that
-   does not exist has no hash.  */
+/* Return true if FILE exists, and has SIZE bytes or SIZE is 0.  Stat
+   FILE the first time.  */
+static bool
+size_matches (struct listed_file *file, uint32_t size)
+{
+  if (!file->statted)
+    {
+      file->exists = stat (file->name, &file->st) == 0;
+      file->statted = true;
+    }
+  return file->exists && (size == 0 || file->st.st_size == size);
+}
+
+/* Set the hash of FILE, a file that exists, from the cache of SOURCE.
+   If the cache has no valid hash, hash FILE, and put the hash in the
+   cache.  */
 static void
 hash_listed_file (struct hash_source *source, struct listed_file *file)
 {
-  struct stat st;
-  if (stat (file->name, &st) != 0)
-    return;
-  if (rc_hash_cache_get (source->cache, file->name, &st, file->hash))
+  if (rc_hash_cache_get (source->cache, file->name, &file->st, file->hash))
     file->readable = true;
   else if (source->hash (source->data, file->name, file->hash))
     {
       file->readable = true;
-      rc_hash_cache_put (source->cache, file->name, &st, file->hash);
+      rc_hash_cache_put (source->cache, file->name, &file->st, file->hash);
     }
-}
-
-/* Return a new reference to the face INDEX of the font file NAME.  */
-static cairo_font_face_t *
-file_face (const char *name, uint32_t index)
-{
-  FcPattern *pattern = FcPatternBuild (NULL, FC_FILE, FcTypeString, name,
-				       FC_INDEX, FcTypeInteger, (int) index,
-				       NULL);
-  FcDefaultSubstitute (pattern);
-  cairo_font_face_t *face = cairo_ft_font_face_create_for_pattern (pattern);
-  FcPatternDestroy (pattern);
-  return face;
 }

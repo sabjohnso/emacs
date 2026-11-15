@@ -30,15 +30,26 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 extern struct rc_font_source rc_fallback_font_source_new (void);
 
 /* The function that a chain calls when it uses its second source for
-   the font file with the NHASH bytes HASH and the face INDEX.  */
-typedef void rc_fallback_function (const uint8_t *hash, int nhash,
-				   uint32_t index);
+   the font KEY.  */
+typedef void rc_fallback_function (const struct rc_font_key *key);
 
 /* Return a new font source that gives the face of FIRST.  If FIRST
-   finds no face, the chain gives the face of SECOND, and calls WARN.
-   The chain owns FIRST and SECOND, and frees them.  */
+   finds no face, the chain gives the face of SECOND, and calls WARN if
+   it is not NULL.  The chain owns FIRST and SECOND, and frees them.  */
 extern struct rc_font_source rc_font_source_chain
   (struct rc_font_source first, struct rc_font_source second,
    rc_fallback_function *warn);
+
+/* Return a new font source that gives the face of INNER only for a
+   key with a hash of fewer than RD_HASH_SIZE bytes: the server could
+   not read that font file, so it cannot send it.  For a key with a
+   full hash, the source gives NULL.  The source owns INNER, and frees
+   it.  */
+extern struct rc_font_source rc_unhashed_font_source
+  (struct rc_font_source inner);
+
+/* Return a new reference to the Cairo font face of the face INDEX of
+   the font file NAME.  */
+extern cairo_font_face_t *rc_file_face (const char *name, uint32_t index);
 
 #endif /* REMOTE_CLIENT_FONTS_H */

@@ -173,9 +173,9 @@ DBUS_OBJ = @DBUS_OBJ@
 ## xwidgets.o if HAVE_XWIDGETS, else empty.
 XWIDGETS_OBJ = @XWIDGETS_OBJ@
 
-## remotefns.o, rdproto.o, remoteterm.o, remoteproc.o and
-## remoteinput.o if configured --with-remote-display, else empty.  remotetest.o too if also
-## configured --enable-remote-display-tests.
+## remotefns.o, rdproto.o, remoteterm.o, remoteproc.o, remoteinput.o,
+## and remotefonts.o if configured --with-remote-display, else empty.
+## remotetest.o too if also configured --enable-remote-display-tests.
 REMOTE_DISPLAY_OBJ = @REMOTE_DISPLAY_OBJ@
 
 LIB_EXECINFO=@LIB_EXECINFO@

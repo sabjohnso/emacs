@@ -30,6 +30,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      of the list, and only when a request needs it.  A request that
      finds a file hashes the files before it.  A request that finds no
      file hashes all files.
+   - size: a request with a file size finds only a file of that size,
+     and hashes only the files of that size.  A request with the file
+     size 0 can find each file, and hashes the files as above.
    - cache: a source with a cache file hashes no file that an earlier
      source with that cache file hashed, if the file did not change,
      also with another list of files.  It hashes a file again after a
@@ -45,7 +48,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      and does not ask the second.  If the first gives NULL, the chain
      asks the second with the same arguments, gives its face or NULL,
      and calls its warning function one time with the arguments.  The
-     chain frees both sources.
+     chain frees both sources.  A chain with no warning function
+     works in the same way.
+   - unhashed: an unhashed source gives the face of its inner source
+     for a key with fewer than RD_HASH_SIZE bytes of hash, and asks the
+     inner source with the same key.  For a key with a full hash, it
+     gives NULL, and does not ask the inner source.  It frees the inner
+     source.
    - file names: the font file names of fontconfig have no duplicate,
      and they have the file of the match of "monospace".
 
@@ -79,12 +88,14 @@ enum { TRIALS = 40, STEPS = 30, SESSIONS = 3, MAX_FILES = 8 };
 /* The largest size of a test file with one face.  */
 enum { SMALL_FILE = 2000000 };
 
-/* A test file: its name, the number of its faces, and its hash.  */
+/* A test file: its name, the number of its faces, its hash, and its
+   size in bytes.  */
 struct test_file
 {
   char *name;
   int faces;
   uint8_t hash[RD_HASH_SIZE];
+  uint32_t size;
 };
 
 /* The identity of a face: the values that FreeType gives for it.  */
@@ -119,12 +130,18 @@ static bool unreadable_example (void);
 static bool names_example (void);
 static bool leading_space_case (const char *);
 static bool chain_example (void);
-static bool chain_case (bool, bool);
+static bool chain_case (bool, bool, bool);
+static bool unhashed_example (void);
 static bool file_names_example (void);
 static bool run_trial (uint64_t);
 static bool run_session (const char *, bool *, uint64_t *);
 static bool check_request (struct rc_font_source, const uint8_t *, int,
 			   int, const struct test_file *);
+static bool check_sized_request (struct rc_font_source, const uint8_t *,
+				 int, int, uint32_t,
+				 const struct test_file *);
+static int test_file_index (const char *);
+static bool size_matches (const char *, uint32_t);
 static struct rc_font_source new_source (const char *const *, int,
 					 const char *, struct counter *);
 static bool count_hash (void *, const char *, uint8_t *);
@@ -238,7 +255,14 @@ copy_test_file (const char *name, int faces)
       g_free (copy);
       return false;
     }
-  files[nfiles] = (struct test_file) { .name = copy, .faces = faces };
+  struct stat st;
+  if (stat (copy, &st) != 0)
+    {
+      g_free (copy);
+      return false;
+    }
+  files[nfiles] = (struct test_file) { .name = copy, .faces = faces,
+				       .size = st.st_size };
   file_hash (copy, files[nfiles].hash);
   nfiles++;
   return true;
@@ -255,9 +279,10 @@ run_examples (void)
   bool unreadable = unreadable_example ();
   bool names = names_example ();
   bool chain = chain_example ();
+  bool unhashed = unhashed_example ();
   bool file_names = file_names_example ();
   return (stale && bad_cache && unchanged && unreadable && names && chain
-	  && file_names);
+	  && unhashed && file_names);
 }
 
 /* The cache law for a file that changes, in three steps.  A copy of
@@ -572,13 +597,13 @@ struct fixed_source
 };
 
 static cairo_font_face_t *
-find_fixed (void *data, const uint8_t *hash, int nhash, uint32_t index)
+find_fixed (void *data, const struct rc_font_key *key)
 {
   struct fixed_source *source = data;
   source->finds++;
-  source->first_byte = hash[0];
-  source->nhash = nhash;
-  source->index = index;
+  source->first_byte = key->hash[0];
+  source->nhash = key->nhash;
+  source->index = key->index;
   return source->face ? cairo_font_face_reference (source->face) : NULL;
 }
 
@@ -593,12 +618,12 @@ destroy_fixed (void *data)
 static struct fixed_source warnings;
 
 static void
-record_warning (const uint8_t *hash, int nhash, uint32_t index)
+record_warning (const struct rc_font_key *key)
 {
   warnings.finds++;
-  warnings.first_byte = hash[0];
-  warnings.nhash = nhash;
-  warnings.index = index;
+  warnings.first_byte = key->hash[0];
+  warnings.nhash = key->nhash;
+  warnings.index = key->index;
 }
 
 /* The chain law, for each case of found and not found.  */
@@ -606,8 +631,8 @@ static bool
 chain_example (void)
 {
   bool passed = true;
-  for (int i = 0; i < 4; i++)
-    passed &= chain_case (i & 1, i & 2);
+  for (int i = 0; i < 8; i++)
+    passed &= chain_case (i & 1, i & 2, i & 4);
   if (!passed)
     fprintf (stderr, "test-fonts: example chain: the face, the calls, "
 	     "the arguments, or the frees are not correct\n");
@@ -616,9 +641,9 @@ chain_example (void)
 
 /* Return true if the chain law holds for a first source that finds a
    face if FIRST_FINDS, and a second source that finds a face if
-   SECOND_FINDS.  */
+   SECOND_FINDS.  The chain has a warning function if WARN.  */
 static bool
-chain_case (bool first_finds, bool second_finds)
+chain_case (bool first_finds, bool second_finds, bool warn)
 {
   cairo_font_face_t *a = cairo_toy_font_face_create ("a", 0, 0);
   cairo_font_face_t *b = cairo_toy_font_face_create ("b", 0, 0);
@@ -629,18 +654,21 @@ chain_case (bool first_finds, bool second_finds)
   struct rc_font_source chain = rc_font_source_chain
     ((struct rc_font_source) { find_fixed, destroy_fixed, &first },
      (struct rc_font_source) { find_fixed, destroy_fixed, &second },
-     record_warning);
-  cairo_font_face_t *found = chain.find (chain.data, hash, 17, 9);
+     warn ? record_warning : NULL);
+  struct rc_font_key key = { hash, 17, 9, 0 };
+  cairo_font_face_t *found = chain.find (chain.data, &key);
   cairo_font_face_t *expected = (first_finds ? a : second_finds ? b
 				 : NULL);
   bool passed = (found == expected && first.finds == 1
 		 && second.finds == !first_finds
-		 && warnings.finds == !first_finds
+		 && warnings.finds == (warn && !first_finds)
 		 && first.first_byte == 0x5a && first.nhash == 17
 		 && first.index == 9);
   if (!first_finds)
     passed = (passed && second.first_byte == 0x5a && second.nhash == 17
-	      && second.index == 9 && warnings.first_byte == 0x5a
+	      && second.index == 9);
+  if (!first_finds && warn)
+    passed = (passed && warnings.first_byte == 0x5a
 	      && warnings.nhash == 17 && warnings.index == 9);
   if (found)
     cairo_font_face_destroy (found);
@@ -648,6 +676,39 @@ chain_case (bool first_finds, bool second_finds)
   passed = passed && first.destroyed == 1 && second.destroyed == 1;
   cairo_font_face_destroy (a);
   cairo_font_face_destroy (b);
+  return passed;
+}
+
+/* The unhashed law, for each length of the hash and each result of the
+   inner source.  */
+static bool
+unhashed_example (void)
+{
+  cairo_font_face_t *a = cairo_toy_font_face_create ("a", 0, 0);
+  uint8_t hash[RD_HASH_SIZE] = { 0x5a };
+  bool passed = true;
+  for (int i = 0; i < 4; i++)
+    {
+      bool full = i & 1, inner_finds = i & 2;
+      struct fixed_source inner = { .face = inner_finds ? a : NULL };
+      struct rc_font_source source = rc_unhashed_font_source
+	((struct rc_font_source) { find_fixed, destroy_fixed, &inner });
+      struct rc_font_key key = { hash, full ? RD_HASH_SIZE : 5, 9, 0 };
+      cairo_font_face_t *found = source.find (source.data, &key);
+      passed &= (found == (!full && inner_finds ? a : NULL)
+		 && inner.finds == !full);
+      if (!full)
+	passed &= (inner.first_byte == 0x5a && inner.nhash == 5
+		   && inner.index == 9);
+      if (found)
+	cairo_font_face_destroy (found);
+      rc_font_source_free (source);
+      passed &= inner.destroyed == 1;
+    }
+  cairo_font_face_destroy (a);
+  if (!passed)
+    fprintf (stderr, "test-fonts: example unhashed: the face, the calls, "
+	     "or the frees are not correct\n");
   return passed;
 }
 
@@ -708,8 +769,9 @@ run_trial (uint64_t seed)
 /* Run a session of random requests with a hash source of a random list
    of the test files, with duplicates, and the cache file CACHE.
    HASHED tells which test files a source with CACHE hashed, and this
-   function updates it.  Return true if each request and the number of
-   hashes are correct.  */
+   function updates it.  The cache keeps a hash for the next source and
+   for a name that comes again in the list.  Return true if each
+   request and the number of hashes are correct.  */
 static bool
 run_session (const char *cache, bool *hashed, uint64_t *state)
 {
@@ -720,8 +782,6 @@ run_session (const char *cache, bool *hashed, uint64_t *state)
   struct counter counter = { 0 };
   struct rc_font_source source = new_source (list, n, cache, &counter);
   int expected_calls = 0;
-  /* The list positions before END are hashed in this session.  */
-  int end = 0;
   bool passed = true;
   for (int step = 0; passed && step < STEPS; step++)
     {
@@ -730,32 +790,34 @@ run_session (const char *cache, bool *hashed, uint64_t *state)
       uint8_t hash[RD_HASH_SIZE];
       memcpy (hash, file->hash, RD_HASH_SIZE);
       int nhash = RD_HASH_SIZE;
+      uint32_t size = file->size;
       if (kind == 0)
 	hash[random_below (state, RD_HASH_SIZE)] ^= 1;
       else if (kind == 1)
 	nhash = random_below (state, RD_HASH_SIZE);
+      else if (kind == 2)
+	size = 0;
+      else if (kind == 3)
+	size = files[random_below (state, nfiles)].size;
       int found_at = -1;
-      for (int i = 0; kind > 1 && found_at < 0 && i < n; i++)
-	if (list[i] == file->name)
+      bool findable = kind != 0 && nhash == RD_HASH_SIZE;
+      for (int i = 0; findable && found_at < 0 && i < n; i++)
+	if (list[i] == file->name && size_matches (list[i], size))
 	  found_at = i;
-      int new_end = (kind == 1 ? end
-		     : found_at < 0 ? n
-		     : found_at + 1 > end ? found_at + 1 : end);
-      for (int i = end; i < new_end; i++)
+      int last = (nhash < RD_HASH_SIZE ? -1 : found_at >= 0 ? found_at
+		  : n - 1);
+      for (int i = 0; i <= last; i++)
 	{
-	  bool seen = false;
-	  for (int j = 0; j < i; j++)
-	    seen |= list[j] == list[i];
-	  int test_index = 0;
-	  while (files[test_index].name != list[i])
-	    test_index++;
-	  if (!seen && !hashed[test_index])
-	    expected_calls++;
+	  int test_index = test_file_index (list[i]);
+	  if (size_matches (list[i], size) && !hashed[test_index])
+	    {
+	      expected_calls++;
+	      hashed[test_index] = true;
+	    }
 	}
-      end = new_end;
       int index = random_below (state, file->faces);
-      passed = check_request (source, hash, nhash, index,
-			      found_at >= 0 ? file : NULL);
+      passed = check_sized_request (source, hash, nhash, index, size,
+				    found_at >= 0 ? file : NULL);
       if (passed && counter.calls != expected_calls)
 	{
 	  fprintf (stderr, "test-fonts: %d hashes, not %d\n", counter.calls,
@@ -763,21 +825,46 @@ run_session (const char *cache, bool *hashed, uint64_t *state)
 	  passed = false;
 	}
     }
-  for (int i = 0; i < end; i++)
-    for (int j = 0; j < nfiles; j++)
-      if (files[j].name == list[i])
-	hashed[j] = true;
   rc_font_source_free (source);
   return passed;
 }
 
+/* Return the index in FILES of the test file NAME.  */
+static int
+test_file_index (const char *name)
+{
+  int i = 0;
+  while (files[i].name != name)
+    i++;
+  return i;
+}
+
+/* Return true if a request with the file size SIZE can find the test
+   file NAME.  */
+static bool
+size_matches (const char *name, uint32_t size)
+{
+  return size == 0 || files[test_file_index (name)].size == size;
+}
+
 /* Return true if SOURCE gives the face INDEX of FILE for the NHASH
-   bytes HASH, or NULL if FILE is NULL.  */
+   bytes HASH and the file size 0, or NULL if FILE is NULL.  */
 static bool
 check_request (struct rc_font_source source, const uint8_t *hash,
 	       int nhash, int index, const struct test_file *file)
 {
-  cairo_font_face_t *face = source.find (source.data, hash, nhash, index);
+  return check_sized_request (source, hash, nhash, index, 0, file);
+}
+
+/* Return true if SOURCE gives the face INDEX of FILE for the NHASH
+   bytes HASH and the file size SIZE, or NULL if FILE is NULL.  */
+static bool
+check_sized_request (struct rc_font_source source, const uint8_t *hash,
+		     int nhash, int index, uint32_t size,
+		     const struct test_file *file)
+{
+  struct rc_font_key key = { hash, nhash, index, size };
+  cairo_font_face_t *face = source.find (source.data, &key);
   if (!file || !face)
     {
       if (face)

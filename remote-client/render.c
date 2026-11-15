@@ -160,6 +160,12 @@ rc_font_source_free (struct rc_font_source source)
     source.destroy (source.data);
 }
 
+bool
+rc_renderer_has_font (const struct rc_renderer *renderer, uint32_t font)
+{
+  return rc_table_get (&renderer->fonts, font) != NULL;
+}
+
 cairo_surface_t *
 rc_frame_surface (struct rc_renderer *renderer, uint32_t frame)
 {
@@ -306,8 +312,9 @@ define_font (struct rc_renderer *renderer,
 	     const struct rd_define_font *define)
 {
   struct rc_font_source *source = &renderer->source;
-  cairo_font_face_t *face = source->find (source->data, define->hash,
-					  define->nhash, define->index);
+  struct rc_font_key key = { define->hash, define->nhash, define->index,
+			     define->file_size };
+  cairo_font_face_t *face = source->find (source->data, &key);
   cairo_scaled_font_t *font = face ? scaled_font (face, define->size)
 			      : NULL;
   cairo_font_face_destroy (face);

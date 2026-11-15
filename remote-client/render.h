@@ -25,6 +25,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_RENDER_H
 #define REMOTE_CLIENT_RENDER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <cairo.h>
@@ -42,16 +43,25 @@ enum { RC_MAX_FRAME_SIZE = 32767 };
    glyph of RC_MAX_FONT_SIZE pixels needs a glyph image of 16 MB.  */
 enum { RC_MAX_FONT_SIZE = 4096 };
 
+/* The font of a define-font message: the face INDEX of the font file
+   whose SHA-256 hash is the NHASH bytes HASH.  The file has FILE_SIZE
+   bytes.  */
+struct rc_font_key
+{
+  const uint8_t *hash;
+  int nhash;
+  uint32_t index;
+  uint32_t file_size;
+};
+
 /* A source of the fonts that a renderer draws with.  FIND returns a
-   new reference to the Cairo font face of the face INDEX of the font
-   file whose SHA-256 hash is the NHASH bytes HASH.  It returns NULL if
-   it has no face for them.  DATA is the first argument of FIND and
-   DESTROY.  The maker of a source owns it, and frees it with
+   new reference to the Cairo font face of the font KEY.  It returns
+   NULL if it has no face for KEY.  DATA is the first argument of FIND
+   and DESTROY.  The maker of a source owns it, and frees it with
    rc_font_source_free.  DESTROY frees DATA, and can be NULL.  */
 struct rc_font_source
 {
-  cairo_font_face_t *(*find) (void *data, const uint8_t *hash, int nhash,
-			      uint32_t index);
+  cairo_font_face_t *(*find) (void *data, const struct rc_font_key *key);
   void (*destroy) (void *data);
   void *data;
 };
@@ -65,6 +75,11 @@ struct rc_renderer;
    stay valid until rc_renderer_free frees the renderer.  */
 extern struct rc_renderer *rc_renderer_new (struct rc_font_source fonts);
 extern void rc_renderer_free (struct rc_renderer *renderer);
+
+/* Return true if the last define-font message for the font ID FONT
+   gave RENDERER a face to draw with.  */
+extern bool rc_renderer_has_font (const struct rc_renderer *renderer,
+				  uint32_t font);
 
 /* The kinds of change of a frame.  */
 enum rc_change_kind

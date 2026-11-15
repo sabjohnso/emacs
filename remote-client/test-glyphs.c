@@ -49,10 +49,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - own font: a draw uses the font of its ID, and no other font.
    - not found: after a define-font that the font source does not
      find, a draw with that font ID changes no pixel.
-   - source: the font source gets the hash and the index of the
-     define-font message.
+   - source: the font source gets the hash, the index, and the file
+     size of the define-font message.
    - large size: a define-font with a size above RC_MAX_FONT_SIZE
      defines no font, and does not stop the draws of other fonts.
+     rc_renderer_has_font tells which fonts have a face: not that font,
+     the other font, and not a font with no definition.
 
    The font source of the trials finds the fallback face, the
    fontconfig match of "monospace", for a font with a hash, and no
@@ -94,9 +96,12 @@ enum { NFONTS = 3 };
 /* The fallback font source of the test.  */
 static struct rc_font_source fallback;
 
+/* A key with no hash, for the fallback source.  */
+static const struct rc_font_key no_key = { NULL, 0, 0, 0 };
+
 /* The font source of the trials.  */
-static cairo_font_face_t *find_with_hash (void *, const uint8_t *, int,
-					  uint32_t);
+static cairo_font_face_t *find_with_hash (void *,
+					  const struct rc_font_key *);
 static const struct rc_font_source hash_source = { find_with_hash, NULL,
 						   NULL };
 
@@ -120,8 +125,8 @@ static bool own_font_example (void);
 static bool not_found_example (void);
 static bool source_example (void);
 static bool large_size_example (void);
-static cairo_font_face_t *record_find (void *, const uint8_t *, int,
-				       uint32_t);
+static cairo_font_face_t *record_find (void *,
+					  const struct rc_font_key *);
 static bool draw_changes (struct rc_renderer *, uint32_t);
 static bool run_trial (uint64_t);
 static void reference_apply (struct reference *,
@@ -329,7 +334,7 @@ not_found_example (void)
 static bool
 source_example (void)
 {
-  uint8_t recorded[4] = { 0 };
+  uint8_t recorded[5] = { 0 };
   struct rc_renderer *renderer
     = rc_renderer_new ((struct rc_font_source) { record_find, NULL,
 						 recorded });
@@ -338,13 +343,14 @@ source_example (void)
   define.u.define_font.nhash = 2;
   define.u.define_font.hash[0] = 0xab;
   define.u.define_font.hash[1] = 0xcd;
+  define.u.define_font.file_size = 0x155;
   rc_apply (renderer, &define);
   rc_renderer_free (renderer);
   if (recorded[0] != 0xab || recorded[1] != 0xcd || recorded[2] != 2
-      || recorded[3] != 3)
+      || recorded[3] != 3 || recorded[4] != 0x55)
     {
       fprintf (stderr, "test-glyphs: example source: the source did not "
-	       "get the hash and the index\n");
+	       "get the hash, the index, and the file size\n");
       return false;
     }
   return true;
@@ -363,38 +369,42 @@ large_size_example (void)
     rc_apply (renderer, &messages[i]);
   bool large = draw_changes (renderer, 8);
   bool other = draw_changes (renderer, 7);
+  bool faces = (!rc_renderer_has_font (renderer, 8)
+		&& rc_renderer_has_font (renderer, 7)
+		&& !rc_renderer_has_font (renderer, 9));
   rc_renderer_free (renderer);
-  if (large || !other)
+  if (large || !other || !faces)
     {
       fprintf (stderr, "test-glyphs: example large size: the font 8 "
-	       "drew, or the font 7 did not draw\n");
+	       "drew, the font 7 did not draw, or a face is not "
+	       "correct\n");
       return false;
     }
   return true;
 }
 
 /* The FIND function of a font source that records the first two bytes
-   of HASH, NHASH, and INDEX in DATA, an array of 4 bytes.  It finds no
-   face.  */
+   of the hash of KEY, its number of bytes, its index, and the low byte
+   of its file size in DATA, an array of 5 bytes.  It finds no face.  */
 static cairo_font_face_t *
-record_find (void *data, const uint8_t *hash, int nhash, uint32_t index)
+record_find (void *data, const struct rc_font_key *key)
 {
   uint8_t *recorded = data;
-  recorded[0] = nhash > 0 ? hash[0] : 0;
-  recorded[1] = nhash > 1 ? hash[1] : 0;
-  recorded[2] = nhash;
-  recorded[3] = index;
+  recorded[0] = key->nhash > 0 ? key->hash[0] : 0;
+  recorded[1] = key->nhash > 1 ? key->hash[1] : 0;
+  recorded[2] = key->nhash;
+  recorded[3] = key->index;
+  recorded[4] = key->file_size;
   return NULL;
 }
 
 /* The FIND function of a font source that finds the fallback face for
    a font with a hash, and no face for a font with no hash.  */
 static cairo_font_face_t *
-find_with_hash (void *data, const uint8_t *hash, int nhash,
-		uint32_t index)
+find_with_hash (void *data, const struct rc_font_key *key)
 {
   (void) data;
-  return nhash ? fallback.find (fallback.data, hash, nhash, index) : NULL;
+  return key->nhash ? fallback.find (fallback.data, key) : NULL;
 }
 
 /* Clear the frame of RENDERER, draw the glyph "M" with FONT, and
@@ -546,7 +556,7 @@ reference_font (uint32_t size)
 {
   if (size > RC_MAX_FONT_SIZE)
     return NULL;
-  cairo_font_face_t *face = fallback.find (fallback.data, NULL, 0, 0);
+  cairo_font_face_t *face = fallback.find (fallback.data, &no_key);
   cairo_matrix_t matrix, identity;
   cairo_matrix_init_scale (&matrix, size, size);
   cairo_matrix_init_identity (&identity);
@@ -633,7 +643,7 @@ same_pixels (const struct pixels *a, const struct pixels *b)
 static int
 glyph_index (const char *text)
 {
-  cairo_font_face_t *face = fallback.find (fallback.data, NULL, 0, 0);
+  cairo_font_face_t *face = fallback.find (fallback.data, &no_key);
   cairo_matrix_t size, identity;
   cairo_matrix_init_scale (&size, 20, 20);
   cairo_matrix_init_identity (&identity);
@@ -658,7 +668,7 @@ glyph_index (const char *text)
 static int
 glyph_advance (int index, int size)
 {
-  cairo_font_face_t *face = fallback.find (fallback.data, NULL, 0, 0);
+  cairo_font_face_t *face = fallback.find (fallback.data, &no_key);
   cairo_matrix_t matrix, identity;
   cairo_matrix_init_scale (&matrix, size, size);
   cairo_matrix_init_identity (&identity);

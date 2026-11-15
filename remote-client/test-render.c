@@ -122,8 +122,8 @@ struct example
   const uint32_t *pixels;
 };
 
-static cairo_font_face_t *find_no_font (void *, const uint8_t *, int,
-					uint32_t);
+static cairo_font_face_t *find_no_font (void *,
+					  const struct rc_font_key *);
 
 /* This test does not draw glyphs, so its renderers have no fonts.  */
 static const struct rc_font_source no_fonts = { find_no_font, NULL, NULL };
@@ -331,9 +331,9 @@ run_example (const struct example *example)
 
 /* The FIND function of a font source with no fonts.  */
 static cairo_font_face_t *
-find_no_font (void *data, const uint8_t *hash, int nhash, uint32_t index)
+find_no_font (void *data, const struct rc_font_key *key)
 {
-  (void) data, (void) hash, (void) nhash, (void) index;
+  (void) data, (void) key;
   return NULL;
 }
 

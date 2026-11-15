@@ -111,6 +111,7 @@ static void (*const remote_input_functions[RD_TYPE_LIMIT])
     [RD_FOCUS] = remote_focus_input,
     [RD_RESIZE] = remote_resize_input,
     [RD_CLOSE_FRAME] = remote_close_input,
+    [RD_WANT_FONT] = remote_want_font,
   };
 
 void

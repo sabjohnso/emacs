@@ -269,6 +269,12 @@ syms_of_remotefns (void)
   Vremote_display__hash_size = make_fixnum (RD_HASH_SIZE);
   make_symbol_constant (intern_c_string ("remote-display--hash-size"));
 
+  DEFVAR_LISP ("remote-display--max-font-chunk",
+	       Vremote_display__max_font_chunk,
+	       doc: /* The maximum number of bytes in a `font-data' message.  */);
+  Vremote_display__max_font_chunk = make_fixnum (RD_MAX_FONT_CHUNK);
+  make_symbol_constant (intern_c_string ("remote-display--max-font-chunk"));
+
   DEFVAR_LISP ("remote-display--modifier-bits",
 	       Vremote_display__modifier_bits,
 	       doc: /* The bits of the modifiers field of an input message.

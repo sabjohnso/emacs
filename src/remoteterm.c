@@ -56,7 +56,9 @@ static Lisp_Object remote_color_map;
    so it does not keep a closed font.  REMOTE_FONT_IDENTITIES maps the
    identity (HASH INDEX SIZE) of a font to its entry, so two font
    objects of the same font have one ID.  An entry is the vector
-   [ID HASH INDEX SIZE].  HASH is a unibyte string.  */
+   [ID HASH INDEX SIZE FILE-SIZE FILE].  HASH is a unibyte string,
+   FILE-SIZE is the number of bytes of the file, and FILE is the name
+   of the file.  */
 static Lisp_Object remote_fonts;
 static Lisp_Object remote_font_identities;
 static uint32_t remote_last_font_id;
@@ -103,8 +105,6 @@ static bool remote_defined_color (struct frame *, const char *,
 				  Emacs_Color *, bool, bool);
 static void remote_set_cursor_type (struct frame *, Lisp_Object, Lisp_Object);
 static struct redisplay_interface remote_redisplay_interface;
-static void remote_send_message (struct remote_display_info *,
-				 const struct rd_message *);
 static void remote_send_draw (struct frame *, const struct rd_message *);
 static void remote_define_frame (struct frame *);
 static void remote_forget_frames (struct remote_display_info *);
@@ -121,8 +121,9 @@ static void remote_draw_automatic_composition (struct glyph_string *);
 static void remote_send_glyphs (struct glyph_string *, int, int, int, int);
 static void remote_clear_frame_area (struct frame *, int, int, int, int);
 static uint32_t remote_font_id (Lisp_Object);
+static bool remote_entry_has_hash (Lisp_Object, const unsigned char *);
 static Lisp_Object remote_font_entry (struct font *);
-static Lisp_Object remote_font_hash (struct font *);
+static Lisp_Object remote_font_hash (struct font *, uint32_t *);
 static Lisp_Object remote_font_identity (struct font *, Lisp_Object,
 					 Lisp_Object, Lisp_Object);
 static void remote_ensure_font_defined (struct remote_display_info *,
@@ -559,7 +560,7 @@ struct remote_sink
 /* Send MESSAGE to the client of DPYINFO.  Do nothing if no client is
    attached.  A draw on a frame must go through remote_send_draw
    instead, so the client knows the frame first.  */
-static void
+void
 remote_send_message (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
 {
@@ -653,6 +654,33 @@ remote_flush_frame (struct frame *f)
     sink->ops->flush (sink->data);
 }
 
+/* The transport of the client of DPYINFO calls this when it sent
+   all the bytes that it had.  */
+void
+remote_output_drained (struct remote_display_info *dpyinfo)
+{
+  remote_send_font_data (dpyinfo);
+}
+
+/* Return the number of bytes that the sink of DPYINFO did not send,
+   or 0 if DPYINFO has no client.  */
+ptrdiff_t
+remote_queued (struct remote_display_info *dpyinfo)
+{
+  struct remote_sink *sink = dpyinfo->sink;
+  return sink ? sink->ops->queued (sink->data) : 0;
+}
+
+/* Send the bytes that the sink of DPYINFO keeps, if DPYINFO has a
+   client.  */
+void
+remote_flush (struct remote_display_info *dpyinfo)
+{
+  struct remote_sink *sink = dpyinfo->sink;
+  if (sink)
+    sink->ops->flush (sink->data);
+}
+
 /* Return a new sink with the operations OPS and the data DATA.  */
 struct remote_sink *
 remote_make_sink (const struct remote_sink_ops *ops, void *data)
@@ -688,6 +716,7 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
 {
   struct remote_sink *old = dpyinfo->sink;
   dpyinfo->sink = sink;
+  remote_drop_font_transfers (dpyinfo);
 
   /* A new client has no font or frame definitions, and shows
      nothing.  */
@@ -1693,7 +1722,8 @@ remote_font_entry (struct font *font)
   if (!NILP (entry))
     return entry;
 
-  Lisp_Object hash = remote_font_hash (font);
+  uint32_t file_size = 0;
+  Lisp_Object hash = remote_font_hash (font, &file_size);
   Lisp_Object index = make_int (ftcrfont_face_index (font));
   Lisp_Object size = make_int (font->pixel_size);
   Lisp_Object identity = remote_font_identity (font, hash, index, size);
@@ -1701,7 +1731,8 @@ remote_font_entry (struct font *font)
   if (NILP (entry))
     {
       entry = CALLN (Fvector, make_fixnum (++remote_last_font_id),
-		     NILP (hash) ? empty_unibyte_string : hash, index, size);
+		     NILP (hash) ? empty_unibyte_string : hash, index, size,
+		     make_fixnum (file_size), font->props[FONT_FILE_INDEX]);
       Fputhash (identity, entry, remote_font_identities);
     }
   Fputhash (font_object, entry, remote_fonts);
@@ -1724,20 +1755,23 @@ remote_font_identity (struct font *font, Lisp_Object hash,
 }
 
 /* Return the hash of the file of FONT as a unibyte string, or nil if
-   the file cannot be read.  */
+   the file cannot be read.  Put the number of bytes of the file in
+   *FILE_SIZE.  */
 static Lisp_Object
-remote_font_hash (struct font *font)
+remote_font_hash (struct font *font, uint32_t *file_size)
 {
   unsigned char hash[RD_HASH_SIZE];
-  if (!remote_file_hash (font->props[FONT_FILE_INDEX], hash))
+  if (!remote_file_hash (font->props[FONT_FILE_INDEX], hash, file_size))
     return Qnil;
   return make_unibyte_string ((char *) hash, RD_HASH_SIZE);
 }
 
-/* Set HASH to the SHA-256 hash of the bytes of FILE, and return true.
-   Return false if FILE is not a string or cannot be read.  */
+/* Set HASH to the SHA-256 hash of the bytes of FILE, set *SIZE to
+   the number of bytes, and return true.  Return false if FILE is not
+   a string or cannot be read, or if its size does not fit in 32 bits,
+   the size of the file-size field of a define-font message.  */
 bool
-remote_file_hash (Lisp_Object file, unsigned char *hash)
+remote_file_hash (Lisp_Object file, unsigned char *hash, uint32_t *size)
 {
   if (!STRINGP (file))
     return false;
@@ -1748,13 +1782,72 @@ remote_file_hash (Lisp_Object file, unsigned char *hash)
   sha256_init_ctx (&ctx);
   char buffer[16 * 1024];
   ptrdiff_t n;
+  uintmax_t total = 0;
   while ((n = emacs_read (fd, buffer, sizeof buffer)) > 0)
-    sha256_process_bytes (buffer, n, &ctx);
+    {
+      sha256_process_bytes (buffer, n, &ctx);
+      total += n;
+    }
   emacs_close (fd);
-  if (n < 0)
+  if (n < 0 || UINT32_MAX < total)
     return false;
   sha256_finish_ctx (&ctx, hash);
+  *size = total;
   return true;
+}
+
+/* Return the name of the file of a font with the hash HASH, of
+   RD_HASH_SIZE bytes, and put its size in *SIZE.  Return nil if no
+   font of a session has that hash.  */
+Lisp_Object
+remote_font_file (const unsigned char *hash, uint32_t *size)
+{
+  DOHASH (XHASH_TABLE (remote_font_identities), identity, entry)
+    if (remote_entry_has_hash (entry, hash))
+      {
+	*size = XFIXNAT (AREF (entry, 4));
+	return AREF (entry, 5);
+      }
+  return Qnil;
+}
+
+/* Forget that the client of DPYINFO has the definitions of the fonts
+   with the hash HASH, of RD_HASH_SIZE bytes.  The next draw with such
+   a font defines it again.  */
+void
+remote_forget_fonts (struct remote_display_info *dpyinfo,
+		     const unsigned char *hash)
+{
+  DOHASH (XHASH_TABLE (remote_font_identities), identity, entry)
+    {
+      uint32_t id = remote_font_id (entry);
+      if (remote_entry_has_hash (entry, hash)
+	  && id < dpyinfo->font_defined_size)
+	dpyinfo->font_defined[id] = false;
+    }
+}
+
+/* Return true if the font ENTRY has the hash HASH, of RD_HASH_SIZE
+   bytes.  */
+static bool
+remote_entry_has_hash (Lisp_Object entry, const unsigned char *hash)
+{
+  Lisp_Object entry_hash = AREF (entry, 1);
+  return (SBYTES (entry_hash) == RD_HASH_SIZE
+	  && !memcmp (SDATA (entry_hash), hash, RD_HASH_SIZE));
+}
+
+/* Draw each frame of DPYINFO again at the next redisplay.  */
+void
+remote_redraw_frames (struct remote_display_info *dpyinfo)
+{
+  Lisp_Object tail, frame;
+  FOR_EACH_FRAME (tail, frame)
+    {
+      struct frame *f = XFRAME (frame);
+      if (FRAME_REMOTE_P (f) && FRAME_DISPLAY_INFO (f) == dpyinfo)
+	SET_FRAME_GARBAGED (f);
+    }
 }
 
 /* Return true if the client of DPYINFO has the definition of the font
@@ -1778,7 +1871,8 @@ remote_define_font (struct remote_display_info *dpyinfo, Lisp_Object entry)
       .type = RD_DEFINE_FONT,
       .u.define_font = { .font = id, .index = XFIXNUM (AREF (entry, 2)),
 			 .size = XFIXNUM (AREF (entry, 3)),
-			 .nhash = SBYTES (hash) },
+			 .nhash = SBYTES (hash),
+			 .file_size = XFIXNUM (AREF (entry, 4)) },
     };
   memcpy (message.u.define_font.hash, SDATA (hash), SBYTES (hash));
   remote_send_message (dpyinfo, &message);

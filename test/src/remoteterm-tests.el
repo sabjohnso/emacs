@@ -167,8 +167,9 @@
 ;;     font, and no font has two definitions.  The frames of a session
 ;;     have the same definitions.
 ;; 36. Font identity: a definition has the SHA-256 hash of the font
-;;     file, the face index in the file, and the pixel size.  Two IDs
-;;     of fonts with a hash do not have the same hash, index, and size.
+;;     file, the face index in the file, the pixel size, and the size
+;;     of the file in bytes.  Two IDs of fonts with a hash do not
+;;     have the same hash, index, and size.
 ;;     A font with no hash has the ID of its file name, index, and size.
 ;;     A font keeps its ID after a new attach, and after Emacs opens it
 ;;     again.
@@ -187,6 +188,20 @@
 ;;     deletes its first frame, so that frame is live and has drawn.
 ;;     It collects again after the body of the test.  The test fails if
 ;;     the daemon does not do that last collection, or crashes in it.
+;; 40. Font transfer: a want-font message for the hash of a font of the
+;;     session gives font-data messages with the bytes of its file, in
+;;     order, with the file size as their total.  A second want-font
+;;     message for the file while the session sends it adds no bytes.
+;;     A want-font message for an unknown hash or a short hash gives
+;;     no font-data message, and also a hash of a file that changed
+;;     after the definition of its font.  After the last font-data
+;;     message, the session defines the font again, and draws the frame
+;;     again.
+;; 41. Font pace: while the sink of a session reports 65536 bytes or
+;;     more that it did not send, the session sends no font data.  When
+;;     the transport reports an empty queue, the session sends the rest
+;;     of the file.  A new client gets no font data that an old client
+;;     asked for.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -4226,6 +4241,8 @@ font."
             (should (equal (plist-get (cdr (assq id definitions)) :hash)
                            hash))
             (should (= (plist-get (cdr (assq id definitions)) :size) size))
+            (should (= (plist-get (cdr (assq id definitions)) :file-size)
+                       (file-attribute-size (file-attributes file))))
             (unless (string-match-p "\\.ttc\\'" file)
               (should (= (plist-get (cdr (assq id definitions)) :index) 0)))
             (should (equal (assq id definitions-again)
@@ -6092,6 +6109,272 @@ error, and WORKS is t if the first socket still works."
       (remoteterm-tests--with-frame _frame "remote-listen-a" nil
         (ignore-errors (x-close-connection "remote-listen-a"))
         (and (remoteterm-tests--listen-socket-works-p socket) t)))))
+
+;;;; Font transfer
+
+(ert-deftest remoteterm-tests-font-transfer ()
+  "The session sends the font file of a want-font message (law 40)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--font-transfer-case)
+                   '(:hash t :size t :offsets t :unknown nil
+                     :redefined t)))))
+
+(defun remoteterm-tests--font-transfer-case ()
+  "Ask a session for the file of a font of its frame, and for an unknown file.
+Return a plist.  :hash and :size are t if the bytes of the font-data
+messages have the hash and the file size of the define-font message.
+:offsets is t if the offset of each font-data message is the number of
+bytes before it, and its total is the file size.  :unknown is t if a
+font-data message has the unknown hash.  :redefined is t if a
+define-font message for the font and a draw-glyphs message with it
+come after the last font-data message."
+  (remoteterm-tests--with-display "remote-font"
+    (let* ((socket (remote-display-listen "remote-font"))
+           (frame (remoteterm-tests--make-frame "remote-font" nil))
+           (buffer (generate-new-buffer "font"))
+           (connection (remoteterm-tests--connect socket))
+           (unknown (make-vector 32 #xee)))
+      (set-window-buffer (frame-root-window frame) buffer)
+      (select-frame frame)
+      (with-current-buffer buffer
+        (insert "abc"))
+      (unwind-protect
+          (let* ((define (remoteterm-tests--await-define-font connection))
+                 (fields (cdr define))
+                 (hash (plist-get fields :hash))
+                 (size (plist-get fields :file-size)))
+            (setcar (cdr connection) nil)
+            (process-send-string
+             (car connection)
+             (concat (remote-display--encode `(want-font :hash ,unknown))
+                     (remote-display--encode
+                      `(want-font :hash ,(seq-take hash 31)))
+                     (remote-display--encode `(want-font :hash ,hash))
+                     (remote-display--encode `(want-font :hash ,hash))))
+            (let* ((messages (remoteterm-tests--await-font-data
+                              connection hash size))
+                   (data (seq-filter (lambda (message)
+                                       (eq (car message) 'font-data))
+                                     messages))
+                   (after (cdr (memq (car (last data)) messages)))
+                   (bytes (apply #'unibyte-string
+                                 (seq-mapcat
+                                  (lambda (message)
+                                    (append (plist-get (cdr message) :bytes)
+                                            nil))
+                                  data))))
+              (list :hash (equal (secure-hash 'sha256 bytes nil nil t)
+                                 (apply #'unibyte-string (append hash nil)))
+                    :size (= (length bytes) size)
+                    :offsets (remoteterm-tests--font-offsets-p data size)
+                    :unknown (and (seq-find
+                                   (lambda (message)
+                                     (equal (plist-get (cdr message) :hash)
+                                            unknown))
+                                   data)
+                                  t)
+                    :redefined (remoteterm-tests--redefined-p
+                                after (plist-get fields :font)))))
+        (delete-process (car connection))
+        (delete-frame frame)
+        (kill-buffer buffer)))))
+
+(ert-deftest remoteterm-tests-font-pace ()
+  "Font data waits while the sink of the session is full (law 41)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let (((map :full :rest :size :dropped)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--font-pace-case)))
+      (should (= full 0))
+      (should (= rest size))
+      (should (= dropped 0)))))
+
+(defun remoteterm-tests--font-pace-case ()
+  "Ask for a font file while the sink of the session is full.
+The value of the form of `remoteterm-tests--font-pace-form'."
+  (eval (remoteterm-tests--font-pace-form) t))
+
+(defun remoteterm-tests--font-pace-form ()
+  "Return a form that asks for a font file with a full sink.
+The value of the form is a plist.  :full is the number of bytes of
+font data that the session sends while the sink reports 65536 bytes.
+:rest is the number of bytes of font data after the sink reports
+65535 bytes and an empty queue.  :size is the file size of the font.
+:dropped is the number of bytes of font data that a new client gets
+after the old client asked for the file with a full sink."
+  (remoteterm-tests--frame-form
+   '((width . 30))
+   '(insert "abc")
+   '(let* ((define (seq-find (lambda (message)
+                               (and (eq (car message) 'define-font)
+                                    (= (length (plist-get (cdr message)
+                                                          :hash))
+                                       32)))
+                             (remoteterm-tests--all-messages output)))
+           (hash (plist-get (cdr define) :hash))
+           (want (remote-display--encode `(want-font :hash ,hash)))
+           (data-bytes (lambda ()
+                         (remoteterm-tests--font-data-bytes
+                          (remote-display--take-output display)))))
+      (remote-display--set-queued display 65536)
+      (remote-display--input display want)
+      (list :full (funcall data-bytes)
+            :rest (progn (remote-display--set-queued display 65535)
+                         (remote-display--queue-empty display)
+                         (funcall data-bytes))
+            :size (plist-get (cdr define) :file-size)
+            :dropped (progn (remote-display--set-queued display 65536)
+                            (remote-display--input display want)
+                            (remote-display--record display)
+                            (remote-display--queue-empty display)
+                            (funcall data-bytes))))))
+
+(defun remoteterm-tests--font-data-bytes (bytes)
+  "Return the number of bytes of font data in the messages of BYTES."
+  (apply #'+ (mapcar (lambda (message)
+                       (if (eq (car message) 'font-data)
+                           (length (plist-get (cdr message) :bytes))
+                         0))
+                     (remoteterm-tests--all-messages bytes))))
+
+(ert-deftest remoteterm-tests-font-changed ()
+  "A font file that changed after its definition is not sent (law 40)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--font-changed-case)
+                   '(:defined t :data 0)))))
+
+(defun remoteterm-tests--font-changed-case ()
+  "Define a font from a copy of its file, change the copy, and ask for it.
+Return a plist.  :defined is t if the session defined the font with the
+hash of the copy.  :data is the number of bytes of font data after the
+want-font message."
+  (let ((copy (make-temp-file "rd-font")))
+    (unwind-protect
+        (eval (remoteterm-tests--font-changed-form copy) t)
+      (delete-file copy))))
+
+(defun remoteterm-tests--font-changed-form (copy)
+  "Return a form that draws with a font whose file is COPY, and changes COPY.
+COPY gets the bytes of the default font file of the frame first, and
+one more byte, so no other font file has its hash.  The value of the
+form is as for `remoteterm-tests--font-changed-case'."
+  (remoteterm-tests--frame-form
+   '((width . 30))
+   `(progn
+      (copy-file (aref (font-info (face-font 'default frame) frame) 12)
+                 ,copy t)
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region "\0" nil ,copy t 'silent))
+      (remoteterm-tests--insert-font-lines
+       (list ,copy) frame (cl-incf remoteterm-tests--last-font-size) nil))
+   `(let* ((hash (remote-display--file-hash ,copy))
+           (define (seq-find (lambda (message)
+                               (and (eq (car message) 'define-font)
+                                    (equal (plist-get (cdr message) :hash)
+                                           hash)))
+                             (remoteterm-tests--all-messages output))))
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region "x" nil ,copy nil 'silent))
+      (remote-display--input display
+                             (remote-display--encode
+                              `(want-font :hash ,hash)))
+      (list :defined (and define t)
+            :data (remoteterm-tests--font-data-bytes
+                   (remote-display--take-output display))))))
+
+(defun remoteterm-tests--received-messages (connection)
+  "Return the messages that CONNECTION got.
+CONNECTION is (PROCESS . RECEIVED), as `remoteterm-tests--connect'
+returns.  A message that is not complete is left out."
+  (let ((bytes (string-to-unibyte
+                (apply #'concat (reverse (cadr connection)))))
+        (messages nil)
+        (start 0))
+    (while (let ((length (and (<= (+ start 4) (length bytes))
+                              (+ 4 (logior (ash (aref bytes start) 24)
+                                           (ash (aref bytes (+ start 1)) 16)
+                                           (ash (aref bytes (+ start 2)) 8)
+                                           (aref bytes (+ start 3)))))))
+             (and length (<= (+ start length) (length bytes))))
+      (let ((result (remote-display--decode bytes start)))
+        (push (car result) messages)
+        (setq start (+ start (cdr result)))))
+    (nreverse messages)))
+
+(defun remoteterm-tests--await-define-font (connection)
+  "Attach CONNECTION, and return the first define-font message with a hash.
+Wait at most 10 seconds, with a redisplay at each step."
+  (remoteterm-tests--reset-and-ping connection 7)
+  (let ((end (+ (float-time) 10))
+        (found nil))
+    (while (and (not found) (< (float-time) end))
+      (redisplay t)
+      (accept-process-output (car connection) 0.05)
+      (setq found (seq-find
+                   (lambda (message)
+                     (and (eq (car message) 'define-font)
+                          (= (length (plist-get (cdr message) :hash)) 32)))
+                   (remoteterm-tests--received-messages connection))))
+    found))
+
+(defun remoteterm-tests--await-font-data (connection hash size)
+  "Return the messages of CONNECTION after the font-data of HASH and SIZE.
+Wait until the font-data messages for HASH have SIZE bytes, and then
+for a draw-glyphs message after them, with a redisplay at each step.
+Wait at most 10 seconds."
+  (let ((end (+ (float-time) 10))
+        (messages nil))
+    (while (and (< (float-time) end)
+                (not (remoteterm-tests--complete-p messages hash size)))
+      (redisplay t)
+      (accept-process-output (car connection) 0.05)
+      (setq messages (remoteterm-tests--received-messages connection)))
+    messages))
+
+(defun remoteterm-tests--complete-p (messages hash size)
+  "Return non-nil if MESSAGES have SIZE bytes of HASH and then a draw."
+  (let ((got 0)
+        (drawn nil))
+    (dolist (message messages)
+      (pcase (car message)
+        ('font-data
+         (when (equal (plist-get (cdr message) :hash) hash)
+           (setq got (+ got (length (plist-get (cdr message) :bytes))))
+           (setq drawn nil)))
+        ('draw-glyphs (setq drawn (>= got size)))))
+    (and (>= got size) drawn)))
+
+(defun remoteterm-tests--font-offsets-p (data size)
+  "Return t if each message of DATA starts after the bytes before it.
+Each message must also have the total SIZE."
+  (let ((offset 0)
+        (correct t))
+    (dolist (message data)
+      (let ((fields (cdr message)))
+        (unless (and (= (plist-get fields :offset) offset)
+                     (= (plist-get fields :total) size))
+          (setq correct nil))
+        (setq offset (+ offset (length (plist-get fields :bytes))))))
+    correct))
+
+(defun remoteterm-tests--redefined-p (messages font)
+  "Return t if MESSAGES define FONT, and then draw glyphs with it."
+  (let ((defined (seq-position messages font
+                               (lambda (message id)
+                                 (and (eq (car message) 'define-font)
+                                      (equal (plist-get (cdr message) :font)
+                                             id))))))
+    (and defined
+         (seq-find (lambda (message)
+                     (and (eq (car message) 'draw-glyphs)
+                          (equal (plist-get (cdr message) :font) font)))
+                   (nthcdr defined messages))
+         t)))
 
 (ert-deftest remoteterm-tests-listen-end-closes-client ()
   "When a session ends, the connection of its client closes.

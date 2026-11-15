@@ -79,10 +79,14 @@
 ;;     draw only the bits that are 1, on the pixels that are there.
 ;;     If C is not 0, the bitmap is the cursor in the fringe.  The
 ;;     number of rows is at most `remote-display--max-fringe-rows'.
-;; (define-font :font ID :index I :size S :hash [BYTE...])
+;; (define-font :font ID :index I :size S :hash [BYTE...] :file-size N)
 ;;     The font ID of the session is the face I of the font file with
 ;;     the SHA-256 hash BYTE..., at the size of S pixels.  The hash has
-;;     `remote-display--hash-size' bytes.
+;;     `remote-display--hash-size' bytes.  The file has N bytes.
+;; (font-data :hash [BYTE...] :offset O :total N :bytes [BYTE...])
+;;     The bytes of the font file with the hash, from the offset O.  The
+;;     file has N bytes.  A message has at most
+;;     `remote-display--max-font-chunk' bytes of the file.
 ;; (define-frame :frame F :width W :height H)
 ;;     The frame F exists, and it has the size W, H in pixels.  A
 ;;     client opens a window for a new frame, and changes the size of
@@ -109,6 +113,9 @@
 ;; (close-frame :frame F)
 ;;     The user asked to close the window of F.  The server decides
 ;;     whether to delete F.
+;; (want-font :hash [BYTE...])
+;;     The client does not have the font file with the hash, and asks
+;;     the server for it.
 ;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
@@ -128,6 +135,7 @@
 
 (defvar remote-display--max-glyphs)
 (defvar remote-display--hash-size)
+(defvar remote-display--max-font-chunk)
 (defvar remote-display--max-fringe-rows)
 (defvar remote-display--message-formats)
 (defvar remote-display--modifier-bits)
@@ -154,7 +162,9 @@
     (resize . remotefns-tests--resize)
     (ping . remotefns-tests--ping)
     (pong . remotefns-tests--pong)
-    (close-frame . remotefns-tests--close-frame))
+    (close-frame . remotefns-tests--close-frame)
+    (want-font . remotefns-tests--want-font)
+    (font-data . remotefns-tests--font-data))
   "The message types, each with the function that generates a message.")
 
 (defconst remotefns-tests--clip-and-color
@@ -241,9 +251,17 @@
         :font (rd-gen-uint32)
         :index (rd-gen-uint32)
         :size (rd-gen-uint32)
-        :hash (vconcat (cl-loop repeat (rd-gen-integer
-                                        0 remote-display--hash-size)
-                                collect (rd-gen-integer 0 255)))))
+        :hash (remotefns-tests--hash)
+        :file-size (rd-gen-uint32)))
+
+(defun remotefns-tests--hash ()
+  "Return a random hash of at most `remote-display--hash-size' bytes."
+  (remotefns-tests--byte-vector remote-display--hash-size))
+
+(defun remotefns-tests--byte-vector (limit)
+  "Return a vector of at most LIMIT random bytes."
+  (vconcat (cl-loop repeat (rd-gen-integer 0 limit)
+                    collect (rd-gen-integer 0 255))))
 
 (defun remotefns-tests--define-frame ()
   "Return a random `define-frame' message."
@@ -294,6 +312,17 @@
 (defun remotefns-tests--close-frame ()
   "Return a random `close-frame' message."
   (list 'close-frame :frame (rd-gen-uint32)))
+
+(defun remotefns-tests--want-font ()
+  "Return a random `want-font' message."
+  (list 'want-font :hash (remotefns-tests--hash)))
+
+(defun remotefns-tests--font-data ()
+  "Return a random `font-data' message."
+  (list 'font-data :hash (remotefns-tests--hash)
+        :offset (rd-gen-uint32) :total (rd-gen-uint32)
+        :bytes (remotefns-tests--byte-vector
+                remote-display--max-font-chunk)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -424,12 +453,13 @@
 
 (ert-deftest remotefns-tests-define-font-wire-format ()
   (skip-unless (featurep 'remote-display))
-  ;; Length 18, type 7, font 1, index 2, size #x0102, 3 hash bytes.
+  ;; Length 22, type 7, font 1, index 2, size #x0102, 3 hash bytes,
+  ;; file size #x01020304.
   (should (equal (remote-display--encode
                   '(define-font :font 1 :index 2 :size #x0102
-                                :hash [#xab 0 #xff]))
-                 (unibyte-string 0 0 0 18 7 0 0 0 1 0 0 0 2 0 0 1 2
-                                 0 3 #xab 0 #xff))))
+                                :hash [#xab 0 #xff] :file-size #x01020304))
+                 (unibyte-string 0 0 0 22 7 0 0 0 1 0 0 0 2 0 0 1 2
+                                 0 3 #xab 0 #xff 1 2 3 4))))
 
 (ert-deftest remotefns-tests-hash-limits ()
   "A hash has at most `remote-display--hash-size' bytes."
@@ -437,10 +467,11 @@
   (should (= remote-display--hash-size 32))
   (should-error (remote-display--encode
                  `(define-font :font 0 :index 0 :size 0
-                               :hash ,(make-vector 33 0)))
+                               :hash ,(make-vector 33 0) :file-size 0))
                 :type 'args-out-of-range)
   (should-error (remote-display--encode
-                 '(define-font :font 0 :index 0 :size 0 :hash [256]))
+                 '(define-font :font 0 :index 0 :size 0 :hash [256]
+                               :file-size 0))
                 :type 'args-out-of-range)
   ;; A frame that says it has one hash byte too many.
   (should (equal (remotefns-tests--decode-error
@@ -565,6 +596,34 @@
   ;; Length 5, type 17, frame 7.
   (should (equal (remote-display--encode '(close-frame :frame 7))
                  (unibyte-string 0 0 0 5 17 0 0 0 7))))
+
+(ert-deftest remotefns-tests-want-font-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 5, type 18, 2 hash bytes.
+  (should (equal (remote-display--encode '(want-font :hash [#xab #xcd]))
+                 (unibyte-string 0 0 0 5 18 0 2 #xab #xcd))))
+
+(ert-deftest remotefns-tests-font-data-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 16, type 19, 1 hash byte, offset #x0102, total #x0304,
+  ;; 2 bytes.
+  (should (equal (remote-display--encode
+                  '(font-data :hash [#xab] :offset #x0102 :total #x0304
+                              :bytes [0 #xff]))
+                 (unibyte-string 0 0 0 16 19 0 1 #xab 0 0 1 2 0 0 3 4
+                                 0 2 0 #xff))))
+
+(ert-deftest remotefns-tests-font-chunk-limits ()
+  "A font-data message has at most `remote-display--max-font-chunk' bytes."
+  (skip-unless (featurep 'remote-display))
+  (should (= remote-display--max-font-chunk 8192))
+  (should (remote-display--encode
+           `(font-data :hash [] :offset 0 :total 0
+                       :bytes ,(make-vector 8192 0))))
+  (should-error (remote-display--encode
+                 `(font-data :hash [] :offset 0 :total 0
+                             :bytes ,(make-vector 8193 0)))
+                :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-modifier-bits ()
   "Each modifier has one bit, and the bits are the same for each build.

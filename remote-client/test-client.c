@@ -34,9 +34,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - cut: a connection that closes in a frame gives the pixels of the
      messages before that frame, and the status 0.
    - fonts: a define-font with the hash of a font file of the system
-     draws with that file.  Another define-font draws with the fallback
-     font, also a define-font with a short hash.  The test uses the
-     fontconfig match of "sans:bold", which is not the fallback font.
+     draws with that file.  A define-font with no hash or a short hash
+     draws with the fallback font.  A define-font with a full hash of
+     no file draws nothing.  The test uses the fontconfig match of
+     "sans:bold", which is not the fallback font.
    - cache: the program writes its cache of font hashes in
      $XDG_CACHE_HOME/remote-client/font-hashes, and a second run with
      that cache gives the same pixels.  The test sets $XDG_CACHE_HOME
@@ -107,13 +108,13 @@ static int run_client (struct run *, const struct rd_message *, int,
 static bool find_system_font (void);
 static bool fonts_example (void);
 static bool change_cache_hash (const char *, const char *);
-static void ignore_fallback (const uint8_t *, int, uint32_t);
+static void ignore_fallback (const struct rc_font_key *);
 static int wait_for_exit (pid_t);
 static bool first_frame (const struct rd_message *, int, uint32_t *);
 static bool same_as_renderer (const char *, const struct rd_message *,
 			      int, uint32_t);
-static bool same_as_fallback (const char *, const struct rd_message *,
-			      int, uint32_t);
+static bool same_as_unfound (const char *, const struct rd_message *,
+			     int, uint32_t);
 static bool same_pixels (const char *, const struct rd_message *, int,
 			 uint32_t, struct rc_font_source);
 static void send_in_chunks (int, const unsigned char *, size_t,
@@ -178,11 +179,11 @@ find_system_font (void)
    which has the hash of SYSTEM_FONT, with the font 1, which has no
    hash, with the font 2, which has a short hash, and with the font 3,
    which has a hash of no file.  The expected pixels must not be the
-   pixels of the fallback font only, so the example shows that the
-   program found SYSTEM_FONT.  The second run uses the cache of the
-   first.  Then the line of SYSTEM_FONT in the cache file gets another
-   hash, and the third run must draw the font 0 with the fallback font,
-   so the example shows that the program reads the cache.  */
+   pixels with no font file, so the example shows that the program
+   found SYSTEM_FONT.  The second run uses the cache of the first.
+   Then the line of SYSTEM_FONT in the cache file gets another hash,
+   and the third run must not draw the font 0, so the example shows
+   that the program reads the cache.  */
 static bool
 fonts_example (void)
 {
@@ -237,7 +238,7 @@ fonts_example (void)
       int status = run_client (&run, messages, N, NULL, 0, &state);
       passed = (status == 0 && access (cache, F_OK) == 0
 		&& same_as_renderer (run.png, messages, N, FRAME_A)
-		&& !same_as_fallback (run.png, messages, N, FRAME_A));
+		&& !same_as_unfound (run.png, messages, N, FRAME_A));
     }
   if (!passed)
     fprintf (stderr, "test-client: example fonts: the program did not "
@@ -248,7 +249,7 @@ fonts_example (void)
       unlink (run.png);
       passed = (change_cache_hash (cache, system_font)
 		&& run_client (&run, messages, N, NULL, 0, &state) == 0
-		&& same_as_fallback (run.png, messages, N, FRAME_A));
+		&& same_as_unfound (run.png, messages, N, FRAME_A));
       if (!passed)
 	fprintf (stderr, "test-client: example fonts: the program did not "
 		 "use the hash of its cache file\n");
@@ -428,17 +429,19 @@ same_as_renderer (const char *png, const struct rd_message *messages,
   return same_pixels (png, messages, n, frame, rc_font_source_chain
 		      (rc_hash_font_source_new (list, 1, NULL,
 						rc_sha256_file, NULL),
-		       rc_fallback_font_source_new (), ignore_fallback));
+		       rc_unhashed_font_source (rc_fallback_font_source_new ()),
+		       ignore_fallback));
 }
 
 /* Return true if FRAME exists after the N MESSAGES in a renderer with
-   only the fallback font, and the PNG file PNG has its pixels.  */
+   no font file, and the PNG file PNG has its pixels.  The fallback
+   font draws only the fonts with no hash or a short hash.  */
 static bool
-same_as_fallback (const char *png, const struct rd_message *messages,
-		  int n, uint32_t frame)
+same_as_unfound (const char *png, const struct rd_message *messages,
+		 int n, uint32_t frame)
 {
   return same_pixels (png, messages, n, frame,
-		      rc_fallback_font_source_new ());
+		      rc_unhashed_font_source (rc_fallback_font_source_new ()));
 }
 
 /* Return true if FRAME exists after the N MESSAGES in a renderer with
@@ -486,9 +489,9 @@ same_pixels (const char *png, const struct rd_message *messages, int n,
 
 /* The function of the chain of the expected renderer.  */
 static void
-ignore_fallback (const uint8_t *hash, int nhash, uint32_t index)
+ignore_fallback (const struct rc_font_key *key)
 {
-  (void) hash, (void) nhash, (void) index;
+  (void) key;
 }
 
 /* Write the SIZE BYTES to the socket FD in chunks of random sizes.  */
