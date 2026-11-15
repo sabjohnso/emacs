@@ -26,33 +26,45 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 static int copy_args (const char *const *, const char **);
 
-const char rc_ssh_remote_command[]
-  = "remote-client --relay \"$(emacsclient --eval "
-    "'(remote-display-start)' | tr -d '\"')\"";
+/* The parts of the remote command before and after the --listen.  */
+static const char command_start[] = "remote-client --relay";
+static const char command_end[]
+  = " \"$(emacsclient --eval '(remote-display-start)' | tr -d '\"')\"";
+
+void
+rc_ssh_remote_command (const struct rc_listen_spec *spec,
+		       char command[RC_SSH_COMMAND_SIZE])
+{
+  static_assert (sizeof command_start + sizeof command_end
+		 + sizeof " --listen=" + RC_LISTEN_TEXT_SIZE
+		 <= RC_SSH_COMMAND_SIZE, "RC_SSH_COMMAND_SIZE is too small");
+  char listen[sizeof " --listen=" + RC_LISTEN_TEXT_SIZE] = "";
+  if (spec)
+    {
+      char format[RC_LISTEN_TEXT_SIZE];
+      rc_listen_spec_format (spec, format);
+      snprintf (listen, sizeof listen, " --listen=%s", format);
+    }
+  snprintf (command, RC_SSH_COMMAND_SIZE, "%s%s%s", command_start, listen,
+	    command_end);
+}
 
 int
 rc_ssh_bootstrap_args (const char *ssh, const char *host,
+		       const char *command,
 		       const char *args[RC_SSH_ARGS_SIZE])
 {
-  const char *list[] = { ssh, "--", host, rc_ssh_remote_command, NULL };
+  const char *list[] = { ssh, "--", host, command, NULL };
   static_assert (sizeof list / sizeof *list <= RC_SSH_ARGS_SIZE,
 		 "RC_SSH_ARGS_SIZE is too small");
   return copy_args (list, args);
 }
 
 int
-rc_ssh_tunnel_args (const char *ssh, const char *host, const char *socket,
-		    uint16_t port, char *forward, size_t size,
+rc_ssh_config_args (const char *ssh, const char *host,
 		    const char *args[RC_SSH_ARGS_SIZE])
 {
-  int length = snprintf (forward, size, "%s:127.0.0.1:%u", socket,
-			 (unsigned) port);
-  if (length < 0 || (size_t) length >= size)
-    return -1;
-  const char *list[] =
-    { ssh, "-N", "-o", "ExitOnForwardFailure=yes",
-      "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-      "-L", forward, "--", host, NULL };
+  const char *list[] = { ssh, "-G", "--", host, NULL };
   static_assert (sizeof list / sizeof *list <= RC_SSH_ARGS_SIZE,
 		 "RC_SSH_ARGS_SIZE is too small");
   return copy_args (list, args);

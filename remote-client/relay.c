@@ -35,6 +35,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "clock.h"
 #include "flow.h"
+#include "listenspec.h"
 #include "pending.h"
 #include "relay.h"
 #include "relayline.h"
@@ -86,7 +87,8 @@ enum
     WATCH_SIZE = WATCH_PENDING + RC_PENDING_SIZE,
   };
 
-static bool prepare (struct relay *, const char *, struct rc_relay_line *);
+static bool prepare (struct relay *, const char *,
+		     const struct rc_listen_spec *, struct rc_relay_line *);
 static enum daemon start_daemon (void);
 static void announce (const struct rc_relay_line *);
 static void serve (struct relay *);
@@ -111,14 +113,15 @@ static bool move (struct rc_flow *, struct rc_stream *, short,
 static bool fill_flow (struct rc_flow *, struct rc_stream *);
 static bool drain_flow (struct rc_flow *, struct rc_stream *);
 static bool session_socket_p (const char *);
-static int listen_on_loopback (uint16_t *);
+static int listen_in_range (const struct rc_listen_spec *, uint16_t *);
+static int listen_on (const struct rc_listen_spec *, uint16_t);
 
 int
-rc_relay_run (const char *session)
+rc_relay_run (const char *session, const struct rc_listen_spec *spec)
 {
   struct relay relay;
   struct rc_relay_line line;
-  if (!prepare (&relay, session, &line))
+  if (!prepare (&relay, session, spec, &line))
     return 1;
   switch (start_daemon ())
     {
@@ -137,12 +140,12 @@ rc_relay_run (const char *session)
   return 1;
 }
 
-/* Check the session socket SESSION, make the token, and listen.  Put
-   the state in RELAY and the line in LINE.  Return false on an
-   error.  */
+/* Check the session socket SESSION, make the token, and listen at the
+   place of SPEC.  Put the state in RELAY and the line in LINE.  Return
+   false on an error.  */
 static bool
 prepare (struct relay *relay, const char *session,
-	 struct rc_relay_line *line)
+	 const struct rc_listen_spec *spec, struct rc_relay_line *line)
 {
   if (!session_socket_p (session))
     {
@@ -161,7 +164,7 @@ prepare (struct relay *relay, const char *session,
       return false;
     }
   rc_tls_key_pin (relay->key, line->pin);
-  relay->listener = listen_on_loopback (&line->port);
+  relay->listener = listen_in_range (spec, &line->port);
   if (relay->listener < 0)
     {
       rc_tls_key_free (relay->key);
@@ -542,25 +545,47 @@ session_socket_p (const char *path)
   return stat (path, &status) == 0 && S_ISSOCK (status.st_mode);
 }
 
-/* Listen on a new port of the loopback address.  Put the port in
-   *PORT, and return the listening socket, or -1 on an error.  */
+/* Listen on the first free port of the range of SPEC, at its address.
+   Put the port in *PORT, and return the listening socket, or -1 on an
+   error.  */
 static int
-listen_on_loopback (uint16_t *port)
+listen_in_range (const struct rc_listen_spec *spec, uint16_t *port)
 {
-  struct sockaddr_in address = { .sin_family = AF_INET,
-				 .sin_addr = { htonl (INADDR_LOOPBACK) } };
-  socklen_t size = sizeof address;
-  int fd = socket (AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-  if (fd < 0
-      || bind (fd, (struct sockaddr *) &address, sizeof address) != 0
-      || listen (fd, BACKLOG) != 0
-      || getsockname (fd, (struct sockaddr *) &address, &size) != 0)
+  for (uint32_t each = spec->low; each <= spec->high; each++)
     {
-      perror ("remote-client: listen");
+      int fd = listen_on (spec, each);
       if (fd >= 0)
-	close (fd);
-      return -1;
+	{
+	  *port = each;
+	  return fd;
+	}
+      if (errno != EADDRINUSE)
+	{
+	  perror ("remote-client: listen");
+	  return -1;
+	}
     }
-  *port = ntohs (address.sin_port);
-  return fd;
+  char text[RC_LISTEN_TEXT_SIZE];
+  rc_listen_spec_format (spec, text);
+  fprintf (stderr, "remote-client: %s: no port is free\n", text);
+  return -1;
+}
+
+/* Listen on PORT at the address of SPEC.  Return the listening socket,
+   or -1 with errno set.  */
+static int
+listen_on (const struct rc_listen_spec *spec, uint16_t port)
+{
+  struct sockaddr_storage address;
+  socklen_t size = rc_listen_spec_address (spec, port, &address);
+  int fd = socket (address.ss_family,
+		   SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+  if (fd >= 0 && bind (fd, (struct sockaddr *) &address, size) == 0
+      && listen (fd, BACKLOG) == 0)
+    return fd;
+  int error = errno;
+  if (fd >= 0)
+    close (fd);
+  errno = error;
+  return -1;
 }

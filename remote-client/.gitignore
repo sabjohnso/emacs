@@ -20,3 +20,5 @@ test-unixsocket
 test-sshargs
 test-ssh
 test-tls
+test-listenspec
+test-sshconfig

@@ -31,38 +31,70 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "clock.h"
 #include "sshargs.h"
 
-static pid_t start_ssh (const char *, const char *, int *);
-static bool read_line (int, char *, size_t);
+static bool read_ssh (const char *, const char *const *, bool, char *,
+		      size_t);
+static pid_t start_ssh (const char *, const char *const *, int *);
+static bool read_output (int, bool, char *, size_t);
 
 bool
-rc_bootstrap (const char *ssh, const char *host, struct rc_relay_line *line)
+rc_bootstrap (const char *ssh, const char *host,
+	      const struct rc_listen_spec *spec, struct rc_relay_line *line)
 {
-  int out;
-  pid_t pid = start_ssh (ssh, host, &out);
-  if (pid < 0)
-    {
-      perror ("remote-client: ssh");
-      return false;
-    }
+  char command[RC_SSH_COMMAND_SIZE];
+  const char *args[RC_SSH_ARGS_SIZE];
+  rc_ssh_remote_command (spec, command);
+  rc_ssh_bootstrap_args (ssh, host, command, args);
   char text[RC_RELAY_LINE_SIZE];
-  bool ok = read_line (out, text, sizeof text);
-  close (out);
-  if (!ok)
-    kill (pid, SIGTERM);
-  waitpid (pid, NULL, 0);
-  if (ok && rc_relay_line_parse (text, line))
+  if (read_ssh (ssh, args, true, text, sizeof text)
+      && rc_relay_line_parse (text, line))
     return true;
   fprintf (stderr, "remote-client: %s: the session did not start\n", host);
   return false;
 }
 
-/* Start the bootstrap on HOST with the program SSH.  Put the read end
-   of its standard output in *OUT, and return its process, or -1.  */
-static pid_t
-start_ssh (const char *ssh, const char *host, int *out)
+bool
+rc_bootstrap_hostname (const char *ssh, const char *host,
+		       char name[RC_SSH_HOSTNAME_SIZE])
 {
   const char *args[RC_SSH_ARGS_SIZE];
-  rc_ssh_bootstrap_args (ssh, host, args);
+  rc_ssh_config_args (ssh, host, args);
+  char text[RC_SSH_CONFIG_SIZE];
+  if (read_ssh (ssh, args, false, text, sizeof text)
+      && rc_ssh_config_hostname (text, name, RC_SSH_HOSTNAME_SIZE))
+    return true;
+  fprintf (stderr, "remote-client: %s: ssh -G gave no host name\n", host);
+  return false;
+}
+
+/* Run the program SSH with ARGS, and read its standard output into
+   TEXT, a buffer of SIZE bytes, with a null byte after it.  With LINE,
+   read only the first line, with its newline.  Otherwise, read to the
+   end.  Return false if SSH does not start, or if read_output
+   fails.  */
+static bool
+read_ssh (const char *ssh, const char *const *args, bool line, char *text,
+	  size_t size)
+{
+  int out;
+  pid_t pid = start_ssh (ssh, args, &out);
+  if (pid < 0)
+    {
+      perror ("remote-client: ssh");
+      return false;
+    }
+  bool ok = read_output (out, line, text, size);
+  close (out);
+  if (!ok)
+    kill (pid, SIGTERM);
+  waitpid (pid, NULL, 0);
+  return ok;
+}
+
+/* Start the program SSH with ARGS.  Put the read end of its standard
+   output in *OUT, and return its process, or -1.  */
+static pid_t
+start_ssh (const char *ssh, const char *const *args, int *out)
+{
   int fds[2];
   if (pipe (fds) != 0)
     return -1;
@@ -84,26 +116,33 @@ start_ssh (const char *ssh, const char *host, int *out)
   return pid;
 }
 
-/* Read one line from FD into TEXT, with the newline and a null byte.
-   Return false if FD ends before a newline, if the line does not fit
-   in SIZE bytes, or if it does not come in RC_BOOTSTRAP_LIMIT
-   milliseconds.  */
+/* Read from FD into TEXT, a buffer of SIZE bytes, and put a null byte
+   after the bytes.  With LINE, stop after the first newline, and
+   return false if FD ends before it.  Otherwise, stop at the end of
+   FD.  Return false if the bytes do not fit in SIZE bytes, or if they
+   do not come in RC_BOOTSTRAP_LIMIT milliseconds.  */
 static bool
-read_line (int fd, char *text, size_t size)
+read_output (int fd, bool line, char *text, size_t size)
 {
   int64_t end = rc_now_ms () + RC_BOOTSTRAP_LIMIT;
-  for (size_t length = 0; length + 1 < size; length++)
+  size_t length = 0;
+  while (length + 1 < size)
     {
       struct pollfd ready = { .fd = fd, .events = POLLIN };
       int64_t left = end - rc_now_ms ();
-      if (left <= 0 || poll (&ready, 1, left) != 1
-	  || read (fd, text + length, 1) != 1)
+      if (left <= 0 || poll (&ready, 1, left) != 1)
 	return false;
-      if (text[length] == '\n')
-	{
-	  text[length + 1] = 0;
-	  return true;
-	}
+      /* A line comes one byte at a time, so no byte after it is lost.  */
+      ssize_t count = read (fd, text + length,
+			    line ? 1 : size - 1 - length);
+      if (count < 0)
+	return false;
+      text[length + count] = 0;
+      if (count == 0)
+	return !line;
+      length += count;
+      if (line && text[length - 1] == '\n')
+	return true;
     }
   return false;
 }

@@ -17,23 +17,23 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* The laws of the arguments, for a random host, socket, and port:
+/* The laws of the arguments, for a random host and listen spec:
 
    - Shape: the first argument is the SSH program, a null pointer ends
      the list, and the count is the number of arguments.
    - Host: "--" comes just before the host, so a host that starts with
      "-" is not an option of SSH.  Only the remote command of the
      bootstrap comes after the host.
-   - Forward: the argument after "-L" is the socket, ":127.0.0.1:", and
-     the port in decimal.
-   - Fit: the tunnel arguments fail if and only if the forward does
-     not fit in its buffer.  The sizes are often near the boundary, and
-     a buffer of RC_SSH_FORWARD_SIZE bytes holds the forward of each
-     socket name of up to 108 bytes.
+   - Listen: the remote command with a spec is the remote command with
+     no spec, with " --listen=" and the format of the spec after
+     "--relay".  The command fits in RC_SSH_COMMAND_SIZE bytes.  The
+     word after "--listen=" parses to the spec, so the relay gets the
+     spec of the client.
 
    The examples:
 
-   - Golden: the arguments of a known host, socket, and port.
+   - Golden: the arguments of a known host, the remote command with no
+     spec, and the remote command with a known spec.
 
    The program runs TRIALS trials of each law from a seed that it gets
    from the clock.  With one argument, it runs the trial of that seed
@@ -41,34 +41,39 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <config.h>
 
+#include <arpa/inet.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "listenspec.h"
 #include "sshargs.h"
 
 enum { TRIALS = 1000 };
 
-/* A random case: a host, a socket, a port, and the size of the buffer
-   of the forward.  */
+/* The remote command with no spec.  */
+#define BASE_COMMAND \
+  "remote-client --relay \"$(emacsclient --eval " \
+  "'(remote-display-start)' | tr -d '\"')\""
+
+/* A random case: a host and a listen spec.  */
 struct ssh_case
 {
   char host[24];
-  char socket[109];
-  uint16_t port;
-  size_t size;
+  struct rc_listen_spec spec;
 };
 
 static const char *run_trial (uint64_t);
 static bool shape_law (uint64_t *);
 static bool host_law (uint64_t *);
-static bool forward_law (uint64_t *);
-static bool fit_law (uint64_t *);
+static bool listen_law (uint64_t *);
 static bool golden_example (void);
+static bool same_args (const char *const *, const char *const *);
 static struct ssh_case random_case (uint64_t *);
 static void random_word (uint64_t *, char *, size_t);
 static int argument_count (const char *const *);
@@ -85,8 +90,7 @@ static const struct
   {
     { "shape", shape_law },
     { "host", host_law },
-    { "forward", forward_law },
-    { "fit", fit_law },
+    { "listen", listen_law },
   };
 
 int
@@ -133,13 +137,13 @@ shape_law (uint64_t *state)
 {
   struct ssh_case c = random_case (state);
   const char *args[RC_SSH_ARGS_SIZE];
-  char forward[RC_SSH_FORWARD_SIZE];
-  int count = rc_ssh_bootstrap_args ("ssh-x", c.host, args);
+  char command[RC_SSH_COMMAND_SIZE];
+  rc_ssh_remote_command (&c.spec, command);
+  int count = rc_ssh_bootstrap_args ("ssh-x", c.host, command, args);
   if (count != argument_count (args) || count >= RC_SSH_ARGS_SIZE
       || strcmp (args[0], "ssh-x") != 0)
     return false;
-  count = rc_ssh_tunnel_args ("ssh-x", c.host, c.socket, c.port, forward,
-			      sizeof forward, args);
+  count = rc_ssh_config_args ("ssh-x", c.host, args);
   return (count == argument_count (args) && count < RC_SSH_ARGS_SIZE
 	  && strcmp (args[0], "ssh-x") == 0);
 }
@@ -150,56 +154,52 @@ host_law (uint64_t *state)
 {
   struct ssh_case c = random_case (state);
   const char *args[RC_SSH_ARGS_SIZE];
-  char forward[RC_SSH_FORWARD_SIZE];
-  int count = rc_ssh_bootstrap_args ("ssh", c.host, args);
+  char command[RC_SSH_COMMAND_SIZE];
+  rc_ssh_remote_command (random_below (state, 2) ? &c.spec : NULL, command);
+  int count = rc_ssh_bootstrap_args ("ssh", c.host, command, args);
   if (strcmp (args[count - 3], "--") != 0
       || strcmp (args[count - 2], c.host) != 0
-      || strcmp (args[count - 1], rc_ssh_remote_command) != 0
+      || strcmp (args[count - 1], command) != 0
       || index_of (args, "--") != count - 3)
     return false;
-  count = rc_ssh_tunnel_args ("ssh", c.host, c.socket, c.port, forward,
-			      sizeof forward, args);
+  count = rc_ssh_config_args ("ssh", c.host, args);
   return (strcmp (args[count - 2], "--") == 0
 	  && strcmp (args[count - 1], c.host) == 0
 	  && index_of (args, "--") == count - 2);
 }
 
-/* The forward law, for a random case of STATE.  */
+/* The listen law, for a random case of STATE.  */
 static bool
-forward_law (uint64_t *state)
+listen_law (uint64_t *state)
 {
   struct ssh_case c = random_case (state);
-  const char *args[RC_SSH_ARGS_SIZE];
-  char forward[RC_SSH_FORWARD_SIZE];
-  rc_ssh_tunnel_args ("ssh", c.host, c.socket, c.port, forward,
-		      sizeof forward, args);
-  char expected[RC_SSH_FORWARD_SIZE];
-  snprintf (expected, sizeof expected, "%s:127.0.0.1:%u", c.socket,
-	    (unsigned) c.port);
-  int l = index_of (args, "-L");
-  return l >= 0 && strcmp (args[l + 1], expected) == 0;
-}
-
-/* The fit law, for a random case of STATE with a random buffer size.  */
-static bool
-fit_law (uint64_t *state)
-{
-  struct ssh_case c = random_case (state);
-  const char *args[RC_SSH_ARGS_SIZE];
-  char forward[RC_SSH_FORWARD_SIZE];
-  char text[RC_SSH_FORWARD_SIZE];
-  size_t needed = snprintf (text, sizeof text, "%s:127.0.0.1:%u", c.socket,
-			    (unsigned) c.port) + 1;
-  if (random_below (state, 2) == 0)
-    {
-      int64_t near = (int64_t) needed + (int64_t) random_below (state, 5) - 2;
-      c.size = near < 0 ? 0 : near;
-    }
-  int count = rc_ssh_tunnel_args ("ssh", c.host, c.socket, c.port, forward,
-				  c.size, args);
-  return ((count < 0) == (needed > c.size)
-	  && rc_ssh_tunnel_args ("ssh", c.host, c.socket, c.port, forward,
-				 sizeof forward, args) > 0);
+  char command[RC_SSH_COMMAND_SIZE + 1], plain[RC_SSH_COMMAND_SIZE];
+  char format[RC_LISTEN_TEXT_SIZE], expected[2 * RC_SSH_COMMAND_SIZE];
+  memset (command, 'x', sizeof command);
+  rc_ssh_remote_command (&c.spec, command);
+  rc_ssh_remote_command (NULL, plain);
+  rc_listen_spec_format (&c.spec, format);
+  static const char relay[] = "--relay";
+  const char *after = strstr (plain, relay);
+  if (!after || command[RC_SSH_COMMAND_SIZE] != 'x')
+    return false;
+  after += sizeof relay - 1;
+  snprintf (expected, sizeof expected, "%.*s --listen=%s%s",
+	    (int) (after - plain), plain, format, after);
+  const char *word = strstr (command, "--listen=");
+  char text[RC_SSH_COMMAND_SIZE];
+  struct rc_listen_spec parsed;
+  if (!word)
+    return false;
+  word += sizeof "--listen=" - 1;
+  snprintf (text, sizeof text, "%.*s", (int) strcspn (word, " "), word);
+  return strcmp (command, expected) == 0
+    && rc_listen_spec_parse (text, &parsed)
+    && parsed.family == c.spec.family && parsed.low == c.spec.low
+    && parsed.high == c.spec.high
+    && memcmp (&parsed.address, &c.spec.address,
+	       c.spec.family == AF_INET ? sizeof parsed.address.v4
+	       : sizeof parsed.address.v6) == 0;
 }
 
 /* The example of known arguments.  */
@@ -207,37 +207,40 @@ static bool
 golden_example (void)
 {
   static const char *const bootstrap[] =
-    { "ssh", "--", "work", NULL };
-  static const char *const tunnel[] =
-    { "ssh", "-N", "-o", "ExitOnForwardFailure=yes",
-      "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2",
-      "-L", "/run/s:127.0.0.1:4321", "--", "work", NULL };
+    { "ssh", "--", "work", BASE_COMMAND, NULL };
+  static const char *const config[] = { "ssh", "-G", "--", "work", NULL };
   const char *args[RC_SSH_ARGS_SIZE];
-  char forward[RC_SSH_FORWARD_SIZE];
-  int count = rc_ssh_bootstrap_args ("ssh", "work", args);
-  if (count != 4)
+  char command[RC_SSH_COMMAND_SIZE];
+  rc_ssh_remote_command (NULL, command);
+  if (strcmp (command, BASE_COMMAND) != 0
+      || rc_ssh_bootstrap_args ("ssh", "work", command, args) != 4
+      || !same_args (args, bootstrap)
+      || rc_ssh_config_args ("ssh", "work", args) != 4
+      || !same_args (args, config))
     return false;
-  for (int i = 0; i < 3; i++)
-    if (strcmp (args[i], bootstrap[i]) != 0)
-      return false;
-  if (args[3] != rc_ssh_remote_command || args[4] != NULL)
-    return false;
-  if (strcmp (rc_ssh_remote_command,
-	      "remote-client --relay \"$(emacsclient --eval "
-	      "'(remote-display-start)' | tr -d '\"')\"") != 0)
-    return false;
-  count = rc_ssh_tunnel_args ("ssh", "work", "/run/s", 4321, forward,
-			      sizeof forward, args);
-  if (count != (int) (sizeof tunnel / sizeof *tunnel) - 1)
-    return false;
-  for (int i = 0; i <= count; i++)
-    if ((args[i] == NULL) != (tunnel[i] == NULL)
-	|| (args[i] && strcmp (args[i], tunnel[i]) != 0))
-      return false;
-  return true;
+  struct rc_listen_spec spec = { .family = AF_INET, .low = 60001,
+				 .high = 60010 };
+  inet_pton (AF_INET, "10.0.0.200", &spec.address.v4);
+  rc_ssh_remote_command (&spec, command);
+  return strcmp (command,
+		 "remote-client --relay --listen=10.0.0.200:60001-60010 "
+		 "\"$(emacsclient --eval '(remote-display-start)' "
+		 "| tr -d '\"')\"") == 0;
 }
 
-/* Return a random case of STATE.  Some hosts start with "-".  */
+/* Return true if the argument lists A and B are equal.  */
+static bool
+same_args (const char *const *a, const char *const *b)
+{
+  int i = 0;
+  for (; a[i] && b[i]; i++)
+    if (strcmp (a[i], b[i]) != 0)
+      return false;
+  return !a[i] && !b[i];
+}
+
+/* Return a random case of STATE.  Some hosts start with "-".  The
+   spec has the longest IPv6 address or a random IPv4 address.  */
 static struct ssh_case
 random_case (uint64_t *state)
 {
@@ -245,13 +248,21 @@ random_case (uint64_t *state)
   random_word (state, c.host, 1 + random_below (state, sizeof c.host - 1));
   if (random_below (state, 4) == 0)
     c.host[0] = '-';
-  random_word (state, c.socket,
-	       random_below (state, 4) == 0
-	       ? sizeof c.socket
-	       : 1 + random_below (state, sizeof c.socket - 1));
-  c.socket[0] = '/';
-  c.port = 1 + random_below (state, 65535);
-  c.size = random_below (state, RC_SSH_FORWARD_SIZE + 1);
+  memset (&c.spec, 0, sizeof c.spec);
+  if (random_below (state, 2) == 0)
+    {
+      c.spec.family = AF_INET;
+      uint32_t bits = random_next (state);
+      memcpy (&c.spec.address.v4, &bits, sizeof bits);
+    }
+  else
+    {
+      c.spec.family = AF_INET6;
+      inet_pton (AF_INET6, "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255",
+		 &c.spec.address.v6);
+    }
+  c.spec.low = 1 + random_below (state, 65535);
+  c.spec.high = c.spec.low + random_below (state, 65536 - c.spec.low);
   return c;
 }
 

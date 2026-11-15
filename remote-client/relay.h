@@ -18,7 +18,8 @@ You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* SSH starts the relay on the computer of the session.  The relay
-   listens on a new port of the loopback address, and writes the line
+   listens on the first free port of the range of its listen spec (see
+   listenspec.h), and writes the line
    of relayline.h to its standard output.  Then it closes its standard
    output, so SSH can stop, and the relay keeps running.
 
@@ -37,10 +38,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_RELAY_H
 #define REMOTE_CLIENT_RELAY_H
 
-/* Run the relay of the session socket SESSION.  Return the exit status
-   of the program.  The process that returns is not the process that
-   called this function: the relay starts a new process, so it does
-   not stop with SSH.  */
-extern int rc_relay_run (const char *session);
+struct rc_listen_spec;
+
+/* Run the relay of the session socket SESSION at the place of SPEC.
+   Return the exit status of the program.  The process that returns is
+   not the process that called this function: the relay starts a new
+   process, so it does not stop with SSH.  */
+extern int rc_relay_run (const char *session,
+			 const struct rc_listen_spec *spec);
 
 #endif /* REMOTE_CLIENT_RELAY_H */

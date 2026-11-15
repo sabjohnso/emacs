@@ -17,10 +17,11 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* The test starts "remote-client --relay SOCKET" with a socket of the
-   test.  The test acts as the session at SOCKET, and as the client of
-   the relay.  The relay opens no window, so the test needs no
-   display.
+/* The test starts "remote-client --relay [--listen=SPEC] SOCKET" with
+   a socket of the test.  Most examples give no --listen, and give the
+   loopback address as the server address of $SSH_CONNECTION.  The
+   test acts as the session at SOCKET, and as the client of the
+   relay.  The relay opens no window, so the test needs no display.
 
    - Line: the relay writes one valid line, and then closes its
      standard input, standard output, and standard error output, so
@@ -57,9 +58,31 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      client and exits.
    - Loopback: the relay refuses connections to an address that is
      not the loopback address.
+   - Default: with no --listen, the port of the relay is in the
+     default range of listenspec.h.
+   - Range: the relay takes the first free port of the range of
+     --listen.
+   - Full: when no port of the range is free, the relay writes no line
+     and exits with the status 1.
+   - No address: with no --listen and no $SSH_CONNECTION, the relay
+     writes no line and exits with the status 1.
+   - Bad connection: with no --listen and a $SSH_CONNECTION that is not
+     valid, the relay writes no line and exits with the status 1.
+   - Bad spec: with a --listen that is not a spec, the relay writes no
+     line and exits with the status 1.
+   - Selected: with --listen=127.0.0.2:PORT, the relay works at
+     127.0.0.2, and refuses connections to PORT at 127.0.0.1.  With
+     127.0.0.2 as the server address of $SSH_CONNECTION, the relay
+     works at 127.0.0.2.  Each address of 127.0.0.0/8 is a loopback
+     address of Linux.
+   - Precedence: a valid --listen wins over a $SSH_CONNECTION that is
+     not valid.
+   - IPv6: the relay works on the IPv6 loopback address.  When the
+     computer has no IPv6, this example checks nothing.
    - Missing: when SOCKET is not a socket, the relay writes no line and
      exits with the status 1.
-   - Usage: with no SOCKET, the program exits with the status 1.  */
+   - Usage: with no SOCKET, the program exits with the status 1, also
+     after a --listen.  */
 
 #include <config.h>
 
@@ -81,6 +104,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <time.h>
 #include <unistd.h>
 
+#include "listenspec.h"
 #include "pending.h"
 #include "relay.h"
 #include "relayline.h"
@@ -97,14 +121,29 @@ enum { QUIET = 300 };
 enum { BULK = 16 << 20 };
 
 /* One run of the relay: the directory and the socket of the session,
-   the listening socket of the session, and the line of the relay.  */
+   the listening socket of the session, the line of the relay, and the
+   loopback address where the relay listens, in a listen spec.  The
+   range of the spec is not used.  */
 struct run
 {
   char directory[64];
   char socket[100];
   int session;
   struct rc_relay_line line;
+  struct rc_listen_spec at;
 };
+
+/* Where a relay listens: the text of --listen, or NULL for none, and
+   the value of $SSH_CONNECTION, or NULL for none.  */
+struct where
+{
+  const char *listen;
+  const char *connection;
+};
+
+/* The place of most examples.  */
+static const struct where DEFAULT_WHERE =
+  { NULL, "127.0.0.2 40000 127.0.0.1 22" };
 
 static bool line_example (void);
 static bool relay_example (void);
@@ -120,11 +159,26 @@ static bool replace_example (void);
 static bool session_end_example (void);
 static bool end_example (void);
 static bool loopback_example (void);
+static bool default_example (void);
+static bool range_example (void);
+static bool full_example (void);
+static bool no_address_example (void);
+static bool bad_connection_example (void);
+static bool selected_example (void);
+static bool precedence_example (void);
+static bool bad_spec_example (void);
+static bool ipv6_example (void);
 static bool missing_example (void);
 static bool usage_example (void);
 static bool start_run (struct run *);
+static bool start_run_at (struct run *, struct where, const char *);
 static bool stop_run (struct run *);
-static int start_relay (const char *, int *, int *, int *);
+static bool make_session (struct run *);
+static bool refused_p (bool, struct where);
+static int start_relay (const char *, struct where, int *, int *, int *);
+static int hold_port (uint16_t *);
+static bool free_port_p (uint16_t);
+static int connect_run (const struct run *);
 static int connect_idle (const struct run *);
 static bool works_p (const struct run *);
 static bool write_closed_p (int);
@@ -134,6 +188,7 @@ static struct rc_stream *connect_tls (const struct run *);
 static bool stream_closed_p (struct rc_stream *, int);
 static bool write_stream (struct rc_stream *, const void *, size_t);
 static int connect_to_port (struct in_addr, uint16_t);
+static int connect_to (const struct sockaddr *, socklen_t);
 static int accept_session (const struct run *, int);
 static bool closed_p (int, int);
 static bool echo_through (struct rc_stream *, int, size_t);
@@ -162,6 +217,15 @@ static const struct
     { "session end", session_end_example },
     { "end", end_example },
     { "loopback", loopback_example },
+    { "default", default_example },
+    { "range", range_example },
+    { "full", full_example },
+    { "no address", no_address_example },
+    { "bad connection", bad_connection_example },
+    { "selected", selected_example },
+    { "precedence", precedence_example },
+    { "bad spec", bad_spec_example },
+    { "ipv6", ipv6_example },
     { "missing", missing_example },
     { "usage", usage_example },
   };
@@ -436,16 +500,131 @@ loopback_example (void)
 }
 
 static bool
+default_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  bool ok = (run.line.port >= RC_LISTEN_LOW
+	     && run.line.port <= RC_LISTEN_HIGH);
+  return stop_run (&run) && ok;
+}
+
+static bool
+range_example (void)
+{
+  uint16_t port;
+  int held = hold_port (&port);
+  if (held < 0)
+    return false;
+  char listen[RC_LISTEN_TEXT_SIZE + sizeof "--listen="];
+  snprintf (listen, sizeof listen, "--listen=127.0.0.1:%u-%u",
+	    (unsigned) port, (unsigned) port + 1);
+  struct run run;
+  bool started = start_run_at (&run, (struct where) { listen, NULL },
+			       "127.0.0.1");
+  close (held);
+  return started && stop_run (&run) && run.line.port == port + 1;
+}
+
+static bool
+full_example (void)
+{
+  uint16_t port;
+  int held = hold_port (&port);
+  if (held < 0)
+    return false;
+  char listen[RC_LISTEN_TEXT_SIZE + sizeof "--listen="];
+  snprintf (listen, sizeof listen, "--listen=127.0.0.1:%u",
+	    (unsigned) port);
+  bool ok = refused_p (false, (struct where) { listen, NULL });
+  close (held);
+  return ok;
+}
+
+static bool
+no_address_example (void)
+{
+  return refused_p (false, (struct where) { NULL, NULL });
+}
+
+static bool
+bad_connection_example (void)
+{
+  return refused_p (false,
+		    (struct where) { NULL, "127.0.0.2 40000 workstation 22" });
+}
+
+static bool
+selected_example (void)
+{
+  /* Other examples listen on ports of the default range at 127.0.0.1
+     at the same time, so the refused connection needs a port that
+     they do not use.  */
+  uint16_t port;
+  int held = hold_port (&port);
+  if (held < 0)
+    return false;
+  close (held);
+  char listen[64];
+  snprintf (listen, sizeof listen, "--listen=127.0.0.2:%u", (unsigned) port);
+  struct run run;
+  if (!start_run_at (&run, (struct where) { listen, NULL }, "127.0.0.2"))
+    return false;
+  int fd = connect_to_port ((struct in_addr) { htonl (INADDR_LOOPBACK) },
+			    port);
+  if (fd >= 0)
+    close (fd);
+  struct run other;
+  return stop_run (&run) && fd < 0
+    && start_run_at (&other,
+		     (struct where) { NULL, "127.0.0.3 40000 127.0.0.2 22" },
+		     "127.0.0.2")
+    && stop_run (&other);
+}
+
+static bool
+precedence_example (void)
+{
+  struct run run;
+  return start_run_at (&run, (struct where) { "--listen=127.0.0.1",
+					      "not a connection" },
+		       "127.0.0.1")
+    && stop_run (&run);
+}
+
+static bool
+bad_spec_example (void)
+{
+  return refused_p (false, (struct where) { "--listen=localhost",
+					 DEFAULT_WHERE.connection });
+}
+
+static bool
+ipv6_example (void)
+{
+  int fd = socket (AF_INET6, SOCK_STREAM, 0);
+  struct sockaddr_in6 address = { .sin6_family = AF_INET6,
+				  .sin6_addr = IN6ADDR_LOOPBACK_INIT };
+  bool v6 = fd >= 0 && bind (fd, (struct sockaddr *) &address,
+			     sizeof address) == 0;
+  if (fd >= 0)
+    close (fd);
+  if (!v6)
+    {
+      fprintf (stderr, "test-relay: no IPv6 loopback address; "
+	       "the ipv6 example checks nothing\n");
+      return true;
+    }
+  struct run run;
+  return start_run_at (&run, (struct where) { "--listen=::1", NULL }, "::1")
+    && stop_run (&run);
+}
+
+static bool
 missing_example (void)
 {
-  int in, out, err;
-  pid_t pid = start_relay ("/nonexistent/socket", &in, &out, &err);
-  char text[RC_RELAY_LINE_SIZE];
-  bool ok = !read_line (out, text, sizeof text);
-  close (in);
-  close (out);
-  close (err);
-  return wait_for_exit (pid) == 1 && ok;
+  return refused_p (true, DEFAULT_WHERE);
 }
 
 static bool
@@ -459,7 +638,16 @@ usage_example (void)
       execl ("./remote-client", "remote-client", "--relay", (char *) NULL);
       _exit (127);
     }
-  return wait_for_exit (pid) == 1;
+  pid_t listen = fork ();
+  if (listen == 0)
+    {
+      int null = open ("/dev/null", O_WRONLY);
+      dup2 (null, STDERR_FILENO);
+      execl ("./remote-client", "remote-client", "--relay",
+	     "--listen=127.0.0.1", (char *) NULL);
+      _exit (127);
+    }
+  return wait_for_exit (pid) == 1 && wait_for_exit (listen) == 1;
 }
 
 /* Make a session socket for RUN, start the relay, and read its line.
@@ -469,20 +657,20 @@ usage_example (void)
 static bool
 start_run (struct run *run)
 {
-  strcpy (run->directory, "/tmp/test-relay-XXXXXX");
-  if (!mkdtemp (run->directory))
+  return start_run_at (run, DEFAULT_WHERE, "127.0.0.1");
+}
+
+/* Start the run RUN as start_run does, but with the relay at WHERE.
+   ADDRESS is the numeric loopback address of WHERE.  */
+static bool
+start_run_at (struct run *run, struct where where, const char *address)
+{
+  if (!rc_listen_spec_parse (address, &run->at))
     return false;
-  snprintf (run->socket, sizeof run->socket, "%s/socket", run->directory);
-  run->session = socket (AF_UNIX, SOCK_STREAM, 0);
-  struct sockaddr_un address = { .sun_family = AF_UNIX };
-  snprintf (address.sun_path, sizeof address.sun_path, "%s", run->socket);
-  if (run->session < 0
-      || bind (run->session, (struct sockaddr *) &address,
-	       sizeof address) != 0
-      || listen (run->session, 4) != 0)
+  if (!make_session (run))
     return false;
   int in, out, err;
-  pid_t pid = start_relay (run->socket, &in, &out, &err);
+  pid_t pid = start_relay (run->socket, where, &in, &out, &err);
   char text[RC_RELAY_LINE_SIZE];
   bool ok = (read_line (out, text, sizeof text)
 	     && rc_relay_line_parse (text, &run->line)
@@ -513,8 +701,7 @@ stop_run (struct run *run)
   for (int64_t start = now_ms (); now_ms () - start < LIMIT;
        poll (NULL, 0, 10))
     {
-      int fd = connect_to_port ((struct in_addr) { htonl (INADDR_LOOPBACK) },
-				run->line.port);
+      int fd = connect_run (run);
       if (fd < 0)
 	return ok;
       close (fd);
@@ -522,12 +709,55 @@ stop_run (struct run *run)
   return false;
 }
 
-/* Start "remote-client --relay SOCKET" as the leader of a new group of
-   processes.  Put the write end of its standard input in *IN, and the
-   read ends of its standard output and standard error output in *OUT
-   and *ERR.  Return its process.  */
+/* Make the directory and the session socket of RUN.  Return false on
+   an error.  */
+static bool
+make_session (struct run *run)
+{
+  strcpy (run->directory, "/tmp/test-relay-XXXXXX");
+  if (!mkdtemp (run->directory))
+    return false;
+  snprintf (run->socket, sizeof run->socket, "%s/socket", run->directory);
+  run->session = socket (AF_UNIX, SOCK_STREAM, 0);
+  struct sockaddr_un address = { .sun_family = AF_UNIX };
+  snprintf (address.sun_path, sizeof address.sun_path, "%s", run->socket);
+  return run->session >= 0
+    && bind (run->session, (struct sockaddr *) &address,
+	     sizeof address) == 0
+    && listen (run->session, 4) == 0;
+}
+
+/* Return true if the relay at WHERE writes no line, and exits with
+   the status 1.  With MISSING, the session socket does not exist.
+   Otherwise, it is a real socket, so only WHERE can be the cause.  */
+static bool
+refused_p (bool missing, struct where where)
+{
+  struct run run;
+  if (!make_session (&run))
+    return false;
+  int in, out, err;
+  pid_t pid = start_relay (missing ? "/nonexistent/socket" : run.socket,
+			   where, &in, &out, &err);
+  char text[RC_RELAY_LINE_SIZE];
+  bool ok = !read_line (out, text, sizeof text);
+  close (in);
+  close (out);
+  close (err);
+  ok = wait_for_exit (pid) == 1 && ok;
+  close (run.session);
+  unlink (run.socket);
+  rmdir (run.directory);
+  return ok;
+}
+
+/* Start "remote-client --relay SOCKET" at WHERE as the leader of a new
+   group of processes.  Put the write end of its standard input in *IN,
+   and the read ends of its standard output and standard error output
+   in *OUT and *ERR.  Return its process.  */
 static int
-start_relay (const char *socket, int *in, int *out, int *err)
+start_relay (const char *socket, struct where where, int *in, int *out,
+	     int *err)
 {
   int in_fds[2], out_fds[2], err_fds[2];
   if (pipe (in_fds) != 0 || pipe (out_fds) != 0 || pipe (err_fds) != 0)
@@ -545,8 +775,16 @@ start_relay (const char *socket, int *in, int *out, int *err)
 	  close (out_fds[i]);
 	  close (err_fds[i]);
 	}
-      execl ("./remote-client", "remote-client", "--relay", socket,
-	     (char *) NULL);
+      if (where.connection)
+	setenv ("SSH_CONNECTION", where.connection, 1);
+      else
+	unsetenv ("SSH_CONNECTION");
+      if (where.listen)
+	execl ("./remote-client", "remote-client", "--relay", where.listen,
+	       socket, (char *) NULL);
+      else
+	execl ("./remote-client", "remote-client", "--relay", socket,
+	       (char *) NULL);
       _exit (127);
     }
   setpgid (pid, pid);
@@ -569,7 +807,10 @@ write_closed_p (int fd)
 }
 
 /* Return true if a client with the token of the relay of RUN gets a
-   connection to the session, and the bytes go through.  */
+   connection to the session, and the bytes go through.  Then close the
+   client, and wait until the relay closes its connection to the
+   session.  Thus the relay has no pair when this function returns, and
+   a next step of an example cannot race with the close.  */
 static bool
 works_p (const struct run *run)
 {
@@ -625,8 +866,7 @@ connect_client (const struct run *run, bool good)
 static struct rc_stream *
 connect_tls (const struct run *run)
 {
-  int fd = connect_to_port ((struct in_addr) { htonl (INADDR_LOOPBACK) },
-			    run->line.port);
+  int fd = connect_run (run);
   struct rc_stream *stream
     = fd < 0 ? NULL : rc_tls_connect (fd, run->line.pin, LIMIT);
   if (stream)
@@ -666,8 +906,18 @@ write_stream (struct rc_stream *stream, const void *bytes, size_t size)
 static int
 connect_idle (const struct run *run)
 {
-  return connect_to_port ((struct in_addr) { htonl (INADDR_LOOPBACK) },
-			  run->line.port);
+  return connect_run (run);
+}
+
+/* Return a connection to the relay of RUN at its loopback address, or
+   -1.  */
+static int
+connect_run (const struct run *run)
+{
+  struct sockaddr_storage address;
+  socklen_t size = rc_listen_spec_address (&run->at, run->line.port,
+					   &address);
+  return connect_to ((struct sockaddr *) &address, size);
 }
 
 /* Return a connection to PORT at ADDRESS, or -1.  */
@@ -677,15 +927,63 @@ connect_to_port (struct in_addr address, uint16_t port)
   struct sockaddr_in socket_address = { .sin_family = AF_INET,
 					.sin_port = htons (port),
 					.sin_addr = address };
-  int fd = socket (AF_INET, SOCK_STREAM, 0);
-  if (fd >= 0
-      && connect (fd, (struct sockaddr *) &socket_address,
-		  sizeof socket_address) != 0)
+  return connect_to ((struct sockaddr *) &socket_address,
+		     sizeof socket_address);
+}
+
+/* Return a connection to ADDRESS of SIZE bytes, or -1.  */
+static int
+connect_to (const struct sockaddr *address, socklen_t size)
+{
+  int fd = socket (address->sa_family, SOCK_STREAM, 0);
+  if (fd >= 0 && connect (fd, address, size) != 0)
     {
       close (fd);
       return -1;
     }
   return fd;
+}
+
+/* Listen on a new port of the loopback address whose next port is
+   free.  Put the port in *PORT, and return the socket, or -1.  */
+static int
+hold_port (uint16_t *port)
+{
+  for (int tries = 0; tries < 100; tries++)
+    {
+      struct sockaddr_in address = { .sin_family = AF_INET,
+				     .sin_addr = { htonl (INADDR_LOOPBACK) } };
+      socklen_t size = sizeof address;
+      int fd = socket (AF_INET, SOCK_STREAM, 0);
+      if (fd < 0)
+	return -1;
+      if (bind (fd, (struct sockaddr *) &address, sizeof address) == 0
+	  && listen (fd, 1) == 0
+	  && getsockname (fd, (struct sockaddr *) &address, &size) == 0
+	  && ntohs (address.sin_port) < 65535
+	  && free_port_p (ntohs (address.sin_port) + 1))
+	{
+	  *port = ntohs (address.sin_port);
+	  return fd;
+	}
+      close (fd);
+    }
+  return -1;
+}
+
+/* Return true if PORT of the loopback address is free now.  */
+static bool
+free_port_p (uint16_t port)
+{
+  struct sockaddr_in address = { .sin_family = AF_INET,
+				 .sin_port = htons (port),
+				 .sin_addr = { htonl (INADDR_LOOPBACK) } };
+  int fd = socket (AF_INET, SOCK_STREAM, 0);
+  bool free = fd >= 0 && bind (fd, (struct sockaddr *) &address,
+			       sizeof address) == 0;
+  if (fd >= 0)
+    close (fd);
+  return free;
 }
 
 /* Return the next connection of the relay to the session of RUN, or -1

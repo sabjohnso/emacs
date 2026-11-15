@@ -23,26 +23,35 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    and the client.  The program shows windows, so the check of the
    Makefile runs this test in Xvfb.
 
-   As the bootstrap, the fake runs the remote command with sh.  A fake
-   emacsclient gives the session socket of the test.  The fake keeps a
-   copy of the line of the relay, so the test can stop the relay at the
-   end.  As the tunnel, the fake forwards its local socket to the port
-   of the relay, and writes its process to a file.
+   As "ssh -G", the fake writes a configuration whose host name is
+   RD_TEST_HOSTNAME, or 127.0.0.1.  As the bootstrap, the fake runs the
+   remote command with sh, with the loopback address as the server
+   address of $SSH_CONNECTION.  A fake emacsclient gives the session
+   socket of the test.  The fake keeps a copy of the line of the relay,
+   so the test can connect to the relay, and stop it at the end.
 
-   - Start: the client runs the bootstrap and the tunnel, and sends the
-     token, so the session gets a connection.  When the session removes
-     its frame and closes, the client exits with the status 0.  Then
-     no tunnel runs, and the directory of the local socket is gone.
-   - Tunnel: when the tunnel stops, the client starts it again, and the
-     session gets a new connection.
+   - Start: the client runs "ssh -G" and the bootstrap, and connects to
+     the relay at the host name of "ssh -G", so the session gets a
+     connection.  When the session removes its frame and closes, the
+     client exits with the status 0.  SSH gets no open descriptor of
+     the client other than its standard streams.
+   - Reconnect: when another client with the token replaces the
+     client, the client connects again, and the session gets its new
+     connection.
    - Fail: when the bootstrap gives no line, the client exits with the
      status 1.
-   - No tunnel: when the tunnel stops before the first connection, and
-     stops again, the client exits with the status 1 at once.
-   - Descriptors: SSH gets no open descriptor of the client other than
-     its standard streams, also when the client starts it again.
-   - Usage: --ssh with no host, with a socket, or with --render-to makes
-     the program exit with the status 1.  */
+   - No host name: when "ssh -G" gives no host name, the client exits
+     with the status 1, and does not run the bootstrap.
+   - Unreachable: when the relay is not at the host name of "ssh -G",
+     the client exits with the status 1.  The host name is a loopback
+     address where the relay does not listen.
+   - Connect: --connect=ADDRESS replaces the host name of "ssh -G".
+   - Listen: with --listen=SPEC, the relay listens at the place of SPEC.
+   - Bad listen: with a --listen that is not a spec, the client exits
+     with the status 1, and does not run SSH.
+   - Usage: --ssh with no host, with a socket, or with --render-to, and
+     --listen or --connect with no --ssh, make the program exit with
+     the status 1.  */
 
 #include <config.h>
 
@@ -58,7 +67,6 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -68,6 +76,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "rdproto.h"
 #include "relayline.h"
+#include "stream.h"
+#include "tls.h"
 
 /* The longest wait for an event, in milliseconds.  The first connection
    also waits for the start of GTK.  */
@@ -79,38 +89,62 @@ enum { TIMEOUT = 600 };
 /* The frame of each example.  */
 enum { FRAME = 7 };
 
-/* One run of the program.  */
+/* The host name that "ssh -G" gives in the unreachable and connect
+   examples.  The relay does not listen there.  */
+#define ELSEWHERE "127.255.255.254"
+
+/* One run of the program.  PID is 0 after the program exits; then
+   STATUS is its exit status, or -1.  */
 struct run
 {
   char directory[64];
   char session[128];
   pid_t pid;
+  int status;
   int listener;
   int connection;
 };
 
+/* How a run starts: the variables of the environment of the fake, as
+   "NAME=VALUE" or NULL, and the extra options of the program, or
+   NULL.  */
+struct setup
+{
+  const char *environment[2];
+  const char *options[2];
+};
+
 static bool start_example (void);
-static bool tunnel_example (void);
+static bool reconnect_example (void);
 static bool fail_example (void);
-static bool no_tunnel_example (void);
+static bool no_hostname_example (void);
+static bool unreachable_example (void);
+static bool connect_example (void);
+static bool listen_example (void);
+static bool bad_listen_example (void);
 static bool usage_example (void);
-static bool start_run (struct run *, const char *);
+static bool start_run (struct run *, struct setup);
+static int accept_while_running (struct run *);
+static bool refused_p (struct setup, int);
 static void stop_run (struct run *);
+static bool define_frame (int);
 static bool end_session (struct run *);
 static bool clean_after_exit (const struct run *);
-static bool no_leaks_p (const struct run *);
+static bool no_leaks_p (const struct run *, int);
+static bool exists_p (const struct run *, const char *);
 static int open_descriptors (void);
-static int read_tunnels (const struct run *, pid_t *, int);
+static bool read_relay_line (const struct run *, struct rc_relay_line *);
+static struct rc_stream *connect_relay (const struct rc_relay_line *);
 static void stop_relay (const struct run *);
+static uint16_t free_port (void);
 static bool make_bin (const struct run *);
 static int accept_session (const struct run *);
 static bool send_message (int, const struct rd_message *);
 static int wait_for_exit (pid_t);
 static int run_usage (const char *const *);
 static int fake_ssh (int, char **);
+static int fake_config (void);
 static int fake_bootstrap (const char *);
-static int fake_tunnel (const char *);
-static void splice_fds (int, int);
 static int64_t now_ms (void);
 
 /* An example and its name.  */
@@ -121,9 +155,13 @@ static const struct
 } examples[] =
   {
     { "start", start_example },
-    { "tunnel", tunnel_example },
+    { "reconnect", reconnect_example },
     { "fail", fail_example },
-    { "no tunnel", no_tunnel_example },
+    { "no host name", no_hostname_example },
+    { "unreachable", unreachable_example },
+    { "connect", connect_example },
+    { "listen", listen_example },
+    { "bad listen", bad_listen_example },
     { "usage", usage_example },
   };
 
@@ -149,30 +187,34 @@ static bool
 start_example (void)
 {
   struct run run;
-  if (!start_run (&run, NULL))
+  if (!start_run (&run, (struct setup) { 0 }))
     return false;
   bool ok = end_session (&run) && clean_after_exit (&run)
-    && no_leaks_p (&run);
+    && no_leaks_p (&run, 2);
   stop_run (&run);
   return ok;
 }
 
 static bool
-tunnel_example (void)
+reconnect_example (void)
 {
   struct run run;
-  if (!start_run (&run, NULL))
+  if (!start_run (&run, (struct setup) { 0 }))
     return false;
-  pid_t tunnels[4];
-  bool ok = read_tunnels (&run, tunnels, 4) == 1;
-  if (ok)
-    kill (tunnels[0], SIGKILL);
+  struct rc_relay_line line;
+  struct rc_stream *other
+    = read_relay_line (&run, &line) ? connect_relay (&line) : NULL;
+  /* The relay closes the connection of the client to the session, and
+     opens one for OTHER.  Then the client connects again, and
+     replaces OTHER.  */
+  int for_other = other ? accept_session (&run) : -1;
   close (run.connection);
-  run.connection = accept_session (&run);
-  ok = (ok && run.connection >= 0
-	&& read_tunnels (&run, tunnels, 4) == 2
-	&& end_session (&run) && clean_after_exit (&run)
-	&& no_leaks_p (&run));
+  run.connection = for_other >= 0 ? accept_session (&run) : -1;
+  bool ok = (run.connection >= 0 && define_frame (run.connection)
+	     && end_session (&run));
+  rc_stream_close (other);
+  if (for_other >= 0)
+    close (for_other);
   stop_run (&run);
   return ok;
 }
@@ -180,25 +222,57 @@ tunnel_example (void)
 static bool
 fail_example (void)
 {
+  return refused_p ((struct setup) { .environment = { "RD_TEST_FAIL=1" } },
+		    2);
+}
+
+static bool
+no_hostname_example (void)
+{
+  struct setup setup = { .environment = { "RD_TEST_HOSTNAME=" } };
+  return refused_p (setup, 1);
+}
+
+static bool
+unreachable_example (void)
+{
+  struct setup setup = { .environment = { "RD_TEST_HOSTNAME=" ELSEWHERE } };
+  return refused_p (setup, 2);
+}
+
+static bool
+connect_example (void)
+{
+  struct setup setup = { .environment = { "RD_TEST_HOSTNAME=" ELSEWHERE },
+			 .options = { "--connect=127.0.0.1" } };
   struct run run;
-  bool started = start_run (&run, "RD_TEST_FAIL");
-  bool ok = !started && wait_for_exit (run.pid) == 1;
-  run.pid = 0;
-  ok = ok && clean_after_exit (&run);
+  bool ok = start_run (&run, setup) && end_session (&run);
   stop_run (&run);
   return ok;
 }
 
 static bool
-no_tunnel_example (void)
+listen_example (void)
 {
+  uint16_t port = free_port ();
+  char listen[64];
+  snprintf (listen, sizeof listen, "--listen=127.0.0.1:%u",
+	    (unsigned) port);
   struct run run;
-  bool started = start_run (&run, "RD_TEST_TUNNEL_FAIL");
-  bool ok = !started && wait_for_exit (run.pid) == 1;
-  run.pid = 0;
-  ok = ok && clean_after_exit (&run);
+  struct rc_relay_line line;
+  bool ok = (port > 0
+	     && start_run (&run, (struct setup) { .options = { listen } })
+	     && read_relay_line (&run, &line) && line.port == port
+	     && end_session (&run));
   stop_run (&run);
   return ok;
+}
+
+static bool
+bad_listen_example (void)
+{
+  return refused_p ((struct setup) { .options = { "--listen=localhost" } },
+		    0);
 }
 
 static bool
@@ -208,18 +282,22 @@ usage_example (void)
   static const char *const socket[] = { "--ssh", "host", "socket", NULL };
   static const char *const png[] = { "--render-to=x.png", "--ssh", "host",
 				     NULL };
+  static const char *const listen[] = { "--listen=127.0.0.1", "socket",
+					NULL };
+  static const char *const connect[] = { "--connect=127.0.0.1", "socket",
+					 NULL };
   return (run_usage (no_host) == 1 && run_usage (socket) == 1
-	  && run_usage (png) == 1);
+	  && run_usage (png) == 1 && run_usage (listen) == 1
+	  && run_usage (connect) == 1);
 }
 
 /* Make the directory of RUN, listen as the session, and start the
-   program.  If FAIL is not NULL, it is the variable of the environment
-   that makes a part of the fake fail.  Return true if the session gets
-   a connection; then define a frame on it.  */
+   program with SETUP.  Return true if the session gets a connection;
+   then define a frame on it.  */
 static bool
-start_run (struct run *run, const char *fail)
+start_run (struct run *run, struct setup setup)
 {
-  *run = (struct run) { .listener = -1, .connection = -1 };
+  *run = (struct run) { .listener = -1, .connection = -1, .status = -1 };
   strcpy (run->directory, "/tmp/test-ssh-XXXXXX");
   if (!mkdtemp (run->directory) || !make_bin (run))
     return false;
@@ -250,19 +328,66 @@ start_run (struct run *run, const char *fail)
       setenv ("RD_TEST_SESSION", run->session, 1);
       setenv ("XDG_RUNTIME_DIR", runtime, 1);
       setenv ("XDG_CACHE_HOME", run->directory, 1);
-      if (fail)
-	setenv (fail, "1", 1);
-      execl ("./remote-client", "remote-client", timeout, ssh, "--ssh",
-	     "testhost", (char *) NULL);
+      for (int i = 0; i < 2 && setup.environment[i]; i++)
+	putenv ((char *) setup.environment[i]);
+      const char *argv[8] = { "remote-client", timeout, ssh };
+      int argc = 3;
+      for (int i = 0; i < 2 && setup.options[i]; i++)
+	argv[argc++] = setup.options[i];
+      argv[argc++] = "--ssh";
+      argv[argc++] = "testhost";
+      execv ("./remote-client", (char **) argv);
       _exit (127);
     }
-  if (fail)
-    return false;
-  run->connection = accept_session (run);
+  run->connection = accept_while_running (run);
+  return run->connection >= 0 && define_frame (run->connection);
+}
+
+/* Return the next connection of the session of RUN, or -1 if none
+   comes in LIMIT milliseconds, or if the program exits first.  */
+static int
+accept_while_running (struct run *run)
+{
+  for (int64_t start = now_ms (); now_ms () - start < LIMIT; )
+    {
+      struct pollfd ready = { .fd = run->listener, .events = POLLIN };
+      if (poll (&ready, 1, 10) == 1)
+	return accept (run->listener, NULL, NULL);
+      int status;
+      if (waitpid (run->pid, &status, WNOHANG) == run->pid)
+	{
+	  run->pid = 0;
+	  run->status = WIFEXITED (status) ? WEXITSTATUS (status) : -1;
+	  return -1;
+	}
+    }
+  return -1;
+}
+
+/* Return true if the program with SETUP exits with the status 1, the
+   session gets no connection, and the fake SSH runs RUNS times.  */
+static bool
+refused_p (struct setup setup, int runs)
+{
+  struct run run;
+  bool started = start_run (&run, setup);
+  bool ok = (!started && run.pid == 0 && run.status == 1
+	     && (runs == 0 ? !exists_p (&run, "descriptors")
+		 : no_leaks_p (&run, runs)));
+  ok = ok && clean_after_exit (&run);
+  stop_run (&run);
+  return ok;
+}
+
+/* Send the definition of the frame of each example on FD.  Return true
+   on success.  */
+static bool
+define_frame (int fd)
+{
   struct rd_message define
     = { .type = RD_DEFINE_FRAME,
 	.u.define_frame = { .frame = FRAME, .width = 200, .height = 100 } };
-  return run->connection >= 0 && send_message (run->connection, &define);
+  return send_message (fd, &define);
 }
 
 /* Remove the frame of RUN, close the session, and return true if the
@@ -280,66 +405,43 @@ end_session (struct run *run)
   return ok;
 }
 
-/* Return true if no tunnel of RUN runs, and the directory of the
-   local sockets of RUN is empty.  */
+/* Return true if the directory XDG_RUNTIME_DIR of RUN is empty.  */
 static bool
 clean_after_exit (const struct run *run)
 {
-  pid_t tunnels[8];
-  int count = read_tunnels (run, tunnels, 8);
-  for (int64_t start = now_ms (); now_ms () - start < LIMIT;
-       poll (NULL, 0, 10))
-    {
-      bool running = false;
-      for (int i = 0; i < count; i++)
-	running |= kill (tunnels[i], 0) == 0;
-      if (!running)
-	break;
-    }
-  for (int i = 0; i < count; i++)
-    if (kill (tunnels[i], 0) == 0)
-      return false;
   char runtime[96];
   snprintf (runtime, sizeof runtime, "%s/run", run->directory);
   return rmdir (runtime) == 0;
 }
 
-/* Return true if each run of the fake SSH of RUN got no descriptor
-   other than its standard streams.  The fake writes the number of the
-   other descriptors to the file descriptors.  */
+/* Return true if the fake SSH of RUN ran RUNS times, and each run got
+   no descriptor other than its standard streams.  The fake writes the
+   number of the other descriptors to the file descriptors.  */
 static bool
-no_leaks_p (const struct run *run)
+no_leaks_p (const struct run *run, int runs)
 {
   char name[128];
   snprintf (name, sizeof name, "%s/descriptors", run->directory);
   FILE *file = fopen (name, "r");
-  int count, runs = 0;
+  int count, seen = 0;
   bool ok = file != NULL;
   while (ok && fscanf (file, "%d", &count) == 1)
     {
-      runs++;
+      seen++;
       ok = count == 0;
     }
   if (file)
     fclose (file);
-  return ok && runs >= 2;
+  return ok && seen == runs;
 }
 
-/* Put the processes of the tunnels of RUN in TUNNELS, at most LIMIT of
-   them, and return their number.  */
-static int
-read_tunnels (const struct run *run, pid_t *tunnels, int limit)
+/* Return true if the file NAME is in the directory of RUN.  */
+static bool
+exists_p (const struct run *run, const char *name)
 {
-  char name[128];
-  snprintf (name, sizeof name, "%s/tunnels", run->directory);
-  FILE *file = fopen (name, "r");
-  int count = 0;
-  long pid;
-  while (file && count < limit && fscanf (file, "%ld", &pid) == 1)
-    tunnels[count++] = pid;
-  if (file)
-    fclose (file);
-  return count;
+  char path[160];
+  snprintf (path, sizeof path, "%s/%s", run->directory, name);
+  return access (path, F_OK) == 0;
 }
 
 /* Stop the program and the relay of RUN, and remove its directory.  */
@@ -357,9 +459,6 @@ stop_run (struct run *run)
     close (run->listener);
   unlink (run->session);
   stop_relay (run);
-  pid_t tunnels[8];
-  for (int i = read_tunnels (run, tunnels, 8); i > 0; i--)
-    kill (tunnels[i - 1], SIGKILL);
   char command[128];
   snprintf (command, sizeof command, "rm -rf '%s'", run->directory);
   if (system (command) != 0)
@@ -371,29 +470,74 @@ stop_run (struct run *run)
 static void
 stop_relay (const struct run *run)
 {
+  struct rc_relay_line line;
+  struct rc_stream *stream
+    = read_relay_line (run, &line) ? connect_relay (&line) : NULL;
+  if (stream)
+    {
+      struct pollfd ready = { .fd = rc_stream_fd (stream),
+			      .events = POLLIN };
+      poll (&ready, 1, LIMIT);
+    }
+  rc_stream_close (stream);
+}
+
+/* Put the line of the relay of RUN, from the copy of the fake, in
+   LINE.  Return false if there is no valid copy.  */
+static bool
+read_relay_line (const struct run *run, struct rc_relay_line *line)
+{
   char name[128], text[RC_RELAY_LINE_SIZE] = "";
   snprintf (name, sizeof name, "%s/relay.line", run->directory);
   FILE *file = fopen (name, "r");
-  struct rc_relay_line line;
   bool found = (file && fgets (text, sizeof text, file)
-		&& rc_relay_line_parse (text, &line));
+		&& rc_relay_line_parse (text, line));
   if (file)
     fclose (file);
-  if (!found)
-    return;
+  return found;
+}
+
+/* Connect to the relay of LINE at the loopback address with TLS, and
+   send its token.  Return the stream, or NULL.  */
+static struct rc_stream *
+connect_relay (const struct rc_relay_line *line)
+{
   struct sockaddr_in address = { .sin_family = AF_INET,
-				 .sin_port = htons (line.port),
+				 .sin_port = htons (line->port),
 				 .sin_addr = { htonl (INADDR_LOOPBACK) } };
   int fd = socket (AF_INET, SOCK_STREAM, 0);
   if (fd >= 0
-      && connect (fd, (struct sockaddr *) &address, sizeof address) == 0
-      && write (fd, line.token, RC_TOKEN_SIZE) == RC_TOKEN_SIZE)
+      && connect (fd, (struct sockaddr *) &address, sizeof address) != 0)
     {
-      struct pollfd ready = { .fd = fd, .events = POLLIN };
-      poll (&ready, 1, LIMIT);
+      close (fd);
+      fd = -1;
     }
+  struct rc_stream *stream
+    = fd < 0 ? NULL : rc_tls_connect (fd, line->pin, LIMIT);
+  if (stream
+      && rc_stream_write (stream, line->token, RC_TOKEN_SIZE)
+	 != RC_TOKEN_SIZE)
+    {
+      rc_stream_close (stream);
+      return NULL;
+    }
+  return stream;
+}
+
+/* Return a port of the loopback address that is free now, or 0.  */
+static uint16_t
+free_port (void)
+{
+  struct sockaddr_in address = { .sin_family = AF_INET,
+				 .sin_addr = { htonl (INADDR_LOOPBACK) } };
+  socklen_t size = sizeof address;
+  int fd = socket (AF_INET, SOCK_STREAM, 0);
+  bool ok = (fd >= 0
+	     && bind (fd, (struct sockaddr *) &address, sizeof address) == 0
+	     && getsockname (fd, (struct sockaddr *) &address, &size) == 0);
   if (fd >= 0)
     close (fd);
+  return ok ? ntohs (address.sin_port) : 0;
 }
 
 /* Make the directory bin of RUN: fake-ssh is this program,
@@ -483,8 +627,8 @@ run_usage (const char *const *arguments)
   return wait_for_exit (pid);
 }
 
-/* The fake SSH.  With -N, it is the tunnel of the forward after -L.
-   Otherwise, it runs the last argument with sh.  */
+/* The fake SSH.  With -G, it writes a configuration.  Otherwise, it
+   runs the last argument with sh.  */
 static int
 fake_ssh (int argc, char **argv)
 {
@@ -497,22 +641,29 @@ fake_ssh (int argc, char **argv)
       fprintf (file, "%d\n", count);
       fclose (file);
     }
-  const char *forward = NULL;
-  bool tunnel = false;
-  for (int i = 1; i < argc; i++)
-    if (strcmp (argv[i], "-N") == 0)
-      tunnel = true;
-    else if (strcmp (argv[i], "-L") == 0 && i + 1 < argc)
-      forward = argv[i + 1];
-  if (tunnel)
-    return (forward && strcmp (argv[argc - 2], "--") == 0
-	    && !getenv ("RD_TEST_TUNNEL_FAIL")
-	    ? fake_tunnel (forward) : 255);
+  if (argc == 4 && strcmp (argv[1], "-G") == 0
+      && strcmp (argv[2], "--") == 0)
+    return fake_config ();
   if (argc < 4 || strcmp (argv[argc - 3], "--") != 0)
     return 255;
   if (getenv ("RD_TEST_FAIL"))
     return 255;
+  setenv ("SSH_CONNECTION", "127.0.0.2 40000 127.0.0.1 22", 1);
   return fake_bootstrap (argv[argc - 1]);
+}
+
+/* Write a configuration as "ssh -G" does.  Its host name is
+   RD_TEST_HOSTNAME, or 127.0.0.1.  An empty RD_TEST_HOSTNAME gives no
+   host name line.  */
+static int
+fake_config (void)
+{
+  const char *hostname = getenv ("RD_TEST_HOSTNAME");
+  printf ("user test\n");
+  if (!hostname || *hostname)
+    printf ("hostname %s\n", hostname ? hostname : "127.0.0.1");
+  printf ("port 22\naddressfamily any\n");
+  return 0;
 }
 
 /* Return the number of the open descriptors of this process other
@@ -560,80 +711,6 @@ fake_bootstrap (const char *command)
   int status;
   waitpid (pid, &status, 0);
   return WIFEXITED (status) ? WEXITSTATUS (status) : 255;
-}
-
-/* Forward the socket of FORWARD, "SOCKET:127.0.0.1:PORT", to PORT of
-   the loopback address, as ssh -N -L does.  Write the process to the
-   file tunnels.  */
-static int
-fake_tunnel (const char *forward)
-{
-  char socket_name[128];
-  const char *colon = strstr (forward, ":127.0.0.1:");
-  if (!colon || colon - forward >= (long) sizeof socket_name)
-    return 255;
-  memcpy (socket_name, forward, colon - forward);
-  socket_name[colon - forward] = 0;
-  int port = atoi (colon + strlen (":127.0.0.1:"));
-  char name[128];
-  snprintf (name, sizeof name, "%s/tunnels", getenv ("RD_TEST_DIR"));
-  FILE *file = fopen (name, "a");
-  if (file)
-    {
-      fprintf (file, "%ld\n", (long) getpid ());
-      fclose (file);
-    }
-  struct sockaddr_un address = { .sun_family = AF_UNIX };
-  if (snprintf (address.sun_path, sizeof address.sun_path, "%s",
-		socket_name) >= (int) sizeof address.sun_path)
-    return 255;
-  int listener = socket (AF_UNIX, SOCK_STREAM, 0);
-  if (listener < 0
-      || bind (listener, (struct sockaddr *) &address, sizeof address) != 0
-      || listen (listener, 4) != 0)
-    return 255;
-  signal (SIGCHLD, SIG_IGN);
-  for (;;)
-    {
-      int local = accept (listener, NULL, NULL);
-      if (local < 0)
-	continue;
-      if (fork () == 0)
-	{
-	  prctl (PR_SET_PDEATHSIG, SIGKILL);
-	  struct sockaddr_in remote = { .sin_family = AF_INET,
-					.sin_port = htons (port),
-					.sin_addr = { htonl (INADDR_LOOPBACK) } };
-	  int fd = socket (AF_INET, SOCK_STREAM, 0);
-	  if (fd >= 0
-	      && connect (fd, (struct sockaddr *) &remote, sizeof remote) == 0)
-	    splice_fds (local, fd);
-	  _exit (0);
-	}
-      close (local);
-    }
-}
-
-/* Copy the bytes between A and B until one of them ends.  */
-static void
-splice_fds (int a, int b)
-{
-  for (;;)
-    {
-      struct pollfd fds[2] = { { .fd = a, .events = POLLIN },
-			       { .fd = b, .events = POLLIN } };
-      if (poll (fds, 2, -1) < 0)
-	return;
-      for (int i = 0; i < 2; i++)
-	if (fds[i].revents)
-	  {
-	    char bytes[4096];
-	    ssize_t count = read (fds[i].fd, bytes, sizeof bytes);
-	    if (count <= 0
-		|| write (fds[1 - i].fd, bytes, count) != count)
-	      return;
-	  }
-    }
 }
 
 /* Return the time of a monotonic clock in milliseconds.  */

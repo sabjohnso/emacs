@@ -44,12 +44,13 @@ FONTS_OBJS = fonts.o hashfonts.o hashcache.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   fonts.o hashfonts.o hashcache.o rdproto.o link.o backoff.o \
   unixsocket.o relay.o relayline.o token.o flow.o pending.o stream.o tls.o \
-  sshargs.o bootstrap.o tunnel.o clock.o child.o
+  listenspec.o \
+  sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
   test-backoff test-reconnect test-relayline \
   test-relay test-flow test-pending test-unixsocket \
-  test-sshargs test-ssh test-tls
+  test-sshargs test-ssh test-tls test-listenspec test-sshconfig
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -78,6 +79,8 @@ check: remote-client $(TESTS)
 	./test-unixsocket
 	./test-sshargs
 	./test-tls
+	./test-listenspec
+	./test-sshconfig
 	$(XVFB_RUN) ./test-view
 	$(XVFB_RUN) ./test-reconnect
 	$(XVFB_RUN) ./test-ssh
@@ -124,7 +127,8 @@ test-relayline: test-relayline.o relayline.o token.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 # The test runs the program, so the program must be current.
-test-relay: test-relay.o relayline.o token.o tls.o stream.o | remote-client
+test-relay: test-relay.o relayline.o token.o tls.o stream.o listenspec.o \
+  | remote-client
 	$(CC) $(LDFLAGS) -o $@ $^ $(TLS_LIBS)
 
 test-flow: test-flow.o flow.o
@@ -136,10 +140,17 @@ test-pending: test-pending.o pending.o token.o
 test-unixsocket: test-unixsocket.o unixsocket.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-sshargs: test-sshargs.o sshargs.o
+test-sshargs: test-sshargs.o sshargs.o listenspec.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-ssh: test-ssh.o rdproto.o relayline.o token.o | remote-client
+test-ssh: test-ssh.o rdproto.o relayline.o token.o tls.o stream.o \
+  | remote-client
+	$(CC) $(LDFLAGS) -o $@ $^ $(TLS_LIBS)
+
+test-sshconfig: test-sshconfig.o sshconfig.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-listenspec: test-listenspec.o listenspec.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-tls: test-tls.o tls.o stream.o
@@ -154,7 +165,7 @@ test-view: test-view.o view.o input.o sizes.o $(RENDER_OBJS)
 client.o view.o input.o test-input.o test-view.o: %.o: %.c
 	$(CC) $(ALL_CFLAGS) $(GTK_CFLAGS) -c -o $@ $<
 
-tls.o test-tls.o test-relay.o: %.o: %.c
+tls.o test-tls.o test-relay.o test-ssh.o: %.o: %.c
 	$(CC) $(ALL_CFLAGS) $(TLS_CFLAGS) -c -o $@ $<
 
 rdproto.o: ../src/rdproto.c ../src/rdproto.h config.h
@@ -183,16 +194,18 @@ relay.o client.o test-relay.o: relay.h
 flow.o test-flow.o relay.o: flow.h
 pending.o test-pending.o relay.o test-relay.o: pending.h token.h
 unixsocket.o client.o relay.o test-unixsocket.o: unixsocket.h
-client.o tunnel.o: connector.h
-sshargs.o test-sshargs.o bootstrap.o tunnel.o: sshargs.h
-bootstrap.o client.o: bootstrap.h relayline.h token.h
-tunnel.o client.o: tunnel.h relayline.h token.h unixsocket.h
-clock.o relay.o bootstrap.o tunnel.o: clock.h
-child.o bootstrap.o tunnel.o: child.h
-stream.o relay.o client.o tunnel.o: stream.h
+client.o: connector.h
+sshargs.o test-sshargs.o bootstrap.o: sshargs.h listenspec.h
+bootstrap.o client.o: bootstrap.h relayline.h token.h listenspec.h sshconfig.h
+direct.o client.o: direct.h relayline.h token.h stream.h
+clock.o relay.o bootstrap.o: clock.h
+child.o bootstrap.o: child.h
+stream.o relay.o client.o direct.o test-ssh.o: stream.h
 stream.o tls.o: streamclass.h
-tls.o test-tls.o test-relay.o relay.o tunnel.o: tls.h pin.h stream.h
+tls.o test-tls.o test-relay.o test-ssh.o relay.o direct.o: tls.h pin.h stream.h
 test-ssh.o: relayline.h token.h ../src/rdproto.h
+listenspec.o test-listenspec.o relay.o client.o test-relay.o: listenspec.h
+sshconfig.o test-sshconfig.o bootstrap.o client.o: sshconfig.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)

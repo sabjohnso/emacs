@@ -19,8 +19,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* The window mode connects again after each lost connection.  A
    struct rc_connector tells it how: through a Unix-domain socket, or
-   through an SSH tunnel to a relay.  The window mode does not know
-   which.  */
+   through the direct connector of direct.h to a relay.  The window
+   mode does not know which.  */
 
 #ifndef REMOTE_CLIENT_CONNECTOR_H
 #define REMOTE_CLIENT_CONNECTOR_H

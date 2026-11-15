@@ -18,8 +18,9 @@ You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* Usage: remote-client [--render-to=FILE.png | --timeout=MS] SOCKET
-	  remote-client [--timeout=MS] [--ssh-command=PROGRAM] --ssh HOST
-	  remote-client --relay SOCKET
+	  remote-client [--timeout=MS] [--ssh-command=PROGRAM]
+			[--listen=SPEC] [--connect=ADDRESS] --ssh HOST
+	  remote-client --relay [--listen=SPEC] SOCKET
 
    The program connects to the Unix-domain socket SOCKET of a session,
    and shows each frame of the session in a window.  It stops when the
@@ -40,12 +41,17 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    it.
 
    With --ssh HOST, the program starts a new session on HOST through
-   SSH, and connects to it through the relay of relay.h and an SSH
-   tunnel: see bootstrap.h and tunnel.h.  PROGRAM is the SSH program,
-   "ssh" by default.  The Emacs server on HOST must run.
+   SSH, and connects to it through the relay of relay.h: see
+   bootstrap.h and direct.h.  PROGRAM is the SSH program, "ssh" by
+   default.  The Emacs server on HOST must run.  The relay listens at
+   the place of the listen spec SPEC of listenspec.h, or on the server
+   address of SSH by default.  The program connects to the relay at
+   ADDRESS, or by default at the host name that "ssh -G HOST" gives.
 
    With --relay, the program is the relay of relay.h for the session
-   socket SOCKET.  It opens no window.
+   socket SOCKET.  It opens no window.  It listens at the place of the
+   listen spec SPEC of listenspec.h.  With no --listen, it listens on
+   the server address of $SSH_CONNECTION, which SSH sets.
 
    The exit status is 0 on success, and 1 on an error.  */
 
@@ -67,16 +73,17 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "bootstrap.h"
 #include "connector.h"
+#include "direct.h"
 #include "fonts.h"
 #include "hashcache.h"
 #include "hashfonts.h"
 #include "link.h"
+#include "listenspec.h"
 #include "backoff.h"
 #include "reader.h"
 #include "relay.h"
 #include "render.h"
 #include "stream.h"
-#include "tunnel.h"
 #include "unixsocket.h"
 #include "view.h"
 
@@ -102,7 +109,9 @@ enum read_result
 
 /* The options of the command line.  PNG is the file of --render-to,
    or NULL.  HOST is the host of --ssh, or NULL; then SOCKET is the
-   session socket.  SSH is the program of --ssh-command.  */
+   session socket.  SSH is the program of --ssh-command.  LISTEN is
+   the spec of --listen, if HAS_LISTEN.  CONNECT is the address of
+   --connect, or NULL.  */
 struct options
 {
   const char *png;
@@ -110,6 +119,9 @@ struct options
   const char *ssh;
   const char *host;
   const char *socket;
+  bool has_listen;
+  struct rc_listen_spec listen;
+  const char *connect;
 };
 
 /* The state of the mode --render-to.  */
@@ -159,10 +171,12 @@ struct window_mode
 static struct options parse_options (int, char **);
 static struct rc_stream *open_session (const struct options *,
 				       struct rc_connector *,
-				       struct rc_tunnel **);
+				       struct rc_direct **);
 static struct rc_stream *open_ssh_session (const struct options *,
 					   struct rc_connector *,
-					   struct rc_tunnel **);
+					   struct rc_direct **);
+static const char *relay_address (const struct options *,
+				  char[RC_SSH_HOSTNAME_SIZE]);
 static struct rc_font_source client_fonts (void);
 static char *cache_file_name (void);
 static void warn_fallback (const uint8_t *, int, uint32_t);
@@ -190,24 +204,21 @@ static bool write_all (struct rc_stream *, const unsigned char *, size_t,
 		       int64_t);
 static enum read_result read_chunk (struct rc_reader *, struct rc_stream *);
 static int64_t now_ms (void);
+static int relay_main (int, char **);
 static void usage (void);
 
 int
 main (int argc, char **argv)
 {
   if (argc > 1 && strcmp (argv[1], "--relay") == 0)
-    {
-      if (argc != 3)
-	usage ();
-      return rc_relay_run (argv[2]);
-    }
+    return relay_main (argc, argv);
   struct options options = parse_options (argc, argv);
   struct rc_connector connector;
-  struct rc_tunnel *tunnel = NULL;
-  struct rc_stream *stream = open_session (&options, &connector, &tunnel);
+  struct rc_direct *direct = NULL;
+  struct rc_stream *stream = open_session (&options, &connector, &direct);
   if (!stream)
     {
-      rc_tunnel_free (tunnel);
+      rc_direct_free (direct);
       return 1;
     }
   struct rc_font_source fonts = client_fonts ();
@@ -222,8 +233,34 @@ main (int argc, char **argv)
     }
   rc_renderer_free (renderer);
   rc_font_source_free (fonts);
-  rc_tunnel_free (tunnel);
+  rc_direct_free (direct);
   return status;
+}
+
+/* Run the relay of the command line "--relay [--listen=SPEC] SOCKET"
+   in ARGV with ARGC arguments.  Return the exit status.  */
+static int
+relay_main (int argc, char **argv)
+{
+  bool listen = argc == 4 && strncmp (argv[2], "--listen=", 9) == 0;
+  if (argc != 3 + listen || strncmp (argv[argc - 1], "--", 2) == 0)
+    usage ();
+  struct rc_listen_spec spec;
+  const char *connection = getenv ("SSH_CONNECTION");
+  if (listen && !rc_listen_spec_parse (argv[2] + 9, &spec))
+    {
+      fprintf (stderr, "remote-client: %s: not a listen spec\n",
+	       argv[2] + 9);
+      return 1;
+    }
+  if (!listen
+      && !(connection && rc_listen_spec_from_connection (connection, &spec)))
+    {
+      fprintf (stderr, "remote-client: no --listen, and no valid "
+	       "SSH_CONNECTION\n");
+      return 1;
+    }
+  return rc_relay_run (argv[argc - 1], &spec);
 }
 
 /* Return the options of the command line ARGV with ARGC arguments.
@@ -248,9 +285,22 @@ parse_options (int argc, char **argv)
       options.ssh = argv[arg] + 14;
     else if (strcmp (argv[arg], "--ssh") == 0 && arg + 1 < argc)
       options.host = argv[++arg];
+    else if (strncmp (argv[arg], "--listen=", 9) == 0)
+      {
+	options.has_listen = true;
+	if (!rc_listen_spec_parse (argv[arg] + 9, &options.listen))
+	  {
+	    fprintf (stderr, "remote-client: %s: not a listen spec\n",
+		     argv[arg] + 9);
+	    exit (1);
+	  }
+      }
+    else if (strncmp (argv[arg], "--connect=", 10) == 0)
+      options.connect = argv[arg] + 10;
     else
       usage ();
-  if (options.host ? arg != argc || options.png : arg != argc - 1)
+  if (options.host ? arg != argc || options.png
+      : (arg != argc - 1 || options.has_listen || options.connect))
     usage ();
   options.socket = options.host ? NULL : argv[arg];
   return options;
@@ -258,13 +308,13 @@ parse_options (int argc, char **argv)
 
 /* Connect to the session of OPTIONS, and return the stream, or NULL
    with a message.  Put the connector for later connections in
-   *CONNECTOR.  With --ssh, put the tunnel in *TUNNEL.  */
+   *CONNECTOR.  With --ssh, put the direct connector in *DIRECT.  */
 static struct rc_stream *
 open_session (const struct options *options, struct rc_connector *connector,
-	      struct rc_tunnel **tunnel)
+	      struct rc_direct **direct)
 {
   if (options->host)
-    return open_ssh_session (options, connector, tunnel);
+    return open_ssh_session (options, connector, direct);
   *connector = (struct rc_connector) { connect_socket,
 				       (void *) options->socket };
   int fd = rc_connect_unix (options->socket, true);
@@ -272,23 +322,46 @@ open_session (const struct options *options, struct rc_connector *connector,
 }
 
 /* Start a session on the host of OPTIONS through SSH, and return the
-   first stream through a new tunnel, or NULL with a message.  Put
-   the connector of the tunnel in *CONNECTOR, and the tunnel in
-   *TUNNEL.  */
+   first stream to its relay, or NULL with a message.  Put the direct
+   connector in *CONNECTOR and in *DIRECT.  The address of the relay
+   comes before the bootstrap, so an error there starts no session.  */
 static struct rc_stream *
 open_ssh_session (const struct options *options,
-		  struct rc_connector *connector, struct rc_tunnel **tunnel)
+		  struct rc_connector *connector, struct rc_direct **direct)
 {
+  char hostname[RC_SSH_HOSTNAME_SIZE];
+  const char *address = relay_address (options, hostname);
+  if (!address)
+    return NULL;
   struct rc_relay_line line;
-  if (!rc_bootstrap (options->ssh, options->host, &line))
+  if (!rc_bootstrap (options->ssh, options->host,
+		     options->has_listen ? &options->listen : NULL, &line))
     return NULL;
-  const char *base = getenv ("XDG_RUNTIME_DIR");
-  *tunnel = rc_tunnel_new (options->ssh, options->host, &line,
-			   base && *base ? base : "/tmp");
-  if (!*tunnel)
-    return NULL;
-  *connector = (struct rc_connector) { rc_tunnel_connect, *tunnel };
-  return rc_tunnel_first_connect (*tunnel);
+  *direct = rc_direct_new (address, &line);
+  if (!*direct)
+    {
+      perror ("remote-client");
+      return NULL;
+    }
+  *connector = (struct rc_connector) { rc_direct_connect, *direct };
+  struct rc_stream *stream = rc_direct_connect (*direct);
+  if (!stream)
+    fprintf (stderr, "remote-client: %s: cannot connect to the relay\n",
+	     address);
+  return stream;
+}
+
+/* Return the address of the relay of OPTIONS: the address of
+   --connect, or else the host name of "ssh -G", which goes in
+   HOSTNAME.  Return NULL with a message if "ssh -G" gives none.  */
+static const char *
+relay_address (const struct options *options,
+	       char hostname[RC_SSH_HOSTNAME_SIZE])
+{
+  if (options->connect)
+    return options->connect;
+  return rc_bootstrap_hostname (options->ssh, options->host, hostname)
+    ? hostname : NULL;
 }
 
 /* Return the font source of the client: the font file with the hash
@@ -694,8 +767,9 @@ usage (void)
 {
   fprintf (stderr, "Usage: remote-client [--render-to=FILE.png | "
 	   "--timeout=MS] SOCKET\n"
-	   "       remote-client [--timeout=MS] [--ssh-command=PROGRAM] "
+	   "       remote-client [--timeout=MS] [--ssh-command=PROGRAM]\n"
+	   "                     [--listen=SPEC] [--connect=ADDRESS] "
 	   "--ssh HOST\n"
-	   "       remote-client --relay SOCKET\n");
+	   "       remote-client --relay [--listen=SPEC] SOCKET\n");
   exit (1);
 }

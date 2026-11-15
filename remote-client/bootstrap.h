@@ -19,23 +19,38 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* The bootstrap runs SSH with the remote command of sshargs.h.  The
    remote command starts a session and its relay on HOST, and the relay
-   writes its line.  SSH gives the line to the client, and stops.  */
+   writes its line.  SSH gives the line to the client, and stops.
+
+   Before the bootstrap, the client can run "ssh -G HOST" to get the
+   host name that SSH connects to: see sshconfig.h.  */
 
 #ifndef REMOTE_CLIENT_BOOTSTRAP_H
 #define REMOTE_CLIENT_BOOTSTRAP_H
 
 #include <stdbool.h>
 
+#include "listenspec.h"
 #include "relayline.h"
+#include "sshconfig.h"
 
 /* The longest wait for the line, in milliseconds.  SSH can ask the
    user for a password in this time.  */
 enum { RC_BOOTSTRAP_LIMIT = 120000 };
 
 /* Run the bootstrap on HOST with the program SSH, and put the line of
-   the relay in LINE.  Return false on an error, and write a message to
-   the standard error output.  */
+   the relay in LINE.  With SPEC, the relay listens at the place of
+   SPEC.  With NULL, it listens on the server address of
+   $SSH_CONNECTION on HOST.  Return false on an error, and write a
+   message to the standard error output.  */
 extern bool rc_bootstrap (const char *ssh, const char *host,
+			  const struct rc_listen_spec *spec,
 			  struct rc_relay_line *line);
+
+/* Run "ssh -G HOST" with the program SSH, and put the host name that
+   SSH connects to in NAME.  Wait at most RC_BOOTSTRAP_LIMIT
+   milliseconds.  Return false on an error, and write a message to the
+   standard error output.  */
+extern bool rc_bootstrap_hostname (const char *ssh, const char *host,
+				   char name[RC_SSH_HOSTNAME_SIZE]);
 
 #endif /* REMOTE_CLIENT_BOOTSTRAP_H */
