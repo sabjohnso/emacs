@@ -34,13 +34,18 @@ struct rc_view;
 
 /* The functions of a view.  The view calls ON_CLOSE with the frame of
    a window when the user asks to close the window, and SEND with each
-   message of the input of the user.  DATA is their first argument.
-   The view keeps the window after ON_CLOSE.  It removes a window only
-   in rc_view_update, when the renderer removes the frame.  */
+   message of the input of the user.  It calls CLIPBOARD with the UTF-8
+   text of the clipboard of the desktop after each change of the
+   clipboard, and after rc_view_request_clipboard; the text is NULL if
+   the clipboard has no text.  CLIPBOARD can be NULL: then the view
+   does not watch the clipboard.  DATA is their first argument.  The
+   view keeps the window after ON_CLOSE.  It removes a window only in
+   rc_view_update, when the renderer removes the frame.  */
 struct rc_view_functions
 {
   void (*on_close) (void *data, uint32_t frame);
   void (*send) (void *data, const struct rd_message *message);
+  void (*clipboard) (void *data, const char *text);
   void *data;
 };
 
@@ -57,6 +62,16 @@ extern void rc_view_update (struct rc_view *view, struct rc_change change);
 /* Show in the title of each window of VIEW whether the client has a
    connection to its server: CONNECTED.  A new view is connected.  */
 extern void rc_view_set_connected (struct rc_view *view, bool connected);
+
+/* Put the SIZE bytes TEXT, UTF-8, on the clipboard of the desktop.
+   Later, the view calls the CLIPBOARD function of VIEW with TEXT.  It
+   does not give it a text of a request from before this call.  */
+extern void rc_view_set_clipboard (struct rc_view *view, const char *text,
+				   size_t size);
+
+/* Ask for the text of the clipboard of the desktop.  The view gives it
+   to the CLIPBOARD function of VIEW later.  */
+extern void rc_view_request_clipboard (struct rc_view *view);
 
 /* Return the number of windows of VIEW.  */
 extern int rc_view_window_count (const struct rc_view *view);

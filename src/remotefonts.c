@@ -24,7 +24,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
    A font file can have many megabytes, and the draws of the session go
    on the same connection.  Thus the session sends font data only
-   while its sink has fewer than REMOTE_FONT_QUEUE_LIMIT bytes that it
+   while its sink has fewer than REMOTE_PACED_QUEUE_LIMIT bytes that it
    did not send.  The transport calls remote_send_font_data when its
    queue is empty again.
 
@@ -47,10 +47,6 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "rdproto.h"
 #include "remoteterm.h"
 
-/* The session sends font data while its sink has fewer bytes than
-   this that it did not send.  */
-enum { REMOTE_FONT_QUEUE_LIMIT = 64 * 1024 };
-
 /* A font file that the client asked for: its HASH, its file descriptor
    FD, its TOTAL number of bytes, and the OFFSET of the next bytes to
    send.  NEXT is the next transfer of the session.  */
@@ -69,6 +65,7 @@ static int remote_open_font_file (const unsigned char *, uint32_t *);
 static bool remote_send_chunk (struct remote_display_info *,
 			       struct remote_font_transfer *);
 static void remote_pop_transfer (struct remote_display_info *);
+static bool remote_send_font_step (struct remote_display_info *);
 
 /* The function of a want-font MESSAGE from the client of DPYINFO.
    Start to send the file, if a font of a session has its hash and the
@@ -97,35 +94,34 @@ remote_want_font (struct remote_display_info *dpyinfo,
   remote_send_font_data (dpyinfo);
 }
 
-/* Send font data to the client of DPYINFO until its sink has
-   REMOTE_FONT_QUEUE_LIMIT bytes that it did not send, or no transfer
-   is left.  Flush the sink each time: if the connection takes all the
-   bytes, the transport does not call this function again.  After the
-   last transfer, draw the frames again.  */
+/* Send font data to the client of DPYINFO at the pace of the
+   connection (remote_send_paced).  */
 void
 remote_send_font_data (struct remote_display_info *dpyinfo)
 {
-  while (dpyinfo->font_transfers)
+  remote_send_paced (dpyinfo, remote_send_font_step);
+}
+
+/* Send the next font-data message of DPYINFO, and return true.  Return
+   false if no transfer is left.  After the last transfer, draw the
+   frames again.  */
+static bool
+remote_send_font_step (struct remote_display_info *dpyinfo)
+{
+  struct remote_font_transfer *transfer = dpyinfo->font_transfers;
+  if (!transfer)
+    return false;
+  if (!remote_send_chunk (dpyinfo, transfer))
+    /* The file changed, or cannot be read now.  */
+    remote_pop_transfer (dpyinfo);
+  else if (transfer->offset == transfer->total)
     {
-      while (dpyinfo->font_transfers
-	     && remote_queued (dpyinfo) < REMOTE_FONT_QUEUE_LIMIT)
-	{
-	  struct remote_font_transfer *transfer = dpyinfo->font_transfers;
-	  if (!remote_send_chunk (dpyinfo, transfer))
-	    /* The file changed, or cannot be read now.  */
-	    remote_pop_transfer (dpyinfo);
-	  else if (transfer->offset == transfer->total)
-	    {
-	      remote_forget_fonts (dpyinfo, transfer->hash);
-	      remote_pop_transfer (dpyinfo);
-	      if (!dpyinfo->font_transfers)
-		remote_redraw_frames (dpyinfo);
-	    }
-	}
-      remote_flush (dpyinfo);
-      if (remote_queued (dpyinfo) > 0)
-	return;
+      remote_forget_fonts (dpyinfo, transfer->hash);
+      remote_pop_transfer (dpyinfo);
+      if (!dpyinfo->font_transfers)
+	remote_redraw_frames (dpyinfo);
     }
+  return true;
 }
 
 /* Forget each transfer of DPYINFO, and close its file.  */

@@ -173,7 +173,7 @@ DEFUN ("remote-display--queue-empty", Fremote_display__queue_empty,
 A transport does this when its queue becomes empty.  */)
   (Lisp_Object display)
 {
-  remote_send_font_data (check_x_display_info (display));
+  remote_output_drained (check_x_display_info (display));
   return Qnil;
 }
 

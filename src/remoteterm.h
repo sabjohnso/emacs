@@ -32,8 +32,16 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <cairo.h>
 
+#include "rdchunk.h"
+
 struct rd_message;
 struct remote_font_transfer;
+
+/* A session sends font data and clipboard data only while its sink has
+   fewer bytes than this that it did not send, so these large transfers
+   do not delay the draws.  The transport calls remote_output_drained
+   when its queue is empty again.  */
+enum { REMOTE_PACED_QUEUE_LIMIT = 64 * 1024 };
 
 struct remote_bitmap_record
 {
@@ -110,6 +118,11 @@ struct remote_display_info
      elements, and an ID outside it has no definition.  */
   bool *font_defined;
   ptrdiff_t font_defined_size;
+
+  /* The clipboard text that comes from the client, and the clipboard
+     text that goes to it.  See remoteclip.c.  */
+  struct rd_chunks clipboard;
+  struct rd_chunk_queue clipboard_out;
 
   /* The font files that the client asked for and did not get, in
      order.  See remotefonts.c.  */
@@ -206,6 +219,8 @@ extern void remote_send_message (struct remote_display_info *,
 				 const struct rd_message *);
 extern ptrdiff_t remote_queued (struct remote_display_info *);
 extern void remote_flush (struct remote_display_info *);
+extern void remote_send_paced (struct remote_display_info *,
+			       bool (*) (struct remote_display_info *));
 extern Lisp_Object remote_font_file (const unsigned char *, uint32_t *);
 extern void remote_forget_fonts (struct remote_display_info *,
 				 const unsigned char *);
@@ -215,6 +230,13 @@ extern void syms_of_remoteterm (void);
 
 /* Defined in remoteproc.c.  */
 extern void syms_of_remoteproc (void);
+
+/* Defined in remoteclip.c.  */
+extern void remote_clipboard_input (struct remote_display_info *,
+				    const struct rd_message *);
+extern void remote_drop_clipboard (struct remote_display_info *);
+extern void remote_send_clipboard_data (struct remote_display_info *);
+extern void syms_of_remoteclip (void);
 
 /* Defined in remotefonts.c.  */
 extern void remote_want_font (struct remote_display_info *,

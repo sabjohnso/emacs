@@ -202,6 +202,24 @@
 ;;     the transport reports an empty queue, the session sends the rest
 ;;     of the file.  A new client gets no font data that an old client
 ;;     asked for.
+;; 42. Clipboard from the client: after the clipboard-data messages of
+;;     a UTF-8 text, the CLIPBOARD selection of the session is the text,
+;;     and Emacs does not own it, also after a kill before it.  The text
+;;     can need several messages.  A target that is not a text, such as
+;;     TARGETS, gives nil.
+;; 43. Clipboard to the client: `gui-set-selection' of CLIPBOARD sends
+;;     the text in clipboard-data messages, which join to the UTF-8
+;;     text.  Then Emacs owns CLIPBOARD, and the selection is the text.
+;;     PRIMARY stays inside Emacs: it sends no message.  A session with
+;;     no client keeps its selections.  A kill of a text above the limit
+;;     of the protocol does not fail: Emacs keeps the text, and does not
+;;     send it.  After a new attach, the rest of a text that a client did
+;;     not send complete does not become the selection.
+;; 44. Clipboard pace: while the sink of a session reports 65536 bytes or
+;;     more that it did not send, a kill sends no clipboard data.  When
+;;     the transport reports an empty queue, the session sends the
+;;     text.  A second kill before then replaces the first text, so only
+;;     the second text goes to the client.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -6171,6 +6189,252 @@ error, and WORKS is t if the first socket still works."
       (remoteterm-tests--with-frame _frame "remote-listen-a" nil
         (ignore-errors (x-close-connection "remote-listen-a"))
         (and (remoteterm-tests--listen-socket-works-p socket) t)))))
+
+;;;; Clipboard
+
+(defun remoteterm-tests--random-text ()
+  "Return a random text for the clipboard, with some non-ASCII characters.
+Some texts are empty, and some need more than one clipboard-data
+message.  In some texts, a character of 2 to 4 UTF-8 bytes crosses the
+border of the first two messages."
+  (if (zerop (rd-gen-integer 0 4))
+      (let* ((char (rd-gen-element '(?é ?€ ?😀)))
+             (length (string-bytes (string char))))
+        ;; The character starts 1 to LENGTH - 1 bytes before the
+        ;; border, so it crosses the border.
+        (concat (make-string (- remote-display--max-clipboard-chunk
+                                (rd-gen-integer 1 (1- length)))
+                             ?a)
+                (string char)
+                "\r\0end"))
+    (let ((length (rd-gen-element (list 0 1 (rd-gen-integer 1 100)
+                                        (rd-gen-integer 2700 9000)))))
+      (apply #'string
+             (cl-loop repeat length
+                      collect (rd-gen-element
+                               '(?a ?z ?\n ?\r ?\0 ?\s ?é ?λ ?€ ?😀)))))))
+
+(defun remoteterm-tests--clipboard-bytes (serial text)
+  "Return the clipboard-data messages of TEXT with SERIAL, encoded."
+  (let* ((bytes (encode-coding-string text 'utf-8-unix))
+         (chunk remote-display--max-clipboard-chunk)
+         (offset 0)
+         (messages nil))
+    (while (progn
+             (let ((end (min (length bytes) (+ offset chunk))))
+               (push (remote-display--encode
+                      `(clipboard-data :serial ,serial :offset ,offset
+                                       :total ,(length bytes)
+                                       :bytes ,(vconcat
+                                                (substring bytes offset end))))
+                     messages)
+               (setq offset end))
+             (< offset (length bytes))))
+    (apply #'concat (nreverse messages))))
+
+(defun remoteterm-tests--joined-clipboard (bytes)
+  "Return the text of the clipboard-data messages in BYTES, or nil.
+The messages must have one serial and one total, and each one must
+start where the one before it ends.  Else return the symbol `broken'."
+  (let ((data (mapcar #'cdr
+                      (seq-filter (lambda (message)
+                                    (eq (car message) 'clipboard-data))
+                                  (remoteterm-tests--all-messages bytes))))
+        (offset 0))
+    (cond
+     ((null data) nil)
+     ((not (cl-every (lambda (fields)
+                       (prog1 (and (= (plist-get fields :serial)
+                                      (plist-get (car data) :serial))
+                                   (= (plist-get fields :total)
+                                      (plist-get (car data) :total))
+                                   (= (plist-get fields :offset) offset))
+                         (setq offset (+ offset (length (plist-get fields
+                                                                   :bytes))))))
+                     data))
+      'broken)
+     ((/= offset (plist-get (car data) :total)) 'broken)
+     (t (decode-coding-string
+         (apply #'unibyte-string
+                (seq-mapcat (lambda (fields)
+                              (append (plist-get fields :bytes) nil))
+                            data))
+         'utf-8-unix)))))
+
+(rd-daemon-deftest remoteterm-tests-clipboard-from-client
+  "The clipboard text of the client becomes the CLIPBOARD selection (law 42)."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-text
+     (lambda (text)
+       (should (equal (remoteterm-tests--clipboard-from-client-case text)
+                      (list text nil nil)))))))
+
+(defun remoteterm-tests--clipboard-from-client-case (text)
+  "Kill a text, send TEXT as the clipboard of a client, and return a list.
+The value is (VALUE OWNER TARGETS): the CLIPBOARD selection as
+UTF8_STRING, whether Emacs owns CLIPBOARD, and the selection as
+TARGETS."
+  (remoteterm-tests--with-input-session
+   (lambda (_frame client-side &optional _server-side)
+     (gui-set-selection 'CLIPBOARD "killed before")
+     (process-send-string client-side
+                          (remoteterm-tests--clipboard-bytes 7 text))
+     (let ((end (+ (float-time) 10))
+           (value nil))
+       (while (and (not (equal (setq value (gui-get-selection
+                                            'CLIPBOARD 'UTF8_STRING))
+                               text))
+                   (< (float-time) end))
+         (accept-process-output nil 0.05))
+       (list value (and (gui-backend-selection-owner-p 'CLIPBOARD) t)
+             (gui-get-selection 'CLIPBOARD 'TARGETS))))))
+
+(rd-daemon-deftest remoteterm-tests-clipboard-to-client
+  "A kill sends the text to the client (law 43)."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-text
+     (lambda (text)
+       (should (equal (remoteterm-tests--clipboard-to-client-case text)
+                      (list text t text nil)))))))
+
+(defun remoteterm-tests--clipboard-to-client-case (text)
+  "Set CLIPBOARD and PRIMARY to TEXT in a session, and return a list.
+The list is (SENT OWNER VALUE PRIMARY-SENT).  SENT is the text of the
+clipboard-data messages of the client after the CLIPBOARD selection.
+OWNER is t if Emacs owns CLIPBOARD.  VALUE is the CLIPBOARD selection.
+PRIMARY-SENT is non-nil if the selection of PRIMARY sent a
+clipboard-data message."
+  (remoteterm-tests--with-input-session
+   (lambda (_frame client-side &optional _server-side)
+     (let ((chunks nil))
+       (set-process-filter client-side
+                           (lambda (_process string) (push string chunks)))
+       (gui-set-selection 'CLIPBOARD text)
+       (let ((end (+ (float-time) 10)) (sent nil))
+         (while (and (not (equal (setq sent
+                                       (remoteterm-tests--joined-clipboard
+                                        (string-to-unibyte
+                                         (apply #'concat (reverse chunks)))))
+                                 text))
+                     (< (float-time) end))
+           (accept-process-output nil 0.05))
+         (setq chunks nil)
+         (gui-set-selection 'PRIMARY text)
+         (accept-process-output nil 0.2)
+         (list sent
+               (and (gui-backend-selection-owner-p 'CLIPBOARD) t)
+               (gui-get-selection 'CLIPBOARD 'UTF8_STRING)
+               (and (remoteterm-tests--joined-clipboard
+                     (string-to-unibyte (apply #'concat (reverse chunks))))
+                    t)))))))
+
+(ert-deftest remoteterm-tests-clipboard-pace ()
+  "Clipboard data waits while the sink of the session is full (law 44)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let (((map :full :sent)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--clipboard-pace-case)))
+      (should (equal full ""))
+      (should (equal sent (make-string 20000 ?y))))))
+
+(defun remoteterm-tests--clipboard-pace-case ()
+  "Kill two texts while the sink of the session is full.
+The value of the form of `remoteterm-tests--clipboard-pace-form'."
+  (eval (remoteterm-tests--clipboard-pace-form) t))
+
+(defun remoteterm-tests--clipboard-pace-form ()
+  "Return a form that kills two texts with a full sink, and empties it.
+The value of the form is a plist.  :full is the text of the clipboard
+data that the session sends while the sink reports 65536 bytes, or the
+empty string.  :sent is the text of the clipboard data after the sink
+reports 65535 bytes and an empty queue."
+  (remoteterm-tests--frame-form
+   '((width . 30))
+   '(insert "abc")
+   '(let ((text-of (lambda ()
+                     (or (remoteterm-tests--joined-clipboard
+                          (remote-display--take-output display))
+                         ""))))
+      (remote-display--set-queued display 65536)
+      (gui-set-selection 'CLIPBOARD (make-string 20000 ?x))
+      (gui-set-selection 'CLIPBOARD (make-string 20000 ?y))
+      (list :full (funcall text-of)
+            :sent (progn (remote-display--set-queued display 65535)
+                         (remote-display--queue-empty display)
+                         (funcall text-of))))))
+
+(ert-deftest remoteterm-tests-clipboard-no-client ()
+  "A session with no client keeps its selections (law 43)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--clipboard-no-client-case)
+                   '("kill é" "mouse" t t nil nil t
+                     remote-display-clipboard-too-large)))))
+
+(defun remoteterm-tests--clipboard-no-client-case ()
+  "Set CLIPBOARD and PRIMARY in a session with no client.
+Return a list: the two selections, whether PRIMARY exists and Emacs
+owns it, whether SECONDARY exists and Emacs owns it, whether a kill of
+a text above the limit keeps the text, and the error symbol of a send
+of that text to the client."
+  (remoteterm-tests--with-display "remote-clip"
+    (remoteterm-tests--with-frame frame "remote-clip" nil
+      (select-frame frame)
+      (gui-set-selection 'CLIPBOARD "kill é")
+      (gui-set-selection 'PRIMARY "mouse")
+      (list (gui-get-selection 'CLIPBOARD 'UTF8_STRING)
+            (gui-get-selection 'PRIMARY 'UTF8_STRING)
+            (gui-backend-selection-exists-p 'PRIMARY)
+            (gui-backend-selection-owner-p 'PRIMARY)
+            (gui-backend-selection-exists-p 'SECONDARY)
+            (gui-backend-selection-owner-p 'SECONDARY)
+            (let ((large (make-string (1+ (* 16 1024 1024)) ?a)))
+              (gui-set-selection 'CLIPBOARD large)
+              (eq (gui-get-selection 'CLIPBOARD 'UTF8_STRING) large))
+            (condition-case err
+                (remote-display--send-clipboard
+                 "remote-clip" (make-string (1+ (* 16 1024 1024)) ?a))
+              (error (car err)))))))
+
+(ert-deftest remoteterm-tests-clipboard-new-client ()
+  "A new client drops the rest of a clipboard text (law 43)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--clipboard-new-client-case)
+                   "before"))))
+
+(defun remoteterm-tests--clipboard-new-client-case ()
+  "Send the first message of a text, attach again, and send the rest.
+Return the CLIPBOARD selection, which was \"before\" before the text."
+  (remoteterm-tests--with-input-session
+   (lambda (_frame client-side &optional server-side)
+     (process-send-string client-side
+                          (remoteterm-tests--clipboard-bytes 3 "before"))
+     (remoteterm-tests--await-selection "before")
+     (let* ((text (make-string 20000 ?z))
+            (bytes (remoteterm-tests--clipboard-bytes 4 text))
+            (first (cdr (remote-display--decode bytes)))
+            (rest (substring bytes first)))
+       (process-send-string client-side (substring bytes 0 first))
+       (accept-process-output nil 0.2)
+       (remote-display--detach "remote-input")
+       (remote-display-attach "remote-input" server-side)
+       (process-send-string client-side rest)
+       (accept-process-output nil 0.5)
+       (gui-get-selection 'CLIPBOARD 'UTF8_STRING)))))
+
+(defun remoteterm-tests--await-selection (text)
+  "Wait at most 10 seconds for the CLIPBOARD selection to be TEXT."
+  (let ((end (+ (float-time) 10)))
+    (while (and (not (equal (gui-get-selection 'CLIPBOARD 'UTF8_STRING)
+                            text))
+                (< (float-time) end))
+      (accept-process-output nil 0.05))))
 
 ;;;; Font transfer
 

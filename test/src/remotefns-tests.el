@@ -117,6 +117,13 @@
 ;;     The client does not have the font file with the hash, and asks
 ;;     the server for it.
 ;;
+;; Both sides send this message:
+;;
+;; (clipboard-data :serial S :offset O :total N :bytes [BYTE...])
+;;     The bytes of the UTF-8 text S of the clipboard, from the offset O.
+;;     The text has N bytes.  A message has at most
+;;     `remote-display--max-clipboard-chunk' bytes of the text.
+;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
 ;; 16 bits, because a row of a fringe bitmap has 16 bits.  Each color
@@ -136,6 +143,7 @@
 (defvar remote-display--max-glyphs)
 (defvar remote-display--hash-size)
 (defvar remote-display--max-font-chunk)
+(defvar remote-display--max-clipboard-chunk)
 (defvar remote-display--max-fringe-rows)
 (defvar remote-display--message-formats)
 (defvar remote-display--modifier-bits)
@@ -164,7 +172,8 @@
     (pong . remotefns-tests--pong)
     (close-frame . remotefns-tests--close-frame)
     (want-font . remotefns-tests--want-font)
-    (font-data . remotefns-tests--font-data))
+    (font-data . remotefns-tests--font-data)
+    (clipboard-data . remotefns-tests--clipboard-data))
   "The message types, each with the function that generates a message.")
 
 (defconst remotefns-tests--clip-and-color
@@ -323,6 +332,13 @@
         :offset (rd-gen-uint32) :total (rd-gen-uint32)
         :bytes (remotefns-tests--byte-vector
                 remote-display--max-font-chunk)))
+
+(defun remotefns-tests--clipboard-data ()
+  "Return a random `clipboard-data' message."
+  (list 'clipboard-data :serial (rd-gen-uint32)
+        :offset (rd-gen-uint32) :total (rd-gen-uint32)
+        :bytes (remotefns-tests--byte-vector
+                remote-display--max-clipboard-chunk)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -612,6 +628,27 @@
                               :bytes [0 #xff]))
                  (unibyte-string 0 0 0 16 19 0 1 #xab 0 0 1 2 0 0 3 4
                                  0 2 0 #xff))))
+
+(ert-deftest remotefns-tests-clipboard-data-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 17, type 20, serial 7, offset #x0102, total #x0304, 2 bytes.
+  (should (equal (remote-display--encode
+                  '(clipboard-data :serial 7 :offset #x0102 :total #x0304
+                                   :bytes [?a #xff]))
+                 (unibyte-string 0 0 0 17 20 0 0 0 7 0 0 1 2 0 0 3 4
+                                 0 2 ?a #xff))))
+
+(ert-deftest remotefns-tests-clipboard-chunk-limits ()
+  "A clipboard-data message has at most 8192 bytes of text."
+  (skip-unless (featurep 'remote-display))
+  (should (= remote-display--max-clipboard-chunk 8192))
+  (should (remote-display--encode
+           `(clipboard-data :serial 0 :offset 0 :total 0
+                            :bytes ,(make-vector 8192 0))))
+  (should-error (remote-display--encode
+                 `(clipboard-data :serial 0 :offset 0 :total 0
+                                  :bytes ,(make-vector 8193 0)))
+                :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-font-chunk-limits ()
   "A font-data message has at most `remote-display--max-font-chunk' bytes."

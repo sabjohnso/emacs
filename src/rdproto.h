@@ -68,6 +68,13 @@ enum { RD_HASH_SIZE = 32 };
    larger chunk makes each struct larger.  */
 enum { RD_MAX_FONT_CHUNK = 8192 };
 
+/* The maximum number of bytes of a clipboard text in one
+   clipboard-data message, and the maximum size of a clipboard text.
+   The chunk has the size of a font chunk, so no message struct gets
+   larger.  */
+enum { RD_MAX_CLIPBOARD_CHUNK = RD_MAX_FONT_CHUNK };
+enum { RD_MAX_CLIPBOARD_SIZE = 16 * 1024 * 1024 };
+
 /* The kinds of cursor.  A client ignores a kind that it does not
    know.  */
 enum rd_cursor_kind
@@ -101,7 +108,8 @@ enum rd_cursor_kind
   MESSAGE (PONG, pong, RD_PONG_FIELDS)					\
   MESSAGE (CLOSE_FRAME, close_frame, RD_CLOSE_FRAME_FIELDS)		\
   MESSAGE (WANT_FONT, want_font, RD_WANT_FONT_FIELDS)			\
-  MESSAGE (FONT_DATA, font_data, RD_FONT_DATA_FIELDS)
+  MESSAGE (FONT_DATA, font_data, RD_FONT_DATA_FIELDS)			\
+  MESSAGE (CLIPBOARD_DATA, clipboard_data, RD_CLIPBOARD_DATA_FIELDS)
 
 /* Each list gives the fields of a message in the order of the wire.
    FIELD (M, TYPE, NAME) is a member NAME of the C type TYPE_t.
@@ -299,6 +307,19 @@ enum rd_cursor_kind
   FIELD (M, uint32, offset)						\
   FIELD (M, uint32, total)						\
   ARRAY (M, uint8, bytes, nbytes, RD_MAX_FONT_CHUNK)
+
+/* The message of the clipboard, which both sides send.  When the
+   clipboard of one side changes, that side sends the UTF-8 text in
+   clipboard-data messages, in order, from the offset 0.  BYTES has the
+   bytes from OFFSET of the text SERIAL, which has TOTAL bytes.  A
+   message with a new SERIAL starts a new text, and a receiver drops a
+   text that is not complete.  rdchunk.h splits and joins the
+   messages.  */
+#define RD_CLIPBOARD_DATA_FIELDS(FIELD, ARRAY, M)			\
+  FIELD (M, uint32, serial)						\
+  FIELD (M, uint32, offset)						\
+  FIELD (M, uint32, total)						\
+  ARRAY (M, uint8, bytes, nbytes, RD_MAX_CLIPBOARD_CHUNK)
 
 /* The buttons of a button message that are the mouse wheel.  */
 enum rd_wheel_button

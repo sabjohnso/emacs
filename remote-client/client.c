@@ -86,6 +86,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "hashcache.h"
 #include "hashfonts.h"
 #include "link.h"
+#include "rdchunk.h"
 #include "listenspec.h"
 #include "backoff.h"
 #include "reader.h"
@@ -178,6 +179,17 @@ struct window_mode
   guint retry;
   /* True if the last connection had an error.  */
   bool failed;
+  /* The clipboard text that comes from the server, the clipboard text
+     that goes to it, and the last text that went between the client and
+     the server, or NULL.  The client does not send that text back.
+     CLIPBOARD_WATCH sends the next message of CLIPBOARD_OUT when the
+     socket has room, or is 0.  Thus the program draws and reads input
+     between the messages of a large text.  The write of one message
+     can still wait if the room is less than the message.  */
+  struct rd_chunks clipboard;
+  struct rd_chunk_queue clipboard_out;
+  guint clipboard_watch;
+  char *clipboard_text;
 };
 
 static struct options parse_options (int, char **);
@@ -209,6 +221,10 @@ static void show_message (void *, const struct rd_message *);
 static void want_font (struct window_mode *, const struct rd_define_font *);
 static void receive_font (struct window_mode *,
 			  const struct rd_font_data *);
+static void receive_clipboard (struct window_mode *,
+			       const struct rd_clipboard_data *);
+static void clipboard_changed (void *, const char *);
+static gboolean send_clipboard (gint, GIOCondition, gpointer);
 static gboolean read_input (gint, GIOCondition, gpointer);
 static void note_input (struct window_mode *);
 static void close_frame (void *, uint32_t);
@@ -512,7 +528,8 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
 			      .connector = connector, .timeout = timeout,
 			      .backoff = rc_backoff_new () };
   mode.view = rc_view_new (renderer, (struct rc_view_functions)
-			   { close_frame, send_message, &mode });
+			   { close_frame, send_message, clipboard_changed,
+			     &mode });
   open_connection (&mode, stream);
   mode.tick = g_timeout_add (rc_link_tick_interval (timeout), tick_link,
 			     &mode);
@@ -526,15 +543,23 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
     g_source_remove (mode.retry);
   close_connection (&mode);
   rc_view_free (mode.view);
+  rd_chunks_free (&mode.clipboard);
+  rd_chunk_queue_clear (&mode.clipboard_out);
+  g_free (mode.clipboard_text);
   return mode.failed ? 1 : 0;
 }
 
 /* Make STREAM the connection of MODE.  The server sends a font file
-   only on the connection of its request, so forget the requests.  */
+   only on the connection of its request, so forget the requests.  Send
+   the clipboard text to the new connection, and drop a clipboard text
+   that did not come complete.  */
 static void
 open_connection (struct window_mode *mode, struct rc_stream *stream)
 {
   rc_font_store_reset (mode->store);
+  rd_chunks_free (&mode->clipboard);
+  g_free (mode->clipboard_text);
+  mode->clipboard_text = NULL;
   int fd = rc_stream_fd (stream);
   struct connection *connection = g_new (struct connection, 1);
   *connection = (struct connection)
@@ -544,6 +569,7 @@ open_connection (struct window_mode *mode, struct rc_stream *stream)
   connection->watch = g_unix_fd_add (fd, G_IO_IN | G_IO_HUP | G_IO_ERR,
 				     read_input, mode);
   mode->connection = connection;
+  rc_view_request_clipboard (mode->view);
 }
 
 /* Close the connection of MODE, which ended or is lost.  FAILED is
@@ -574,6 +600,10 @@ close_connection (struct window_mode *mode)
     return;
   if (connection->watch)
     g_source_remove (connection->watch);
+  if (mode->clipboard_watch)
+    g_source_remove (mode->clipboard_watch);
+  mode->clipboard_watch = 0;
+  rd_chunk_queue_clear (&mode->clipboard_out);
   rc_stream_close (connection->stream);
   rc_reader_free (connection->reader);
   g_free (connection);
@@ -661,6 +691,66 @@ show_message (void *data, const struct rd_message *message)
     want_font (mode, &message->u.define_font);
   else if (message->type == RD_FONT_DATA)
     receive_font (mode, &message->u.font_data);
+  else if (message->type == RD_CLIPBOARD_DATA)
+    receive_clipboard (mode, &message->u.clipboard_data);
+}
+
+/* Add DATA to the clipboard text of MODE that comes from the server.
+   Put a complete text on the clipboard of the desktop.  */
+static void
+receive_clipboard (struct window_mode *mode,
+		   const struct rd_clipboard_data *data)
+{
+  struct rd_chunks *chunks = &mode->clipboard;
+  if (rd_chunks_add (chunks, data) != RD_CHUNK_DONE)
+    return;
+  g_free (mode->clipboard_text);
+  mode->clipboard_text = g_strndup ((const char *) chunks->bytes,
+				    chunks->total);
+  rc_view_set_clipboard (mode->view, (const char *) chunks->bytes,
+			 chunks->total);
+}
+
+/* The function of the view for the TEXT of the clipboard of the
+   desktop.  DATA is the struct window_mode.  Put a new text in the
+   queue of the server, if the client has a connection.  The text
+   replaces the rest of the text before it.  */
+static void
+clipboard_changed (void *data, const char *text)
+{
+  struct window_mode *mode = data;
+  if (!text || !mode->connection
+      || (mode->clipboard_text && strcmp (text, mode->clipboard_text) == 0))
+    return;
+  size_t size = strlen (text);
+  if (size > RD_MAX_CLIPBOARD_SIZE
+      || !rd_chunk_queue_set (&mode->clipboard_out,
+			      (const unsigned char *) text, size))
+    return;
+  g_free (mode->clipboard_text);
+  mode->clipboard_text = g_strdup (text);
+  if (!mode->clipboard_watch)
+    mode->clipboard_watch
+      = g_unix_fd_add (rc_stream_fd (mode->connection->stream), G_IO_OUT,
+		       send_clipboard, mode);
+}
+
+/* The function of the GTK main loop when the socket of the connection
+   has room.  DATA is the struct window_mode.  Send the next message of
+   the clipboard text, and stop at its end.  close_connection removes
+   this watch, so the connection exists.  */
+static gboolean
+send_clipboard (gint fd, GIOCondition condition, gpointer data)
+{
+  (void) fd, (void) condition;
+  struct window_mode *mode = data;
+  struct rd_message message;
+  if (rd_chunk_queue_next (&mode->clipboard_out, &message))
+    send_on (mode->connection, &message, mode->timeout);
+  if (rd_chunk_queue_pending_p (&mode->clipboard_out))
+    return G_SOURCE_CONTINUE;
+  mode->clipboard_watch = 0;
+  return G_SOURCE_REMOVE;
 }
 
 /* Send a want-font message for the file of DEFINE, if the renderer of

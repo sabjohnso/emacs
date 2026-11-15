@@ -265,7 +265,7 @@ start_example (uint32_t width, uint32_t height)
   example->renderer = rc_renderer_new (no_fonts);
   example->view = rc_view_new (example->renderer,
 			       (struct rc_view_functions)
-			       { record_close, record_message,
+			       { record_close, record_message, NULL,
 				 &example->sent });
   define_frame (example, width, height);
   gint64 end = g_get_monotonic_time () + WAIT_LIMIT;

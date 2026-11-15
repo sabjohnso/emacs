@@ -36,6 +36,20 @@ struct rc_view
   struct rc_table windows;
   /* True if the client has a connection to its server.  */
   bool connected;
+  /* The handler of the changes of the clipboard, or 0.  */
+  gulong owner_handler;
+  /* The number of texts that the view put on the clipboard.  */
+  unsigned clipboard_sets;
+};
+
+/* A request for the text of the clipboard by VIEW, after SETS texts
+   that the view put on the clipboard.  The answer of GTK comes later,
+   and an answer to a request before the last set of the view gives an
+   old text, so the view ignores it.  */
+struct clipboard_request
+{
+  struct rc_view *view;
+  unsigned sets;
 };
 
 /* The window of FRAME of VIEW, the drawing area in it, and the sizes
@@ -57,6 +71,8 @@ static struct rc_window *add_window (struct rc_view *, uint32_t,
 static struct rc_size surface_size (cairo_surface_t *);
 static void set_title (uint32_t, void *, void *);
 static void destroy_window (void *);
+static void clipboard_changed (GtkClipboard *, GdkEvent *, gpointer);
+static void clipboard_text (GtkClipboard *, const gchar *, gpointer);
 static gboolean draw_frame (GtkWidget *, cairo_t *, gpointer);
 static gboolean close_requested (GtkWidget *, GdkEvent *, gpointer);
 static gboolean key_pressed (GtkWidget *, GdkEventKey *, gpointer);
@@ -94,14 +110,41 @@ rc_view_new (struct rc_renderer *renderer,
   view->renderer = renderer;
   view->functions = functions;
   view->connected = true;
+  if (functions.clipboard)
+    view->owner_handler
+      = g_signal_connect (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD),
+			  "owner-change", G_CALLBACK (clipboard_changed),
+			  view);
   return view;
 }
 
 void
 rc_view_free (struct rc_view *view)
 {
+  if (view->owner_handler)
+    g_signal_handler_disconnect (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD),
+				 view->owner_handler);
   rc_table_free (&view->windows, destroy_window);
   g_free (view);
+}
+
+void
+rc_view_set_clipboard (struct rc_view *view, const char *text, size_t size)
+{
+  view->clipboard_sets++;
+  gtk_clipboard_set_text (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD), text,
+			  size);
+}
+
+void
+rc_view_request_clipboard (struct rc_view *view)
+{
+  if (!view->functions.clipboard)
+    return;
+  struct clipboard_request *request = g_new (struct clipboard_request, 1);
+  *request = (struct clipboard_request) { view, view->clipboard_sets };
+  gtk_clipboard_request_text (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD),
+			      clipboard_text, request);
 }
 
 void
@@ -367,4 +410,28 @@ static void
 send (struct rc_window *window, const struct rd_message *message)
 {
   window->view->functions.send (window->view->functions.data, message);
+}
+
+/* The function of the changes of the owner of the clipboard of the
+   desktop.  DATA is the view.  Ask for the new text.  */
+static void
+clipboard_changed (GtkClipboard *clipboard, GdkEvent *event, gpointer data)
+{
+  (void) clipboard, (void) event;
+  rc_view_request_clipboard (data);
+}
+
+/* The function of a request for the text of the clipboard.  DATA is the
+   struct clipboard_request.  Give TEXT to the CLIPBOARD function of the
+   view, if the view did not set the clipboard after the request.  The
+   program runs no main loop after rc_view_free, so the view exists.  */
+static void
+clipboard_text (GtkClipboard *clipboard, const gchar *text, gpointer data)
+{
+  (void) clipboard;
+  struct clipboard_request *request = data;
+  struct rc_view *view = request->view;
+  if (request->sets == view->clipboard_sets)
+    view->functions.clipboard (view->functions.data, text);
+  g_free (request);
 }

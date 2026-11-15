@@ -150,6 +150,70 @@ others."
 
 (add-hook 'kill-emacs-hook #'remote-display--stop-all-listeners)
 
+;;;; Selections
+
+;; The client sends each change of its clipboard, and remoteclip.c
+;; keeps the text in the terminal parameter `remote-clipboard'.  A kill
+;; puts the text there too, and sends it to the client.  Only CLIPBOARD
+;; goes to the client.  PRIMARY and SECONDARY stay inside Emacs, in
+;; the terminal parameter `remote-selections'.
+
+(declare-function remote-display--send-clipboard "remoteclip.c"
+                  (display text))
+
+(defconst remote-display--text-targets
+  '(UTF8_STRING STRING TEXT COMPOUND_TEXT text/plain\;charset=utf-8)
+  "The targets of a selection that give its text.")
+
+(cl-defmethod gui-backend-set-selection (selection value
+                                         &context (window-system remote))
+  (let ((terminal (frame-terminal)))
+    (if (eq selection 'CLIPBOARD)
+        (progn
+          (set-terminal-parameter terminal 'remote-clipboard value)
+          (set-terminal-parameter terminal 'remote-clipboard-owned
+                                  (and value t))
+          (when (stringp value)
+            ;; A kill must not fail because of the clipboard of the
+            ;; client, so a text above the limit stays inside Emacs.
+            (condition-case err
+                (remote-display--send-clipboard (terminal-name terminal)
+                                                value)
+              (remote-display-clipboard-too-large
+               (message "%s" (error-message-string err))))))
+      (set-terminal-parameter
+       terminal 'remote-selections
+       (cons (cons selection value)
+             (assq-delete-all selection
+                              (copy-sequence (terminal-parameter
+                                              terminal
+                                              'remote-selections))))))))
+
+(cl-defmethod gui-backend-get-selection (selection target-type
+                                         &context (window-system remote))
+  (let ((value (remote-display--selection selection)))
+    (and (stringp value)
+         (memq target-type remote-display--text-targets)
+         value)))
+
+(cl-defmethod gui-backend-selection-owner-p (selection
+                                             &context (window-system remote))
+  (if (eq selection 'CLIPBOARD)
+      (terminal-parameter (frame-terminal) 'remote-clipboard-owned)
+    (and (remote-display--selection selection) t)))
+
+(cl-defmethod gui-backend-selection-exists-p (selection
+                                              &context (window-system remote))
+  (and (remote-display--selection selection) t))
+
+(defun remote-display--selection (selection)
+  "Return the value of SELECTION in the session of the selected frame."
+  (let ((terminal (frame-terminal)))
+    (if (eq selection 'CLIPBOARD)
+        (terminal-parameter terminal 'remote-clipboard)
+      (alist-get selection (terminal-parameter terminal
+                                               'remote-selections)))))
+
 ;;;; Start
 
 (defun remote-display-start ()

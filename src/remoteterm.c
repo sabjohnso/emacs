@@ -660,6 +660,27 @@ void
 remote_output_drained (struct remote_display_info *dpyinfo)
 {
   remote_send_font_data (dpyinfo);
+  remote_send_clipboard_data (dpyinfo);
+}
+
+/* Call SEND_ONE with DPYINFO while the sink of DPYINFO has fewer than
+   REMOTE_PACED_QUEUE_LIMIT bytes that it did not send.  SEND_ONE sends
+   one message, and returns false if it has nothing to send.  Flush the
+   sink each time: if the connection takes all the bytes, the transport
+   does not call remote_output_drained, so continue here.  */
+void
+remote_send_paced (struct remote_display_info *dpyinfo,
+		   bool (*send_one) (struct remote_display_info *))
+{
+  for (;;)
+    {
+      bool more = true;
+      while (more && remote_queued (dpyinfo) < REMOTE_PACED_QUEUE_LIMIT)
+	more = send_one (dpyinfo);
+      remote_flush (dpyinfo);
+      if (!more || remote_queued (dpyinfo) > 0)
+	return;
+    }
 }
 
 /* Return the number of bytes that the sink of DPYINFO did not send,
@@ -717,6 +738,7 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
   struct remote_sink *old = dpyinfo->sink;
   dpyinfo->sink = sink;
   remote_drop_font_transfers (dpyinfo);
+  remote_drop_clipboard (dpyinfo);
 
   /* A new client has no font or frame definitions, and shows
      nothing.  */

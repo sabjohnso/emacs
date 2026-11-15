@@ -54,6 +54,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      message.  A define-font message for the monospace font file of
      fontconfig gives no want-font message, because the program has
      the file.
+   - Clipboard: when another program puts a text on the clipboard, the
+     program sends the text in clipboard-data messages.  When the
+     server sends a text, the program puts it on the clipboard, and
+     does not send it back.  After the program connects again, it
+     sends the text of the clipboard.  The texts need several messages.
+     The test runs itself as the other program: "test-reconnect
+     clipboard-owner TEXT" owns the clipboard with TEXT, and
+     "test-reconnect clipboard-read" writes the text of the clipboard.
    - Usage: a timeout that is not a number, or that is less than
      RC_LINK_PINGS_PER_TIMEOUT, makes the program exit with the
      status 1.  */
@@ -79,8 +87,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <X11/Xutil.h>
 
 #include <glib.h>
+#include <gtk/gtk.h>
 
 #include "backoff.h"
+#include "rdchunk.h"
 #include "rdproto.h"
 
 /* The timeout of the program in the examples, in milliseconds.  */
@@ -127,6 +137,15 @@ static bool error_example (void);
 static bool close_example (void);
 static bool offline_close_example (void);
 static bool font_example (void);
+static bool clipboard_example (void);
+static char *make_text (size_t, char);
+static pid_t start_clipboard_owner (const char *);
+static bool send_clipboard (int, uint32_t, const char *);
+static bool wait_for_clipboard (int, int, const char *);
+static bool clipboard_becomes (const char *, int);
+static char *read_clipboard (void);
+static int clipboard_owner (const char *);
+static int clipboard_read (void);
 static void make_font (uint8_t *, uint8_t *, uint8_t);
 static bool send_define_font (int, uint32_t, const uint8_t *);
 static bool send_define_sized_font (int, uint32_t, const uint8_t *,
@@ -172,12 +191,17 @@ static const struct
     { "close", close_example },
     { "offline close", offline_close_example },
     { "font", font_example },
+    { "clipboard", clipboard_example },
     { "usage", usage_example },
   };
 
 int
-main (void)
+main (int argc, char **argv)
 {
+  if (argc == 3 && strcmp (argv[1], "clipboard-owner") == 0)
+    return clipboard_owner (argv[2]);
+  if (argc == 2 && strcmp (argv[1], "clipboard-read") == 0)
+    return clipboard_read ();
   signal (SIGPIPE, SIG_IGN);
   for (size_t i = 0; i < sizeof examples / sizeof *examples; i++)
     if (!examples[i].check ())
@@ -449,6 +473,184 @@ local_font (uint8_t *hash, uint32_t *size)
   return found;
 }
 
+/* The clipboard example, with the texts LAPTOP and SERVER.  */
+static bool
+clipboard_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  char *laptop = make_text (20000, 'L'), *server = make_text (12000, 'S');
+  pid_t owner = start_clipboard_owner (laptop);
+  const char *step = "own the clipboard";
+  bool passed = (owner > 0 && send_define_frame (run.connection)
+		 && (step = "send the text of the laptop",
+		     wait_for_clipboard (run.connection, CONNECT_LIMIT,
+					 laptop)));
+  if (owner > 0)
+    {
+      kill (owner, SIGTERM);
+      waitpid (owner, NULL, 0);
+    }
+  passed = (passed && send_clipboard (run.connection, 9, server)
+	    && (step = "put the text of the server on the clipboard",
+		clipboard_becomes (server, CONNECT_LIMIT))
+	    && (step = "do not send the text of the server back",
+		!wait_for_clipboard (run.connection, QUIET_LIMIT, server)));
+  shutdown (run.connection, SHUT_RDWR);
+  passed = (passed && accept_next (&run)
+	    && (step = "send the clipboard after a new connection",
+		wait_for_clipboard (run.connection, CONNECT_LIMIT, server)));
+  if (!passed)
+    fprintf (stderr, "test-reconnect: clipboard: the step \"%s\" "
+	     "failed\n", step);
+  free (laptop);
+  free (server);
+  stop_run (&run);
+  return passed;
+}
+
+/* Return a new text of SIZE bytes or a few more, of ASCII and other
+   UTF-8 characters, that starts with MARK.  Free it with free.  */
+static char *
+make_text (size_t size, char mark)
+{
+  static const char *const parts[] = { "abc ", "\xc3\xa9", "\xce\xbb ",
+				       "\xf0\x9f\x98\x80", "\n" };
+  char *text = malloc (size + 8);
+  size_t used = 0;
+  text[used++] = mark;
+  for (int i = 0; used < size; i++)
+    {
+      const char *part = parts[i % (sizeof parts / sizeof *parts)];
+      memcpy (text + used, part, strlen (part));
+      used += strlen (part);
+    }
+  text[used] = 0;
+  return text;
+}
+
+/* Start this program as the owner of the clipboard with TEXT.  Return
+   its process ID when it owns the clipboard, or -1.  */
+static pid_t
+start_clipboard_owner (const char *text)
+{
+  pid_t pid = fork ();
+  if (pid == 0)
+    {
+      execl ("./test-reconnect", "test-reconnect", "clipboard-owner", text,
+	     (char *) NULL);
+      _exit (127);
+    }
+  if (pid > 0 && !clipboard_becomes (text, CONNECT_LIMIT))
+    {
+      kill (pid, SIGTERM);
+      waitpid (pid, NULL, 0);
+      return -1;
+    }
+  return pid;
+}
+
+/* Send TEXT with SERIAL in clipboard-data messages on the connection
+   FD.  */
+static bool
+send_clipboard (int fd, uint32_t serial, const char *text)
+{
+  size_t size = strlen (text);
+  bool sent = true;
+  for (uint32_t i = 0; sent && i < rd_chunk_count (size); i++)
+    {
+      struct rd_message message;
+      rd_chunk_message (serial, (const unsigned char *) text, size, i,
+			&message);
+      sent = send_message (fd, &message);
+    }
+  return sent;
+}
+
+/* Wait at most LIMIT milliseconds for the clipboard-data messages of
+   TEXT on the connection FD.  Skip the other messages.  Return false
+   if the text does not come.  */
+static bool
+wait_for_clipboard (int fd, int limit, const char *text)
+{
+  struct rd_chunks chunks = { 0 };
+  int64_t end = now_ms () + limit;
+  struct rd_message message;
+  int64_t left;
+  bool found = false;
+  while (!found && (left = end - now_ms ()) > 0)
+    if (read_message (fd, &message, left) == 1
+	&& message.type == RD_CLIPBOARD_DATA
+	&& rd_chunks_add (&chunks, &message.u.clipboard_data) == RD_CHUNK_DONE)
+      found = (chunks.total == strlen (text)
+	       && !memcmp (chunks.bytes, text, chunks.total));
+  rd_chunks_free (&chunks);
+  return found;
+}
+
+/* Wait at most LIMIT milliseconds for the clipboard to have TEXT.  */
+static bool
+clipboard_becomes (const char *text, int limit)
+{
+  int64_t end = now_ms () + limit;
+  bool same = false;
+  while (!same && now_ms () < end)
+    {
+      char *now = read_clipboard ();
+      same = now && strcmp (now, text) == 0;
+      free (now);
+      if (!same)
+	poll (NULL, 0, 50);
+    }
+  return same;
+}
+
+/* Return the text of the clipboard in a new string, or NULL.  */
+static char *
+read_clipboard (void)
+{
+  gchar *out = NULL;
+  gint status;
+  char *argv[] = { "./test-reconnect", "clipboard-read", NULL };
+  if (!g_spawn_sync (NULL, argv, NULL, G_SPAWN_STDERR_TO_DEV_NULL, NULL, NULL,
+		     &out, NULL, &status, NULL)
+      || !g_spawn_check_wait_status (status, NULL))
+    {
+      g_free (out);
+      return NULL;
+    }
+  char *text = strdup (out);
+  g_free (out);
+  return text;
+}
+
+/* Own the clipboard with TEXT until a signal stops the process.  */
+static int
+clipboard_owner (const char *text)
+{
+  gtk_init (NULL, NULL);
+  gtk_clipboard_set_text (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD), text,
+			  -1);
+  gtk_main ();
+  return 0;
+}
+
+/* Write the text of the clipboard to the standard output.  Return 1 if
+   the clipboard has no text.  */
+static int
+clipboard_read (void)
+{
+  gtk_init (NULL, NULL);
+  gchar *text = gtk_clipboard_wait_for_text
+    (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD));
+  if (!text)
+    return 1;
+  fputs (text, stdout);
+  g_free (text);
+  return 0;
+}
+
 /* Fill FONT with FONT_SIZE bytes that depend on SEED, and put their
    SHA-256 hash in HASH.  */
 static void
@@ -688,7 +890,7 @@ wait_for_ping (int fd, int limit, uint32_t *serial)
 static int
 read_message (int fd, struct rd_message *message, int limit)
 {
-  unsigned char bytes[RD_MAX_LENGTH < 4096 ? RD_MAX_LENGTH : 4096];
+  unsigned char bytes[16384];
   struct pollfd ready = { .fd = fd, .events = POLLIN };
   if (poll (&ready, 1, limit) != 1)
     return 0;

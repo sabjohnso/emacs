@@ -48,14 +48,14 @@ FONTS_OBJS = fonts.o hashfonts.o hashcache.o fontstore.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   fonts.o hashfonts.o hashcache.o fontstore.o rdproto.o link.o backoff.o \
   unixsocket.o relay.o relayline.o token.o flow.o pending.o stream.o tls.o \
-  listenspec.o \
+  listenspec.o rdchunk.o \
   sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
   test-backoff test-reconnect test-relayline \
   test-relay test-flow test-pending test-unixsocket \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
-  test-fontstore
+  test-fontstore test-rdchunk
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -73,6 +73,7 @@ check: remote-client $(TESTS)
 	./test-glyphs
 	./test-fonts
 	./test-fontstore
+	./test-rdchunk
 	./test-input
 	./test-client
 	./test-sizes
@@ -117,6 +118,9 @@ test-fonts: test-fonts.o $(RENDER_OBJS) $(FONTS_OBJS)
 test-fontstore: test-fontstore.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
+test-rdchunk: test-rdchunk.o rdchunk.o rdproto.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
 test-input: test-input.o input.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
@@ -126,8 +130,8 @@ test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 test-sizes: test-sizes.o sizes.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-reconnect: test-reconnect.o rdproto.o | remote-client
-	$(CC) $(LDFLAGS) -o $@ $^ $(X11_LIBS) $(LIBS)
+test-reconnect: test-reconnect.o rdproto.o rdchunk.o | remote-client
+	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(X11_LIBS) $(LIBS)
 
 test-backoff: test-backoff.o backoff.o
 	$(CC) $(LDFLAGS) -o $@ $^
@@ -171,7 +175,7 @@ test-link: test-link.o link.o
 test-view: test-view.o view.o input.o sizes.o $(RENDER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
-client.o view.o input.o test-input.o test-view.o: %.o: %.c
+client.o view.o input.o test-input.o test-view.o test-reconnect.o: %.o: %.c
 	$(CC) $(ALL_CFLAGS) $(GTK_CFLAGS) -c -o $@ $<
 
 tls.o test-tls.o test-relay.o test-ssh.o: %.o: %.c
@@ -179,6 +183,11 @@ tls.o test-tls.o test-relay.o test-ssh.o: %.o: %.c
 
 rdproto.o: ../src/rdproto.c ../src/rdproto.h config.h
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+
+rdchunk.o: ../src/rdchunk.c ../src/rdchunk.h ../src/rdproto.h config.h
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+
+test-rdchunk.o: ../src/rdchunk.h ../src/rdproto.h
 
 %.o: %.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
@@ -194,11 +203,12 @@ fontstore.o test-fontstore.o client.o: fontstore.h fonts.h render.h \
   hashcache.h ../src/rdproto.h
 client.o view.o test-view.o: view.h reader.h fonts.h render.h \
   ../src/rdproto.h
+client.o: ../src/rdchunk.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
 sizes.o test-sizes.o view.o: sizes.h
 link.o test-link.o client.o: link.h
 backoff.o test-backoff.o test-reconnect.o client.o: backoff.h
-test-reconnect.o: ../src/rdproto.h
+test-reconnect.o: ../src/rdproto.h ../src/rdchunk.h
 relayline.o test-relayline.o test-relay.o relay.o: relayline.h token.h pin.h
 token.o: token.h
 relay.o client.o test-relay.o: relay.h

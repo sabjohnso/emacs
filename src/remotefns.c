@@ -275,6 +275,12 @@ syms_of_remotefns (void)
   Vremote_display__max_font_chunk = make_fixnum (RD_MAX_FONT_CHUNK);
   make_symbol_constant (intern_c_string ("remote-display--max-font-chunk"));
 
+  DEFVAR_LISP ("remote-display--max-clipboard-chunk",
+	       Vremote_display__max_clipboard_chunk,
+	       doc: /* The maximum number of bytes in a `clipboard-data' message.  */);
+  Vremote_display__max_clipboard_chunk = make_fixnum (RD_MAX_CLIPBOARD_CHUNK);
+  make_symbol_constant (intern_c_string ("remote-display--max-clipboard-chunk"));
+
   DEFVAR_LISP ("remote-display--modifier-bits",
 	       Vremote_display__modifier_bits,
 	       doc: /* The bits of the modifiers field of an input message.
