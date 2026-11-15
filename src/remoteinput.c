@@ -40,7 +40,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    the focus from it.  Emacs sees each change as a focus-out event of
    the old focus frame and a focus-in event of the new one.  A resize
    message changes the size of its frame at the next redisplay, and the
-   redisplay sends the new size to the client.  */
+   redisplay sends the new size to the client.  A close-frame message
+   gives the delete-frame event of its frame, as the WM_DELETE_WINDOW
+   message of X does in xterm.c, so `handle-delete-frame' decides
+   whether to delete the frame.  */
 
 #include <config.h>
 
@@ -79,6 +82,8 @@ static void remote_focus_input (struct remote_display_info *,
 				const struct rd_message *);
 static void remote_resize_input (struct remote_display_info *,
 				 const struct rd_message *);
+static void remote_close_input (struct remote_display_info *,
+				const struct rd_message *);
 static void remote_set_focus_frame (struct remote_display_info *,
 				    struct frame *);
 static void remote_focus_event (enum event_kind, struct frame *);
@@ -105,6 +110,7 @@ static void (*const remote_input_functions[RD_TYPE_LIMIT])
     [RD_MOTION] = remote_motion_input,
     [RD_FOCUS] = remote_focus_input,
     [RD_RESIZE] = remote_resize_input,
+    [RD_CLOSE_FRAME] = remote_close_input,
   };
 
 void
@@ -209,6 +215,24 @@ remote_resize_input (struct remote_display_info *dpyinfo,
       || !remote_frame_pixels_p (resize->height))
     return;
   change_frame_size (f, resize->width, resize->height, false, true, false);
+}
+
+/* Store the delete-frame event of the frame of the close-frame MESSAGE
+   of DPYINFO.  */
+static void
+remote_close_input (struct remote_display_info *dpyinfo,
+		    const struct rd_message *message)
+{
+  const struct rd_close_frame *close = &message->u.close_frame;
+  struct frame *f = remote_frame_of_id (dpyinfo, close->frame);
+  if (!f)
+    return;
+  struct input_event ie;
+  EVENT_INIT (ie);
+  ie.kind = DELETE_WINDOW_EVENT;
+  XSETFRAME (ie.frame_or_window, f);
+  ie.arg = Qnil;
+  kbd_buffer_store_event (&ie);
 }
 
 void

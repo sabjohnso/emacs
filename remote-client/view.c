@@ -58,7 +58,7 @@ static struct rc_size surface_size (cairo_surface_t *);
 static void set_title (uint32_t, void *, void *);
 static void destroy_window (void *);
 static gboolean draw_frame (GtkWidget *, cairo_t *, gpointer);
-static void window_closed (GtkWidget *, gpointer);
+static gboolean close_requested (GtkWidget *, GdkEvent *, gpointer);
 static gboolean key_pressed (GtkWidget *, GdkEventKey *, gpointer);
 static gboolean button_changed (GtkWidget *, GdkEventButton *, gpointer);
 static gboolean mouse_moved (GtkWidget *, GdkEventMotion *, gpointer);
@@ -181,8 +181,8 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
 				 gtk_drawing_area_new (),
 				 rc_sizes_new (size) };
   g_signal_connect (window->area, "draw", G_CALLBACK (draw_frame), window);
-  g_signal_connect (window->window, "destroy", G_CALLBACK (window_closed),
-		    window);
+  g_signal_connect (window->window, "delete-event",
+		    G_CALLBACK (close_requested), window);
   g_signal_connect (window->window, "key-press-event",
 		    G_CALLBACK (key_pressed), window);
   g_signal_connect (window->window, "focus-in-event",
@@ -230,8 +230,6 @@ static void
 destroy_window (void *data)
 {
   struct rc_window *window = data;
-  g_signal_handlers_disconnect_by_func (window->window, window_closed,
-					window);
   gtk_widget_destroy (window->window);
   g_free (window);
 }
@@ -253,18 +251,18 @@ draw_frame (GtkWidget *area, cairo_t *cr, gpointer data)
   return true;
 }
 
-/* The destroy signal of a window that the user closed.  DATA is the
-   struct rc_window.  Remove the window, and call the ON_CLOSE function
-   of the view.  */
-static void
-window_closed (GtkWidget *widget, gpointer data)
+/* The delete-event signal of a window that the user asks to close.
+   DATA is the struct rc_window.  Give its frame to the ON_CLOSE
+   function of the view, and keep the window.  */
+static gboolean
+close_requested (GtkWidget *widget, GdkEvent *event, gpointer data)
 {
   (void) widget;
+  (void) event;
   struct rc_window *window = data;
   struct rc_view *view = window->view;
-  rc_table_remove (&view->windows, window->frame);
-  g_free (window);
-  view->functions.on_close (view->functions.data);
+  view->functions.on_close (view->functions.data, window->frame);
+  return true;
 }
 
 /* The key-press-event signal of a window.  DATA is the struct

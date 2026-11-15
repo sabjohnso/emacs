@@ -93,7 +93,8 @@ enum rd_cursor_kind
   MESSAGE (FOCUS, focus, RD_FOCUS_FIELDS)				\
   MESSAGE (RESIZE, resize, RD_RESIZE_FIELDS)				\
   MESSAGE (PING, ping, RD_PING_FIELDS)					\
-  MESSAGE (PONG, pong, RD_PONG_FIELDS)
+  MESSAGE (PONG, pong, RD_PONG_FIELDS)					\
+  MESSAGE (CLOSE_FRAME, close_frame, RD_CLOSE_FRAME_FIELDS)
 
 /* Each list gives the fields of a message in the order of the wire.
    FIELD (M, TYPE, NAME) is a member NAME of the C type TYPE_t.
@@ -265,6 +266,13 @@ enum rd_cursor_kind
 /* The server answers the ping with SERIAL.  */
 #define RD_PONG_FIELDS(FIELD, ARRAY, M)					\
   FIELD (M, uint32, serial)
+
+/* A client message: the user asked to close the window of FRAME, for
+   example with the close button of the window manager.  The client
+   keeps the window.  The server decides whether to delete FRAME, as
+   Emacs decides for the WM_DELETE_WINDOW message of X.  */
+#define RD_CLOSE_FRAME_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)
 
 /* The buttons of a button message that are the mouse wheel.  */
 enum rd_wheel_button

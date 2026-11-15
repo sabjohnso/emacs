@@ -38,6 +38,10 @@ TLS_LIBS = $(shell $(PKG_CONFIG) --libs gnutls)
 GTK_CFLAGS = $(shell $(PKG_CONFIG) --cflags gtk+-3.0)
 GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 
+# test-reconnect asks a window of the program to close through X, as a
+# window manager does.
+X11_LIBS = $(shell $(PKG_CONFIG) --libs x11)
+
 RENDER_OBJS = render.o table.o rdproto.o
 READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o
@@ -118,7 +122,7 @@ test-sizes: test-sizes.o sizes.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-reconnect: test-reconnect.o rdproto.o | remote-client
-	$(CC) $(LDFLAGS) -o $@ $^
+	$(CC) $(LDFLAGS) -o $@ $^ $(X11_LIBS)
 
 test-backoff: test-backoff.o backoff.o
 	$(CC) $(LDFLAGS) -o $@ $^

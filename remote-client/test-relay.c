@@ -54,6 +54,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      relay closes the old client and its connection to the session.
    - Session end: when the session closes the connection, the relay
      closes the client.
+   - Gone: when the session removes its socket and then closes the
+     connection, as a session does when it ends, the relay exits.
    - End: when the relay cannot connect to the session, it closes the
      client and exits.
    - Loopback: the relay refuses connections to an address that is
@@ -157,6 +159,7 @@ static bool abandon_example (void);
 static bool overflow_example (void);
 static bool replace_example (void);
 static bool session_end_example (void);
+static bool gone_example (void);
 static bool end_example (void);
 static bool loopback_example (void);
 static bool default_example (void);
@@ -173,6 +176,7 @@ static bool usage_example (void);
 static bool start_run (struct run *);
 static bool start_run_at (struct run *, struct where, const char *);
 static bool stop_run (struct run *);
+static bool refuses_p (const struct run *);
 static bool make_session (struct run *);
 static bool refused_p (bool, struct where);
 static int start_relay (const char *, struct where, int *, int *, int *);
@@ -215,6 +219,7 @@ static const struct
     { "overflow", overflow_example },
     { "replace", replace_example },
     { "session end", session_end_example },
+    { "gone", gone_example },
     { "end", end_example },
     { "loopback", loopback_example },
     { "default", default_example },
@@ -463,6 +468,22 @@ session_end_example (void)
   return stop_run (&run) && ok;
 }
 
+static bool
+gone_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  struct rc_stream *client = connect_client (&run, true);
+  int session = accept_session (&run, LIMIT);
+  unlink (run.socket);
+  close (session);
+  bool ok = (client && session >= 0 && stream_closed_p (client, LIMIT)
+	     && refuses_p (&run));
+  rc_stream_close (client);
+  return stop_run (&run) && ok;
+}
+
 /* stop_run is the end example: each other example uses it.  This
    example also checks that a client of a relay with no session gets
    nothing.  */
@@ -698,12 +719,20 @@ stop_run (struct run *run)
   struct rc_stream *client = connect_client (run, true);
   bool ok = !client || stream_closed_p (client, LIMIT);
   rc_stream_close (client);
+  return refuses_p (run) && ok;
+}
+
+/* Return true if the port of the relay of RUN refuses connections in
+   LIMIT milliseconds, because the relay exited.  */
+static bool
+refuses_p (const struct run *run)
+{
   for (int64_t start = now_ms (); now_ms () - start < LIMIT;
        poll (NULL, 0, 10))
     {
       int fd = connect_run (run);
       if (fd < 0)
-	return ok;
+	return true;
       close (fd);
     }
   return false;
@@ -818,6 +847,7 @@ works_p (const struct run *run)
   int session = accept_session (run, LIMIT);
   bool ok = client && session >= 0 && echo_through (client, session, 100);
   rc_stream_close (client);
+  ok = ok && closed_p (session, LIMIT);
   close (session);
   return ok;
 }

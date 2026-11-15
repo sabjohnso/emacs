@@ -5638,7 +5638,8 @@ the keysym, because the session has no `system-key-alist'.")
 
 (defun remoteterm-tests--random-input ()
   "Return a random input of the property of the key messages."
-  (pcase (rd-gen-integer 0 14)
+  (pcase (rd-gen-integer 0 15)
+    (14 (list (list 'close-frame :frame 'other) nil))
     (11 (let ((keysym (rd-gen-element remoteterm-tests--vendor-keysyms))
               (modifiers (rd-gen-integer 0 63)))
           (list (list 'key :frame 'frame :time 0 :keysym keysym
@@ -5842,6 +5843,57 @@ so the input of the session is empty when it comes."
                  'remoteterm-tests--input-quit-case)
                 'quit))))
 
+(defun remoteterm-tests--close-frame-case ()
+  "Send close-frame messages to a session with two frames.
+Return a list with an element for each step:
+ - The event of a message for the first frame, with an empty
+   `special-event-map', so that `read-event' gives the event.
+ - The state after a message for a frame that does not exist.
+ - The state after a message for the second frame.
+ - The state after a message for the first frame, the last one.
+A state is the list of the frames that are live, and whether the
+session is live.  The frames are `first' and `second' in the list.
+The daemon is live if the function returns."
+  (remoteterm-tests--with-input-session
+   (lambda (first client-side &optional _server-side)
+     (let ((second (remoteterm-tests--make-frame "remote-input" nil)))
+       (unwind-protect
+           (cl-flet ((send (frame target)
+                       (process-send-string
+                        client-side
+                        (remoteterm-tests--encode-inputs
+                         `(((close-frame :frame ,target))) frame))
+                       (remoteterm-tests--read-events 1))
+                     (state ()
+                       (list (seq-filter #'frame-live-p (list first second))
+                             (and (remoteterm-tests--terminal "remote-input")
+                                  t))))
+             (cl-subst-if
+              'first (lambda (x) (eq x first))
+              (cl-subst-if
+               'second (lambda (x) (eq x second))
+               (list (let ((special-event-map (make-sparse-keymap)))
+                       (send first 'frame))
+                     (progn (send first 'other) (state))
+                     (progn (send second 'frame) (state))
+                     (progn (send first 'frame) (state))))))
+         (delete-frame second))))))
+
+(ert-deftest remoteterm-tests-close-frame ()
+  "A close-frame message gives the delete-frame event of its frame.
+The event deletes the frame, as the delete-window event of X does.  A
+message for a frame that does not exist gives no event.  A message for
+the last frame of the session deletes the frame and the session, as
+`delete-frame' does, but does not stop the daemon."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--close-frame-case)
+                   '(((delete-frame (first)))
+                     ((first second) t)
+                     ((first) t)
+                     (nil nil))))))
+
 (defun remoteterm-tests--input-after-quit-case ()
   "Send C-g, a, and b in one write, and read events as an idle Emacs does.
 Read with `read-event' only, so that Emacs waits in read_char.  Return
@@ -6040,6 +6092,61 @@ error, and WORKS is t if the first socket still works."
       (remoteterm-tests--with-frame _frame "remote-listen-a" nil
         (ignore-errors (x-close-connection "remote-listen-a"))
         (and (remoteterm-tests--listen-socket-works-p socket) t)))))
+
+(ert-deftest remoteterm-tests-listen-end-closes-client ()
+  "When a session ends, the connection of its client closes.
+Thus a client knows that the session is gone, and can stop.  The
+socket is gone before the close, so a relay that sees the close can
+see that the session ended."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--listen-end-case)
+                   '(closed nil)))))
+
+(defun remoteterm-tests--listen-end-case ()
+  "Attach a client to a session, delete the last frame, and return a list.
+The list is (STATUS SOCKET): STATUS is the status of the client side
+of the connection after the session ends, or after 10 seconds.
+SOCKET is non-nil if the socket existed when the session deleted the
+connection of its client."
+  (remoteterm-tests--with-display "remote-listen-a"
+    (let* ((socket (remote-display-listen "remote-listen-a"))
+           (frame (remoteterm-tests--make-frame "remote-listen-a" nil))
+           (connection (remoteterm-tests--connect socket))
+           (socket-at-close 'not-closed))
+      (unwind-protect
+          (progn
+            (remoteterm-tests--reset-and-ping connection 7)
+            (remoteterm-tests--pong-of (car connection) (cdr connection))
+            (let ((client (remote-display-client "remote-listen-a")))
+              (cl-letf* ((delete (symbol-function 'delete-process))
+                         ((symbol-function 'delete-process)
+                          (lambda (&optional process)
+                            (when (eq process client)
+                              (setq socket-at-close (file-exists-p socket)))
+                            (funcall delete process))))
+                (delete-frame frame)))
+            (with-timeout (10)
+              (while (eq (process-status (car connection)) 'open)
+                (accept-process-output nil 0.05)))
+            (list (process-status (car connection)) socket-at-close))
+        (delete-process (car connection))))))
+
+(ert-deftest remoteterm-tests-listen-kill-emacs ()
+  "When Emacs exits, the socket of each session and its directory go away."
+  (skip-unless (featurep 'remote-test))
+  (let ((socket
+         (with-temp-buffer
+           (call-process
+            (expand-file-name invocation-name invocation-directory)
+            nil '(t nil) nil "-Q" "--batch" "--eval"
+            "(progn (x-open-connection \"remote-kill\")
+                    (princ (remote-display-listen \"remote-kill\"))
+                    (kill-emacs 0))")
+           (buffer-string))))
+    (should (string-suffix-p "/socket" socket))
+    (should-not (file-exists-p (file-name-directory socket)))))
 
 (ert-deftest remoteterm-tests-listen-two-sessions ()
   "Two sessions have sockets in different directories.

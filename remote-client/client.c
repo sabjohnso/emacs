@@ -23,9 +23,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 	  remote-client --relay [--listen=SPEC] SOCKET
 
    The program connects to the Unix-domain socket SOCKET of a session,
-   and shows each frame of the session in a window.  It stops when the
-   user closes a window, or when the connection ends and the program
-   has no window.
+   and shows each frame of the session in a window.  When the user
+   asks to close a window, the program asks the server to close its
+   frame, and the server decides, as Emacs does for a window of X.  The
+   program stops when the connection ends and the program has no
+   window, or when the user asks to close a window while the program
+   has no connection.
 
    When the connection ends, or no bytes come from the server for MS
    milliseconds, the program keeps its windows and connects to SOCKET
@@ -196,7 +199,7 @@ static void network_changed (GNetworkMonitor *, gboolean, gpointer);
 static void show_message (void *, const struct rd_message *);
 static gboolean read_input (gint, GIOCondition, gpointer);
 static void note_input (struct window_mode *);
-static void stop_main_loop (void *);
+static void close_frame (void *, uint32_t);
 static void send_message (void *, const struct rd_message *);
 static void send_on (struct connection *, const struct rd_message *,
 		     int64_t);
@@ -461,9 +464,9 @@ record_first_frame (void *data, const struct rd_message *message)
 
 /* Show the frames of RENDERER in windows, and apply the messages from
    STREAM to RENDERER.  Connect to PATH
-   again after the loss of a connection with TIMEOUT.  Stop when the
-   user closes a window, or when a connection ends and no window is
-   left.  Return the exit status.  */
+   again after the loss of a connection with TIMEOUT.  Stop when a
+   connection ends and no window is left, or when the user asks to
+   close a window with no connection.  Return the exit status.  */
 static int
 show_frames (struct rc_renderer *renderer, struct rc_stream *stream,
 	     struct rc_connector connector, int64_t timeout)
@@ -472,7 +475,7 @@ show_frames (struct rc_renderer *renderer, struct rc_stream *stream,
 			      .timeout = timeout,
 			      .backoff = rc_backoff_new () };
   mode.view = rc_view_new (renderer, (struct rc_view_functions)
-			   { stop_main_loop, send_message, &mode });
+			   { close_frame, send_message, &mode });
   open_connection (&mode, stream);
   mode.tick = g_timeout_add (rc_link_tick_interval (timeout), tick_link,
 			     &mode);
@@ -653,11 +656,22 @@ note_input (struct window_mode *mode)
   rc_view_set_connected (mode->view, true);
 }
 
-/* The function of the view when the user closes a window.  */
+/* The function of the view when the user asks to close the window of
+   FRAME.  DATA is the struct window_mode.  With a connection, ask the
+   server to close FRAME: the server deletes the frame, and then the
+   view removes the window.  With no connection, the server cannot
+   answer, so stop the program.  The session stays on the server.  */
 static void
-stop_main_loop (void *data)
+close_frame (void *data, uint32_t frame)
 {
-  (void) data;
+  struct window_mode *mode = data;
+  if (mode->connection)
+    {
+      struct rd_message message = { .type = RD_CLOSE_FRAME,
+				    .u.close_frame = { .frame = frame } };
+      send_on (mode->connection, &message, mode->timeout);
+      return;
+    }
   gtk_main_quit ();
 }
 

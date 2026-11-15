@@ -106,6 +106,9 @@
 ;;     The window of F got (I is 1) or lost (I is 0) the focus.
 ;; (resize :frame F :width W :height H)
 ;;     The window of F has the size W, H in pixels now.
+;; (close-frame :frame F)
+;;     The user asked to close the window of F.  The server decides
+;;     whether to delete F.
 ;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
@@ -150,7 +153,8 @@
     (focus . remotefns-tests--focus)
     (resize . remotefns-tests--resize)
     (ping . remotefns-tests--ping)
-    (pong . remotefns-tests--pong))
+    (pong . remotefns-tests--pong)
+    (close-frame . remotefns-tests--close-frame))
   "The message types, each with the function that generates a message.")
 
 (defconst remotefns-tests--clip-and-color
@@ -286,6 +290,10 @@
 (defun remotefns-tests--pong ()
   "Return a random `pong' message."
   (list 'pong :serial (rd-gen-uint32)))
+
+(defun remotefns-tests--close-frame ()
+  "Return a random `close-frame' message."
+  (list 'close-frame :frame (rd-gen-uint32)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -551,6 +559,12 @@
   ;; Length 5, type 16, serial #x01020304.
   (should (equal (remote-display--encode '(pong :serial #x01020304))
                  (unibyte-string 0 0 0 5 16 1 2 3 4))))
+
+(ert-deftest remotefns-tests-close-frame-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 5, type 17, frame 7.
+  (should (equal (remote-display--encode '(close-frame :frame 7))
+                 (unibyte-string 0 0 0 5 17 0 0 0 7))))
 
 (ert-deftest remotefns-tests-modifier-bits ()
   "Each modifier has one bit, and the bits are the same for each build.

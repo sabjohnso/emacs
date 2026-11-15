@@ -58,6 +58,7 @@ DISPLAY is the name of the first session."
 ;;;; Listeners
 
 (declare-function remote-display-attach "remoteproc.c" (display process))
+(declare-function remote-display-client "remoteproc.c" (display))
 
 (defvar remote-display--listeners nil
   "The listeners of the sessions.
@@ -69,7 +70,8 @@ server process of its socket, and the directory of the socket.")
 The socket is in a new directory that only the user can use.  Each
 connection to the socket becomes the client of DISPLAY, and detaches
 the client before it.  When the session closes, the socket and its
-directory are deleted.  A session can have only one socket."
+directory are deleted, and the connection of the client closes.  A
+session can have only one socket."
   (when (assoc display remote-display--listeners)
     (error "Session %s already has a socket" display))
   (let* ((directory (remote-display--make-socket-directory))
@@ -83,16 +85,20 @@ directory are deleted.  A session can have only one socket."
 
 (defun remote-display--stop-listening (terminal)
   "Delete the server of TERMINAL, its socket, and the directory of the socket.
-This function is in `delete-terminal-functions', so it runs for each
-terminal, also for a terminal with no socket."
+Do nothing for a terminal with no socket."
   (let ((listener (assoc (terminal-name terminal) remote-display--listeners)))
     (when listener
       (setq remote-display--listeners
             (delq listener remote-display--listeners))
-      (pcase-let ((`(,_display ,server ,directory) listener))
-        (unwind-protect
-            (delete-process server)
-          (delete-directory directory t))))))
+      (remote-display--delete-listener listener))))
+
+(defun remote-display--delete-listener (listener)
+  "Delete the server, the socket, and the directory of LISTENER.
+LISTENER is an element of `remote-display--listeners'."
+  (pcase-let ((`(,_display ,server ,directory) listener))
+    (unwind-protect
+        (delete-process server)
+      (delete-directory directory t))))
 
 (defun remote-display--make-socket-directory ()
   "Make a new directory for a socket, and return its name.
@@ -113,7 +119,36 @@ does not ask about the server when it exits."
    :log (lambda (_server connection _message)
           (remote-display-attach display connection))))
 
-(add-hook 'delete-terminal-functions #'remote-display--stop-listening)
+(defun remote-display--close-client (terminal)
+  "Close the connection of the client of TERMINAL, if TERMINAL is a session.
+Thus the client knows that the session ended, and can stop."
+  (when (eq (terminal-live-p terminal) 'remote)
+    (let ((client (remote-display-client (terminal-name terminal))))
+      (when client
+        (delete-process client)))))
+
+(defun remote-display--end-session (terminal)
+  "Stop the listener of TERMINAL, and then close the connection of its client.
+The relay of \"remote-client --ssh\" exits when the session closes the
+connection and the socket does not exist, so the socket goes first.
+This function is in `delete-terminal-functions', so it runs for each
+terminal."
+  (remote-display--stop-listening terminal)
+  (remote-display--close-client terminal))
+
+(add-hook 'delete-terminal-functions #'remote-display--end-session)
+
+(defun remote-display--stop-all-listeners ()
+  "Delete the server, the socket, and the directory of each session.
+`kill-emacs' does not delete the terminals, so this function is in
+`kill-emacs-hook'.  An error for one session does not stop the
+others."
+  (dolist (listener remote-display--listeners)
+    (with-demoted-errors "remote-display: %S"
+      (remote-display--delete-listener listener)))
+  (setq remote-display--listeners nil))
+
+(add-hook 'kill-emacs-hook #'remote-display--stop-all-listeners)
 
 ;;;; Start
 

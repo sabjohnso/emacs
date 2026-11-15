@@ -29,7 +29,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    bytes between the client and the session.  A new client with the
    token replaces the old client, as the session also does.  When the
    relay cannot connect to the session, the session has stopped, so
-   the relay exits.
+   the relay exits.  The relay also exits when the session closes the
+   connection and its socket does not exist, because a session that
+   ends removes its socket first.
 
    The client speaks TLS 1.3 with the key of tls.h, whose pin is on
    the line.  The relay reads the token inside TLS, so a connection

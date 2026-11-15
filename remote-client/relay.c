@@ -95,7 +95,7 @@ static void serve (struct relay *);
 static int watch (const struct relay *, struct pollfd *);
 static void watch_pair (const struct relay *, struct pollfd *);
 static bool client_buffered_p (const struct relay *);
-static void move_pair (struct relay *, const struct pollfd *, bool);
+static bool move_pair (struct relay *, const struct pollfd *, bool);
 static bool read_tokens (struct relay *, const struct pollfd *);
 static void accept_client (struct relay *);
 static void expire_pending (struct relay *);
@@ -231,7 +231,8 @@ serve (struct relay *relay)
 	}
       /* The pair goes first: a token can replace the pair, and then
 	 the events of the old pair are no longer valid.  */
-      move_pair (relay, fds, client_buffered_p (relay));
+      if (!move_pair (relay, fds, client_buffered_p (relay)))
+	return;
       if (!read_tokens (relay, fds))
 	return;
       if (fds[WATCH_LISTENER].revents)
@@ -303,17 +304,23 @@ watch_pair (const struct relay *relay, struct pollfd *fds)
 /* Move the bytes of the pair of RELAY after the events of FDS.  Close
    the pair when the client or the session closes its connection.  A
    direction reads only when it has no bytes, so the bytes that are
-   left go to a peer that has closed.  */
-static void
+   left go to a peer that has closed.  Return false when the relay
+   must stop: after a close, if the session socket did not exist
+   before the close.  A session that ends removes its socket before it
+   closes the connection of its client.  */
+static bool
 move_pair (struct relay *relay, const struct pollfd *fds, bool buffered)
 {
   if (!relay->client)
-    return;
+    return true;
   short client = fds[WATCH_CLIENT].revents | (buffered ? POLLIN : 0);
   short server = fds[WATCH_SERVER].revents;
-  if (!move (&relay->up, relay->client, client, relay->server, server)
-      || !move (&relay->down, relay->server, server, relay->client, client))
-    close_pair (relay);
+  if (move (&relay->up, relay->client, client, relay->server, server)
+      && move (&relay->down, relay->server, server, relay->client, client))
+    return true;
+  bool session = session_socket_p (relay->session);
+  close_pair (relay);
+  return session;
 }
 
 /* Read the tokens of the pending connections of RELAY after the events

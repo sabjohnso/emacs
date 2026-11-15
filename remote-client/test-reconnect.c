@@ -39,6 +39,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      connection, the program exits with the status 0.
    - Error: when a message with an error comes and the program has no
      window, the program exits with the status 1.
+   - Close: when the user asks to close the window, the program sends
+     the close-frame message of its frame, keeps its window, and runs
+     on.  The test sends the request of a window manager through X.
+   - Offline close: when the user asks to close the window while the
+     program has no connection, the program exits with the status 0.
    - Usage: a timeout that is not a number, or that is less than
      RC_LINK_PINGS_PER_TIMEOUT, makes the program exit with the
      status 1.  */
@@ -58,6 +63,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 #include "backoff.h"
 #include "rdproto.h"
@@ -95,6 +104,8 @@ static bool retry_example (void);
 static bool reset_example (void);
 static bool end_example (void);
 static bool error_example (void);
+static bool close_example (void);
+static bool offline_close_example (void);
 static bool usage_example (void);
 static pid_t start_program (const struct run *, const char *);
 static bool start_run (struct run *);
@@ -108,6 +119,11 @@ static bool wait_for_ping (int, int, uint32_t *);
 static int wait_for_exit (pid_t);
 static int listen_at (const char *);
 static int64_t now_ms (void);
+static bool close_window (pid_t);
+static Window wait_for_window (Display *, pid_t);
+static Window find_window (Display *, Window, pid_t);
+static pid_t window_pid (Display *, Window);
+static bool wait_for_close_frame (int, int);
 
 /* An example and its name.  */
 static const struct
@@ -124,6 +140,8 @@ static const struct
     { "reset", reset_example },
     { "end", end_example },
     { "error", error_example },
+    { "close", close_example },
+    { "offline close", offline_close_example },
     { "usage", usage_example },
   };
 
@@ -297,6 +315,43 @@ end_example (void)
   run.connection = -1;
   passed = passed && wait_for_exit (run.pid) == 0;
   run.pid = 0;
+  stop_run (&run);
+  return passed;
+}
+
+/* The close example.  */
+static bool
+close_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  uint32_t serial;
+  bool passed = (send_define_frame (run.connection)
+		 && close_window (run.pid)
+		 && wait_for_close_frame (run.connection, CONNECT_LIMIT)
+		 && wait_for_ping (run.connection, CONNECT_LIMIT, &serial)
+		 && alive_p (&run));
+  stop_run (&run);
+  return passed;
+}
+
+/* The offline close example.  The socket does not exist after the
+   loss, so the program cannot connect again.  */
+static bool
+offline_close_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  bool passed = send_define_frame (run.connection);
+  close (run.listener);
+  unlink (run.socket);
+  shutdown (run.connection, SHUT_RDWR);
+  poll (NULL, 0, 200);
+  passed = passed && close_window (run.pid) && wait_for_exit (run.pid) == 0;
+  run.pid = 0;
+  run.listener = listen_at (run.socket);
   stop_run (&run);
   return passed;
 }
@@ -480,6 +535,114 @@ listen_at (const char *path)
       exit (2);
     }
   return fd;
+}
+
+/* Wait at most LIMIT milliseconds for the close-frame message of
+   FRAME on the connection FD.  Skip the other messages.  Return false
+   if it does not come.  */
+static bool
+wait_for_close_frame (int fd, int limit)
+{
+  int64_t end = now_ms () + limit;
+  struct rd_message message;
+  int64_t left;
+  while ((left = end - now_ms ()) > 0)
+    if (read_message (fd, &message, left) == 1
+	&& message.type == RD_CLOSE_FRAME
+	&& message.u.close_frame.frame == FRAME)
+      return true;
+  return false;
+}
+
+/* Ask the window of the program PID to close, as a window manager
+   does: send it the WM_DELETE_WINDOW message of the WM_PROTOCOLS of X.
+   Wait at most CONNECT_LIMIT milliseconds for the window to show.
+   Return false if no window shows.  */
+static bool
+close_window (pid_t pid)
+{
+  Display *display = XOpenDisplay (NULL);
+  if (!display)
+    return false;
+  Window window = wait_for_window (display, pid);
+  if (window)
+    {
+      XEvent event = { .xclient = {
+	  .type = ClientMessage, .window = window, .format = 32,
+	  .message_type = XInternAtom (display, "WM_PROTOCOLS", False),
+	  .data.l = { XInternAtom (display, "WM_DELETE_WINDOW", False),
+		      CurrentTime } } };
+      XSendEvent (display, window, False, NoEventMask, &event);
+      XSync (display, False);
+    }
+  XCloseDisplay (display);
+  return window != 0;
+}
+
+/* Wait at most CONNECT_LIMIT milliseconds for the window of the
+   program PID to show.  Return the window, or 0.  */
+static Window
+wait_for_window (Display *display, pid_t pid)
+{
+  Window window;
+  int64_t end = now_ms () + CONNECT_LIMIT;
+  while (!(window = find_window (display, DefaultRootWindow (display),
+				pid))
+	 && now_ms () < end)
+    poll (NULL, 0, 20);
+  return window;
+}
+
+/* Return the window of the program PID: a child of ROOT that shows,
+   has the _NET_WM_PID PID, and has the WM_DELETE_WINDOW protocol.
+   Return 0 if there is none.  The test runs in Xvfb with no window
+   manager, so the window is a child of ROOT.  */
+static Window
+find_window (Display *display, Window root, pid_t pid)
+{
+  Window parent, *children, found = 0;
+  unsigned int count;
+  if (!XQueryTree (display, root, &root, &parent, &children, &count))
+    return 0;
+  Atom delete = XInternAtom (display, "WM_DELETE_WINDOW", False);
+  for (unsigned int i = 0; !found && i < count; i++)
+    {
+      XWindowAttributes attributes;
+      Atom *protocols;
+      int nprotocols;
+      if (XGetWindowAttributes (display, children[i], &attributes)
+	  && attributes.map_state == IsViewable
+	  && window_pid (display, children[i]) == pid
+	  && XGetWMProtocols (display, children[i], &protocols, &nprotocols))
+	{
+	  for (int j = 0; j < nprotocols; j++)
+	    if (protocols[j] == delete)
+	      found = children[i];
+	  XFree (protocols);
+	}
+    }
+  XFree (children);
+  return found;
+}
+
+/* Return the _NET_WM_PID of WINDOW, or -1 if it has none.  */
+static pid_t
+window_pid (Display *display, Window window)
+{
+  Atom type;
+  int format;
+  unsigned long count, after;
+  unsigned char *data = NULL;
+  pid_t pid = -1;
+  if (XGetWindowProperty (display, window,
+			  XInternAtom (display, "_NET_WM_PID", False),
+			  0, 1, False, XA_CARDINAL, &type, &format, &count,
+			  &after, &data) == Success
+      && data && type == XA_CARDINAL && format == 32 && count == 1)
+    pid = *(unsigned long *) data;
+  if (data)
+    XFree (data);
+  return pid;
 }
 
 /* Return the time of a monotonic clock in milliseconds.  */

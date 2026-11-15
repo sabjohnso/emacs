@@ -40,12 +40,15 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    microseconds.  */
 enum { WAIT_LIMIT = 3000000 };
 
-/* The messages that a view sent.  */
+/* The messages that a view sent, and the frames of the windows that
+   the user asked to close.  */
 enum { SENT_LIMIT = 4096 };
 struct sent
 {
   struct rd_message messages[SENT_LIMIT];
   int count;
+  uint32_t closed[SENT_LIMIT];
+  int closed_count;
 };
 
 /* A frame of an example: its view, and the messages of the view.  */
@@ -64,6 +67,7 @@ static bool wait_for_size (GtkWindow *, int, int);
 static bool drag_example (void);
 static bool status_example (void);
 static bool count_example (void);
+static bool close_example (void);
 static bool title_p (const char *);
 static void remove_frame (struct example *);
 static void run_for (gint64);
@@ -78,7 +82,7 @@ static bool sent_p (const struct sent *, const struct rd_message *);
 static bool same_message_p (const struct rd_message *,
 			    const struct rd_message *);
 static void record_message (void *, const struct rd_message *);
-static void ignore_close (void *);
+static void record_close (void *, uint32_t);
 static cairo_font_face_t *find_no_font (void *, const uint8_t *, int,
 					uint32_t);
 
@@ -99,7 +103,7 @@ main (int argc, char **argv)
 		 && define_example (300, 200, 500, 350)
 		 && define_example (600, 400, 250, 180)
 		 && drag_example () && status_example ()
-		 && count_example ());
+		 && count_example () && close_example ());
   if (!passed)
     return 1;
   printf ("test-view: the examples passed\n");
@@ -261,7 +265,7 @@ start_example (uint32_t width, uint32_t height)
   example->renderer = rc_renderer_new (no_fonts);
   example->view = rc_view_new (example->renderer,
 			       (struct rc_view_functions)
-			       { ignore_close, record_message,
+			       { record_close, record_message,
 				 &example->sent });
   define_frame (example, width, height);
   gint64 end = g_get_monotonic_time () + WAIT_LIMIT;
@@ -331,6 +335,31 @@ count_example (void)
   passed = passed && rc_view_window_count (example->view) == 0;
   if (!passed)
     fprintf (stderr, "test-view: the count of the windows is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The user asks to close the window of a frame, as with the close
+   button of a window manager.  The view must give the frame to its
+   on_close function once, and must keep the window, because the
+   server decides whether to delete the frame.  */
+static bool
+close_example (void)
+{
+  struct example *example = start_example (300, 200);
+  gtk_window_close (frame_window ());
+  gint64 end = g_get_monotonic_time () + WAIT_LIMIT;
+  while (example->sent.closed_count == 0 && g_get_monotonic_time () < end)
+    if (!g_main_context_iteration (NULL, false))
+      g_usleep (1000);
+  run_for (WAIT_LIMIT / 10);
+  bool passed = (example->sent.closed_count == 1
+		 && example->sent.closed[0] == 1
+		 && rc_view_window_count (example->view) == 1
+		 && frame_window ()
+		 && gtk_widget_get_mapped (GTK_WIDGET (frame_window ())));
+  if (!passed)
+    fprintf (stderr, "test-view: a close of a window is wrong\n");
   end_example (example);
   return passed;
 }
@@ -430,11 +459,13 @@ record_message (void *data, const struct rd_message *message)
     sent->messages[sent->count++] = *message;
 }
 
-/* The on_close function of the view.  No example closes a window.  */
+/* The on_close function of the view.  DATA is the struct sent.  */
 static void
-ignore_close (void *data)
+record_close (void *data, uint32_t frame)
 {
-  (void) data;
+  struct sent *sent = data;
+  if (sent->closed_count < SENT_LIMIT)
+    sent->closed[sent->closed_count++] = frame;
 }
 
 /* The find function of a font source with no fonts.  The examples

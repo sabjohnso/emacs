@@ -25,18 +25,21 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #define REMOTE_CLIENT_VIEW_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "rdproto.h"
 #include "render.h"
 
 struct rc_view;
 
-/* The functions of a view.  The view calls ON_CLOSE when the user
-   closes a window, and SEND with each message of the input of the
-   user.  DATA is their first argument.  */
+/* The functions of a view.  The view calls ON_CLOSE with the frame of
+   a window when the user asks to close the window, and SEND with each
+   message of the input of the user.  DATA is their first argument.
+   The view keeps the window after ON_CLOSE.  It removes a window only
+   in rc_view_update, when the renderer removes the frame.  */
 struct rc_view_functions
 {
-  void (*on_close) (void *data);
+  void (*on_close) (void *data, uint32_t frame);
   void (*send) (void *data, const struct rd_message *message);
   void *data;
 };
