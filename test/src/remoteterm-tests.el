@@ -824,6 +824,380 @@ Its top agrees with the window start, within 1 pixel."
                           (if (zerop whole) 0 (/ (* start range 1.0) whole))))
                   1)))))
 
+;;;; Scroll-bar input
+
+(rd-daemon-deftest remoteterm-tests-scroll-bar-click
+  "Law S4: a press on a bar and its release give scroll-bar events.
+A press of a button that is not a wheel button, at a random row of the
+text area beside a window W, gives a down event at (W
+vertical-scroll-bar (OFFSET . RANGE) TIME PART).  OFFSET is the row
+relative to the inside top of the bar, clamped to [0, RANGE].  PART is
+the part of the drawn bar at the row.  The release of the button gives
+a click or a drag event, also if it is on the bar, in the text area of
+W, in another window, outside the frame, or in another frame.  The end
+position of that event is always on the bar of W, with an OFFSET in
+[0, RANGE].  A release in the frame of W has the OFFSET of its row."
+  (let ((rd-gen-trials 30))
+    (rd-gen-for-all
+     #'remoteterm-tests--scroll-bar-click-case
+     (lambda (case)
+       (pcase-let* (((map :events :down :range :release-offset)
+                     (rd-daemon-eval
+                      (remoteterm-tests--scroll-bar-click-form case)))
+                    (button (plist-get case :button))
+                    (`(,press ,release) events))
+         (should (= (length events) 2))
+         (should (eq (car press) (intern (format "down-mouse-%d" button))))
+         (should (equal (nth 1 press) down))
+         (should (memq (car release)
+                       (list (intern (format "mouse-%d" button))
+                             (intern (format "drag-mouse-%d" button)))))
+         (pcase-let ((`(,window ,area (,offset . ,end-range) ,_)
+                      (nth 2 release)))
+           (should (eq window 'w))
+           (should (eq area 'vertical-scroll-bar))
+           (should (= end-range range))
+           (should (<= 0 offset range))
+           (when release-offset
+             (should (= offset release-offset)))))))))
+
+(defvar remoteterm-tests--bar-time 0
+  "The time of the client of the last press on a bar.
+The time increases from trial to trial, so that two presses are never
+a double click.")
+
+(defun remoteterm-tests--scroll-bar-click-case ()
+  "Return a random case for the law of the scroll-bar click.
+The value is a plist.  :side is the side of the bars, :lines the
+number of lines of the buffer, and :start the first line in the
+windows.  The frame has two windows, one above the other.  :window is
+0 or 1, the window of the press.  :button is a button that is not a
+wheel button.  :press is (FX FY), the position of the press in the
+text-area rows of the bar, in thousandths.  :release is (KIND FX FY),
+the position of the release.  KIND is `bar', `text', `other-window',
+`outside' or `other-frame'."
+  (let ((lines (rd-gen-integer 0 200)))
+    (list :side (rd-gen-element '(left right))
+          :lines lines
+          :start (rd-gen-integer 0 lines)
+          :window (rd-gen-integer 0 1)
+          :button (rd-gen-element '(1 2 3 8 9))
+          :press (list (rd-gen-integer 0 999) (rd-gen-integer 0 999))
+          :release (list (rd-gen-element
+                          '(bar text other-window outside other-frame))
+                         (rd-gen-integer 0 999) (rd-gen-integer 0 999)))))
+
+(defun remoteterm-tests--scroll-bar-click-form (case)
+  "Return a form for the daemon that clicks on a bar as CASE says.
+CASE is as for `remoteterm-tests--scroll-bar-click-case'.  The value
+of the form is as for `remoteterm-tests--scroll-bar-click-run'."
+  (pcase-let (((map :side :lines :start) case))
+    (remoteterm-tests--frame-form
+     `((width . 40) (height . 20) (vertical-scroll-bars . ,side)
+       (foreground-color . "#000000") (background-color . "#ffffff"))
+     `(progn
+        (dotimes (line ,lines)
+          (insert (format "line %d\n" line)))
+        (insert "end")
+        (goto-char (point-min))
+        (forward-line ,start)
+        (dolist (each (list window (split-window window nil 'below)))
+          (set-window-start each (point))
+          (set-window-point each (point))))
+     `(remoteterm-tests--scroll-bar-click-run frame display output ',case))))
+
+(defun remoteterm-tests--scroll-bar-click-run (frame display output case)
+  "Send the press and the release of CASE on FRAME of DISPLAY.
+OUTPUT is the bytes of the draw of FRAME, with the foreground #000000.
+Return a plist.  :events is the summary of each mouse event, as for
+`remoteterm-tests--bar-event-summary'.  :down is the start position
+that the down event must have.  :range is the range of the bar.
+:release-offset is the offset that the release must have, or nil if
+the release is in another frame."
+  (pcase-let* (((map :window :button :press :release) case)
+               (windows (window-list frame 'never))
+               (w (nth window windows))
+               (column (remoteterm-tests--scroll-bar-column w))
+               ((map :x :width :box-top :box-bottom) column)
+               (range (max 0 (- box-bottom box-top 4 5)))
+               (press-y (+ box-top (remoteterm-tests--thousandths
+                                    (nth 1 press) (- box-bottom box-top))))
+               (other (and (eq (car release) 'other-frame)
+                           (remoteterm-tests--make-frame display nil))))
+    (cl-flet ((offset (y) (max 0 (min range (- y box-top 2))))
+              (send (frame x y press time)
+                (remote-display--input
+                 display
+                 (remote-display--encode
+                  `(button :frame ,(remoteterm-tests--frame-id frame)
+                           :time ,time :x ,x :y ,y :button ,button
+                           :modifiers 0 :press ,press)))))
+      (unwind-protect
+          (pcase-let ((`(,release-x . ,release-y)
+                       (remoteterm-tests--release-pixel
+                        release column w (car (delq w windows)) other))
+                      (time (cl-incf remoteterm-tests--bar-time 10000)))
+            (send frame (+ x (remoteterm-tests--thousandths
+                              (nth 0 press) width))
+                  press-y 1 time)
+            (send (or other frame) release-x release-y 0 (+ time 50))
+            (list :events (mapcar (lambda (event)
+                                    (remoteterm-tests--bar-event-summary
+                                     event w))
+                                  (remoteterm-tests--mouse-events-now))
+                  :down (list 'w 'vertical-scroll-bar
+                              (cons (offset press-y) range)
+                              (remoteterm-tests--bar-part
+                               output column press-y))
+                  :range range
+                  :release-offset (and (not other) (offset release-y))))
+        (when other
+          (delete-frame other))))))
+
+(defun remoteterm-tests--thousandths (fraction size)
+  "Return FRACTION thousandths of SIZE, a number in [0, SIZE)."
+  (/ (* fraction size) 1000))
+
+(defun remoteterm-tests--release-pixel (release column w other-window
+                                                other-frame)
+  "Return the pixel (X . Y) of RELEASE, a release of a click case.
+RELEASE is (KIND FX FY) as in `remoteterm-tests--scroll-bar-click-case'.
+COLUMN is the scroll-bar column of the window W.  OTHER-WINDOW is the
+other window of the frame of W.  OTHER-FRAME is the frame of the
+release, if KIND is `other-frame'."
+  (pcase-let ((`(,kind ,fx ,fy) release))
+    (cl-flet ((in-text (window)
+                (pcase-let ((`(,left ,top ,right ,bottom)
+                             (window-inside-pixel-edges window)))
+                  (cons (+ left (remoteterm-tests--thousandths
+                                 fx (- right left)))
+                        (+ top (remoteterm-tests--thousandths
+                                fy (- bottom top)))))))
+      (pcase kind
+        ('bar (pcase-let (((map :x :width :top :bottom) column))
+                (cons (+ x (remoteterm-tests--thousandths fx width))
+                      (+ top (remoteterm-tests--thousandths
+                              fy (- bottom top))))))
+        ('text (in-text w))
+        ('other-window (in-text other-window))
+        ('outside (cons (- -1 (* fx 5)) (- (* fy 5) 2500)))
+        ('other-frame (in-text (frame-root-window other-frame)))))))
+
+(defun remoteterm-tests--bar-part (output column y)
+  "Return the part of the bar of COLUMN at the row Y in the draw OUTPUT.
+The handle is the rows of the text area with the color #000000."
+  (pcase-let* (((map :top :box-top :box-bottom) column)
+               (pixels (remoteterm-tests--column-pixels output column))
+               (handle (cl-loop for row from box-top below box-bottom
+                                when (memql 0 (append (aref pixels
+                                                            (- row top))
+                                                      nil))
+                                collect row)))
+    (cond ((< y (car handle)) 'above-handle)
+          ((<= y (car (last handle))) 'handle)
+          (t 'below-handle))))
+
+(defun remoteterm-tests--mouse-events-now ()
+  "Read the mouse events that wait now, and return them in order."
+  (let ((events nil)
+        event)
+    (while (setq event (read-event nil nil 0.01))
+      (when (string-match-p "mouse-" (symbol-name (or (car-safe event)
+                                                      'none)))
+        (push event events)))
+    (nreverse events)))
+
+(defun remoteterm-tests--bar-event-summary (event w)
+  "Return the summary (SYMBOL START END) of the mouse EVENT.
+START and END are summaries of positions: (WINDOW AREA XY PART), where
+WINDOW is `w' for the window W and `other' for another window."
+  (cl-flet ((position (posn)
+              (list (if (eq (posn-window posn) w) 'w 'other)
+                    (nth 1 posn) (nth 2 posn) (nth 4 posn))))
+    (list (car event) (position (event-start event))
+          (position (event-end event)))))
+
+(defun remoteterm-tests--bar-input-session (parameters function)
+  "Call FUNCTION with a drawn frame with PARAMETERS and a second frame.
+The frames are on the display \"remote-draw\", which records its
+output, so that redisplay draws.  The arguments of
+FUNCTION are the frame, its first window, and the second frame.
+Return the value of FUNCTION."
+  (x-open-connection "remote-draw")
+  (let* ((frame (remoteterm-tests--make-frame "remote-draw" parameters))
+         (other (remoteterm-tests--make-frame "remote-draw" nil)))
+    (unwind-protect
+        (progn
+          (select-frame frame)
+          (remote-display--record "remote-draw")
+          (redisplay t)
+          (funcall function frame (frame-root-window frame) other))
+      (delete-frame frame)
+      (delete-frame other))))
+
+(defun remoteterm-tests--bar-click (frame x y button press)
+  "Send a press (PRESS is 1) or a release of BUTTON at X, Y of FRAME."
+  (remote-display--input
+   "remote-draw"
+   (remote-display--encode
+    `(button :frame ,(remoteterm-tests--frame-id frame)
+             :time ,(cl-incf remoteterm-tests--bar-time 10000)
+             :x ,x :y ,y :button ,button :modifiers 0 :press ,press))))
+
+(defun remoteterm-tests--bar-pixel (window)
+  "Return the pixel (X . Y) at the bottom of the text-area rows of the
+scroll bar of WINDOW."
+  (pcase-let (((map :x :box-bottom)
+               (remoteterm-tests--scroll-bar-column window)))
+    (cons (+ x 5) (1- box-bottom))))
+
+(defun remoteterm-tests--text-pixel (window)
+  "Return a pixel (X . Y) in the text area of WINDOW."
+  (pcase-let ((`(,left ,top . ,_) (window-inside-pixel-edges window)))
+    (cons (+ left 3) (+ top 3))))
+
+(defun remoteterm-tests--bar-scroll-case ()
+  "Click mouse-1 under the handle, run its binding, return the start.
+The value is the start of the window relative to `point-min'."
+  (remoteterm-tests--bar-input-session
+   '((width . 40) (height . 20) (vertical-scroll-bars . right))
+   (lambda (frame window _other)
+     (with-temp-buffer
+       (dotimes (line 200)
+         (insert (format "line %d\n" line)))
+       (set-window-buffer window (current-buffer))
+       (set-window-start window (point-min))
+       (redisplay t)
+       (pcase-let ((`(,x . ,y) (remoteterm-tests--bar-pixel window)))
+         (remoteterm-tests--bar-click frame x y 1 1)
+         (remoteterm-tests--bar-click frame x y 1 0))
+       (let ((release (cadr (remoteterm-tests--mouse-events-now))))
+         (call-interactively
+          (key-binding (vector 'vertical-scroll-bar (car release)))
+          nil (vector release))
+         (- (window-start window) (point-min)))))))
+
+(ert-deftest remoteterm-tests-scroll-bar-click-scrolls ()
+  "A mouse-1 click under the handle moves the window start forward.
+`scroll-bar-scroll-up' is the binding of the click."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (> (remoteterm-tests--daemon-call
+                'remoteterm-tests--bar-scroll-case)
+               0))))
+
+(defun remoteterm-tests--bar-text-click-case ()
+  "Click in the text area of a frame with bars, and return the events.
+Each event is (SYMBOL AREA PIXEL-P)."
+  (remoteterm-tests--bar-input-session
+   '((vertical-scroll-bars . left))
+   (lambda (frame window _other)
+     (pcase-let ((`(,x . ,y) (remoteterm-tests--text-pixel window)))
+       (remoteterm-tests--bar-click frame x y 1 1)
+       (remoteterm-tests--bar-click frame x y 1 0))
+     (mapcar (lambda (event)
+               (list (car event) (posn-area (event-start event))
+                     (consp (posn-x-y (event-start event)))))
+             (remoteterm-tests--mouse-events-now)))))
+
+(ert-deftest remoteterm-tests-scroll-bar-text-click ()
+  "A click in the text area of a frame with bars is a plain click."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--bar-text-click-case)
+                   '((down-mouse-1 nil t) (mouse-1 nil t))))))
+
+(defun remoteterm-tests--bar-no-layout-case ()
+  "Click on the bar of a window that redisplay did not draw yet.
+Return the mouse events."
+  (x-open-connection "remote-draw")
+  (let ((frame (remoteterm-tests--make-frame
+                "remote-draw" '((vertical-scroll-bars . right)))))
+    (remote-display--record "remote-draw")
+    (unwind-protect
+        (pcase-let ((`(,x . ,y) (remoteterm-tests--bar-pixel
+                                 (frame-root-window frame))))
+          (remoteterm-tests--bar-click frame x y 1 1)
+          (remoteterm-tests--bar-click frame x y 1 0)
+          (mapcar #'car (remoteterm-tests--mouse-events-now)))
+      (delete-frame frame))))
+
+(ert-deftest remoteterm-tests-scroll-bar-no-layout ()
+  "A button on a bar that redisplay did not draw yet gives no event."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--bar-no-layout-case)
+                   nil))))
+
+(defun remoteterm-tests--bar-deleted-frame-case ()
+  "Press on a bar, delete its frame, and release on another frame.
+Return the mouse events of each step: the press, the release, and
+then a click in the text area of the other frame."
+  (x-open-connection "remote-draw")
+  (let ((frame (remoteterm-tests--make-frame
+                "remote-draw" '((vertical-scroll-bars . right))))
+        (other (remoteterm-tests--make-frame "remote-draw" nil)))
+    (unwind-protect
+        (progn
+          (select-frame frame)
+          (remote-display--record "remote-draw")
+          (redisplay t)
+          (list
+           (pcase-let ((`(,x . ,y) (remoteterm-tests--bar-pixel
+                                    (frame-root-window frame))))
+             (remoteterm-tests--bar-click frame x y 1 1)
+             (mapcar #'car (remoteterm-tests--mouse-events-now)))
+           (progn
+             (delete-frame frame)
+             (remoteterm-tests--bar-click other 3 3 1 0)
+             (mapcar #'car (remoteterm-tests--mouse-events-now)))
+           (pcase-let ((`(,x . ,y) (remoteterm-tests--text-pixel
+                                    (frame-root-window other))))
+             (remoteterm-tests--bar-click other x y 1 1)
+             (remoteterm-tests--bar-click other x y 1 0)
+             (mapcar #'car (remoteterm-tests--mouse-events-now)))))
+      (when (frame-live-p frame)
+        (delete-frame frame))
+      (delete-frame other))))
+
+(ert-deftest remoteterm-tests-scroll-bar-deleted-frame ()
+  "A delete of the frame of a press on a bar ends the grab.
+The release after it gives no event, and a later click is plain."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--bar-deleted-frame-case)
+                   '((down-mouse-1) nil (down-mouse-1 mouse-1))))))
+
+(defun remoteterm-tests--bar-press-again-case ()
+  "Press on a bar, then press the same button in the text area and
+release it there, with no release between.  Return each mouse event
+as (SYMBOL AREA)."
+  (remoteterm-tests--bar-input-session
+   '((vertical-scroll-bars . left))
+   (lambda (frame window _other)
+     (pcase-let ((`(,bar-x . ,bar-y) (remoteterm-tests--bar-pixel window))
+                 (`(,x . ,y) (remoteterm-tests--text-pixel window)))
+       (remoteterm-tests--bar-click frame bar-x bar-y 1 1)
+       (remoteterm-tests--bar-click frame x y 1 1)
+       (remoteterm-tests--bar-click frame x y 1 0))
+     (mapcar (lambda (event)
+               (list (car event) (posn-area (event-end event))))
+             (remoteterm-tests--mouse-events-now)))))
+
+(ert-deftest remoteterm-tests-scroll-bar-press-again ()
+  "A press of the button of a grab, with no release first, ends the grab.
+The client can lose a release.  The next press is then a plain press,
+and its release is a plain click."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--bar-press-again-case)
+                   '((down-mouse-1 vertical-scroll-bar) (down-mouse-1 nil)
+                     (mouse-1 nil))))))
+
 (ert-deftest remoteterm-tests-display-pixel-size ()
   "The size of a display is the size of the largest frame of its session."
   (skip-unless (featurep 'remote-test))

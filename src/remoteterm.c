@@ -1380,13 +1380,15 @@ remote_delete_frame (struct frame *f)
 }
 
 /* Remove F from the mouse state of DPYINFO: the frame of the last
-   motion, and the frame of the mouse highlight.  */
+   motion, the frame of the mouse highlight, and the frame of the
+   scroll-bar grab.  */
 static void
 remote_forget_mouse_frame (struct remote_display_info *dpyinfo,
 			   struct frame *f)
 {
   if (dpyinfo->last_mouse_motion_frame == f)
     dpyinfo->last_mouse_motion_frame = NULL;
+  remote_scroll_bar_forget_frame (&dpyinfo->scroll_bar_grab, f);
   if (dpyinfo->mouse_highlight.mouse_face_mouse_frame == f)
     reset_mouse_highlight (&dpyinfo->mouse_highlight);
 }

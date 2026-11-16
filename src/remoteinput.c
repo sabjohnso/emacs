@@ -31,7 +31,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
    A button message gives a MOUSE_CLICK_EVENT, and keyboard.c makes
    the click, drag, and double click events from the presses and the
-   releases.  The wheel buttons of rdproto.h are those of X: a press
+   releases.  A press on a vertical scroll bar, and the release of
+   that button, give scroll-bar click events instead (remotescroll.c).
+   The wheel buttons of rdproto.h are those of X: a press
    gives a wheel event, and a release gives none.  A motion message
    records the position of the mouse in the session, for the
    mouse_position_hook, and updates the mouse highlight.  As in
@@ -107,6 +109,8 @@ static bool remote_frame_pixels_p (uint32_t);
 static void remote_wheel_event (struct frame *, const struct rd_button *,
 				const struct remote_wheel *);
 static void remote_click_event (struct frame *, const struct rd_button *);
+static struct remote_scroll_bar_button remote_bar_button
+  (struct frame *, const struct rd_button *);
 static const struct remote_wheel *remote_wheel_of (uint8_t);
 static void remote_clear_mouse_moved (struct remote_display_info *);
 static void remote_set_position (struct input_event *, struct frame *,
@@ -169,8 +173,11 @@ remote_key_input (struct remote_display_info *dpyinfo,
   kbd_buffer_store_event (&ie);
 }
 
-/* Store the click or the wheel event of the button MESSAGE for its
-   frame of DPYINFO.  The button 0 is not a button.  */
+/* Store the event of the button MESSAGE for its frame of DPYINFO.
+   First, a button in a tip frame goes to the parent of the tip
+   (remote_input_target).  Then the release of the button of a
+   scroll-bar grab comes first, then a press on a scroll bar, then a
+   wheel button, and then a click.  The button 0 is not a button.  */
 static void
 remote_button_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
@@ -180,7 +187,12 @@ remote_button_input (struct remote_display_info *dpyinfo,
   if (!f || button.button == 0)
     return;
   remote_input_target (&f, &button.x, &button.y);
+  struct remote_scroll_bar_grab *grab = &dpyinfo->scroll_bar_grab;
+  struct remote_scroll_bar_button bar_button = remote_bar_button (f, &button);
   const struct remote_wheel *wheel = remote_wheel_of (button.button);
+  if (remote_scroll_bar_grab_release (grab, &bar_button)
+      || (!wheel && remote_scroll_bar_press (grab, &bar_button)))
+    return;
   if (!wheel)
     remote_click_event (f, &button);
   else if (button.press)
@@ -408,6 +420,20 @@ remote_click_event (struct frame *f, const struct rd_button *button)
   ie.modifiers = (remote_emacs_modifiers (button->modifiers)
 		  | (button->press ? down_modifier : up_modifier));
   kbd_buffer_store_event (&ie);
+}
+
+/* Return BUTTON in F as a button of a scroll bar.  */
+static struct remote_scroll_bar_button
+remote_bar_button (struct frame *f, const struct rd_button *button)
+{
+  return (struct remote_scroll_bar_button)
+    { .frame = f,
+      .x = button->x,
+      .y = button->y,
+      .code = button->button - 1,
+      .press = button->press,
+      .modifiers = remote_emacs_modifiers (button->modifiers),
+      .time = button->time };
 }
 
 /* The wheel buttons.  */

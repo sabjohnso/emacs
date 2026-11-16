@@ -31,13 +31,29 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    The bar has the rows of the text area.  The other rows of the
    scroll-bar column are beside the tab line, the header line and the
    mode line.  These are full-width rows, so the draw of these lines
-   covers the column, and the bar does not fill them.  */
+   covers the column, and the bar does not fill them.
+
+   The hook keeps its arguments in the vertical_scroll_bar slot of the
+   window, so the input can find the parts of the bar again.  No other
+   code of Emacs uses that slot when the condemn, redeem and judge
+   hooks are NULL.  A window that redisplay did not draw yet has no
+   such arguments.
+
+   A press on a bar gives a scroll-bar click event, and starts the
+   grab of the session.  While the grab holds, the release of its
+   button gives a scroll-bar click event for the window of the press,
+   wherever the pointer is.  This is the implicit grab of X.  Without
+   it, keyboard.c makes a drag from the bar to a pixel position, and
+   scroll-bar.el cannot use that position.  The grab keeps the press
+   position, and no window, so the garbage collector does not need to
+   know it.  */
 
 #include <config.h>
 
 #include "lisp.h"
 #include "dispextern.h"
 #include "frame.h"
+#include "keyboard.h"
 #include "termhooks.h"
 #include "window.h"
 #include "rdscrollbar.h"
@@ -51,8 +67,28 @@ verify ((int) RD_SCROLL_BAR_ABOVE_HANDLE == scroll_bar_above_handle);
 verify ((int) RD_SCROLL_BAR_HANDLE == scroll_bar_handle);
 verify ((int) RD_SCROLL_BAR_BELOW_HANDLE == scroll_bar_below_handle);
 
+/* The arguments of rd_scroll_bar_layout that a window keeps, as the
+   indexes of a vector.  */
+enum
+  {
+    LAYOUT_TOP,
+    LAYOUT_HEIGHT,
+    LAYOUT_WIDTH,
+    LAYOUT_PORTION,
+    LAYOUT_WHOLE,
+    LAYOUT_POSITION,
+    LAYOUT_SIZE
+  };
+
 static void draw_bar (struct frame *, int, int, int,
 		      const struct rd_scroll_bar_layout *);
+static void keep_layout (struct window *, const int[LAYOUT_SIZE]);
+static bool kept_layout (struct window *, struct rd_scroll_bar_layout *);
+static struct rd_scroll_bar_layout layout_of (const int[LAYOUT_SIZE]);
+static struct window *bar_window_at (struct frame *, int, int);
+static void store_click (struct window *,
+			 const struct rd_scroll_bar_layout *,
+			 const struct remote_scroll_bar_button *);
 
 void
 remote_set_vertical_scroll_bar (struct window *w, int portion, int whole,
@@ -63,10 +99,55 @@ remote_set_vertical_scroll_bar (struct window *w, int portion, int whole,
   int width = WINDOW_SCROLL_BAR_AREA_WIDTH (w);
   int box_top, box_height;
   window_box (w, ANY_AREA, NULL, &box_top, NULL, &box_height);
-  struct rd_scroll_bar_layout layout
-    = rd_scroll_bar_layout (box_top, box_height, width, portion, whole,
-			    position);
+  int args[LAYOUT_SIZE] = { box_top, box_height, width, portion, whole,
+			   position };
+  keep_layout (w, args);
+  struct rd_scroll_bar_layout layout = layout_of (args);
   draw_bar (f, left, width, box_height, &layout);
+}
+
+bool
+remote_scroll_bar_grab_release (struct remote_scroll_bar_grab *grab,
+				const struct remote_scroll_bar_button *button)
+{
+  if (!grab->held || button->code != grab->code)
+    return false;
+  grab->held = false;
+  if (button->press)
+    return false;
+  struct window *w = (grab->frame
+		      ? bar_window_at (grab->frame, grab->x, grab->y)
+		      : NULL);
+  struct rd_scroll_bar_layout layout;
+  if (w && kept_layout (w, &layout))
+    store_click (w, &layout, button);
+  return true;
+}
+
+bool
+remote_scroll_bar_press (struct remote_scroll_bar_grab *grab,
+			 const struct remote_scroll_bar_button *button)
+{
+  struct window *w = bar_window_at (button->frame, button->x, button->y);
+  if (!w || !button->press)
+    return false;
+  struct rd_scroll_bar_layout layout;
+  if (kept_layout (w, &layout))
+    {
+      *grab = (struct remote_scroll_bar_grab)
+	{ .held = true, .frame = button->frame, .x = button->x,
+	  .y = button->y, .code = button->code };
+      store_click (w, &layout, button);
+    }
+  return true;
+}
+
+void
+remote_scroll_bar_forget_frame (struct remote_scroll_bar_grab *grab,
+				struct frame *f)
+{
+  if (grab->frame == f)
+    grab->frame = NULL;
 }
 
 /* Draw the bar LAYOUT at LEFT on F, with the size WIDTH, HEIGHT: the
@@ -81,4 +162,81 @@ draw_bar (struct frame *f, int left, int width, int height,
 		    FRAME_BACKGROUND_PIXEL (f));
   remote_fill_area (f, left + handle->x, handle->y, handle->width,
 		    handle->height, FRAME_FOREGROUND_PIXEL (f));
+}
+
+/* Keep ARGS, the arguments of the layout of the bar of W, in W.  Use
+   the vector that W has, if it has one.  */
+static void
+keep_layout (struct window *w, const int args[LAYOUT_SIZE])
+{
+  Lisp_Object kept = w->vertical_scroll_bar;
+  if (!(VECTORP (kept) && ASIZE (kept) == LAYOUT_SIZE))
+    {
+      kept = make_nil_vector (LAYOUT_SIZE);
+      wset_vertical_scroll_bar (w, kept);
+    }
+  for (int i = 0; i < LAYOUT_SIZE; i++)
+    ASET (kept, i, make_fixnum (args[i]));
+}
+
+/* Set *LAYOUT to the layout of the bar of W from the arguments that W
+   keeps, and return true.  Return false if W keeps no arguments.  */
+static bool
+kept_layout (struct window *w, struct rd_scroll_bar_layout *layout)
+{
+  Lisp_Object kept = w->vertical_scroll_bar;
+  if (!(VECTORP (kept) && ASIZE (kept) == LAYOUT_SIZE))
+    return false;
+  int args[LAYOUT_SIZE];
+  for (int i = 0; i < LAYOUT_SIZE; i++)
+    args[i] = XFIXNUM (AREF (kept, i));
+  *layout = layout_of (args);
+  return true;
+}
+
+/* Return the layout of a bar with the arguments ARGS.  */
+static struct rd_scroll_bar_layout
+layout_of (const int args[LAYOUT_SIZE])
+{
+  return rd_scroll_bar_layout (args[LAYOUT_TOP], args[LAYOUT_HEIGHT],
+			       args[LAYOUT_WIDTH], args[LAYOUT_PORTION],
+			       args[LAYOUT_WHOLE], args[LAYOUT_POSITION]);
+}
+
+/* Return the window whose vertical scroll bar is at X, Y of F, or NULL
+   if no bar is there.  */
+static struct window *
+bar_window_at (struct frame *f, int x, int y)
+{
+  enum window_part part;
+  Lisp_Object window = window_from_coordinates (f, x, y, &part, false,
+						false, false);
+  return (WINDOWP (window) && part == ON_VERTICAL_SCROLL_BAR
+	  ? XWINDOW (window) : NULL);
+}
+
+/* Store the scroll-bar click event of BUTTON on the bar LAYOUT of W,
+   as x_scroll_bar_handle_click of xterm.c does.  The x of the event is
+   the offset of BUTTON in the bar, and the y is the range of the
+   bar.  */
+static void
+store_click (struct window *w, const struct rd_scroll_bar_layout *layout,
+	     const struct remote_scroll_bar_button *button)
+{
+  int offset, range;
+  enum rd_scroll_bar_part part = rd_scroll_bar_hit (layout, button->y,
+						    &offset, &range);
+  struct input_event ie;
+  EVENT_INIT (ie);
+  ie.kind = SCROLL_BAR_CLICK_EVENT;
+  ie.code = button->code;
+  ie.modifiers = (button->modifiers
+		  | (button->press ? down_modifier : up_modifier));
+  XSETWINDOW (ie.frame_or_window, w);
+  ie.arg = Qnil;
+  ie.timestamp = button->time;
+  ie.part = (enum scroll_bar_part) part;
+  XSETINT (ie.x, offset);
+  XSETINT (ie.y, range);
+  kbd_buffer_store_event (&ie);
 }

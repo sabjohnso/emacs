@@ -34,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "rdchunk.h"
 #include "remotemenu.h"
+#include "remotescroll.h"
 
 struct rd_message;
 struct remote_font_transfer;
@@ -141,6 +142,9 @@ struct remote_display_info
 
   /* The popup menu of this session.  See remotemenu.c.  */
   struct remote_menu_state menu;
+
+  /* The grab of a press on a scroll bar.  See remotescroll.c.  */
+  struct remote_scroll_bar_grab scroll_bar_grab;
 };
 
 /* The list of all sessions.  The generic code uses this name.  */
