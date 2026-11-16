@@ -118,6 +118,7 @@ static void remote_send_draw (struct frame *, const struct rd_message *);
 static void remote_define_frame (struct frame *);
 static void remote_forget_frames (struct remote_display_info *);
 static void remote_send_delete_frame (struct frame *);
+static void remote_update_end (struct frame *);
 static void remote_flush_frame (struct frame *);
 static void remote_frame_up_to_date (struct frame *);
 static void remote_clear_glyph_string (struct glyph_string *);
@@ -660,12 +661,24 @@ remote_forget_frames (struct remote_display_info *dpyinfo)
     }
 }
 
+/* End the update of F.  This is the update_end_hook.  Let a motion
+   change the mouse highlight again, as x_update_end does: the start of
+   the update of a window of the mouse frame stops it
+   (gui_update_window_begin).  Then send the messages of the update to
+   the client.  */
+static void
+remote_update_end (struct frame *f)
+{
+  FRAME_DISPLAY_INFO (f)->mouse_highlight.mouse_face_defer = false;
+  remote_flush_frame (f);
+}
+
 /* Tell the sink of F that the messages so far form a whole, and must
-   go to the client.  This is the update_end_hook, and the flush_display
-   hook of the redisplay interface.  Both are necessary: redisplay calls
-   the second one only for the selected frame, and it calls it for
-   messages outside an update.  First send the image IDs that the
-   client must forget.  */
+   go to the client.  remote_update_end calls this, and this is the
+   flush_display hook of the redisplay interface.  Both are necessary:
+   redisplay calls the second one only for the selected frame, and it
+   calls it for messages outside an update.  First send the image IDs
+   that the client must forget.  */
 static void
 remote_flush_frame (struct frame *f)
 {
@@ -2333,7 +2346,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->mouse_position_hook = remote_mouse_position;
   terminal->frame_rehighlight_hook = remote_frame_rehighlight_hook;
   terminal->update_begin_hook = remote_no_op_frame;
-  terminal->update_end_hook = remote_flush_frame;
+  terminal->update_end_hook = remote_update_end;
   terminal->clear_frame_hook = remote_no_op_frame;
   terminal->frame_up_to_date_hook = remote_frame_up_to_date;
   terminal->delete_frame_hook = remote_delete_frame;
@@ -2358,6 +2371,9 @@ syms_of_remoteterm (void)
 	   (int) countof (remote_frame_parm_handlers), frame_parm_count);
 
   DEFSYM (Qtrue_color, "true-color");
+  /* The frame parameter of a frame that is transparent to input: see
+     remoteinput.c.  */
+  DEFSYM (Qremote_tip, "remote-tip");
 
   remote_display_name_list = Qnil;
   staticpro (&remote_display_name_list);

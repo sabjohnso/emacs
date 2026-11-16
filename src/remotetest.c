@@ -302,6 +302,17 @@ DEFUN ("remote-display--mouse-frame", Fremote_display__mouse_frame,
   return remote_frame_or_nil (dpyinfo->mouse_highlight.mouse_face_mouse_frame);
 }
 
+DEFUN ("remote-display--mouse-face-window",
+       Fremote_display__mouse_face_window,
+       Sremote_display__mouse_face_window, 1, 1, 0,
+       doc: /* Return the window with the mouse highlight of DISPLAY.
+Return nil if no window has the mouse highlight.  */)
+  (Lisp_Object display)
+{
+  struct remote_display_info *dpyinfo = check_x_display_info (display);
+  return dpyinfo->mouse_highlight.mouse_face_window;
+}
+
 DEFUN ("remote-display--clear-area", Fremote_display__clear_area,
        Sremote_display__clear_area, 5, 5, 0,
        doc: /* Call the clear hook of FRAME with X, Y, WIDTH, and HEIGHT.
@@ -684,6 +695,7 @@ syms_of_remotetest (void)
   defsubr (&Sremote_display__focus_frames);
   defsubr (&Sremote_display__focus);
   defsubr (&Sremote_display__mouse_frame);
+  defsubr (&Sremote_display__mouse_face_window);
   defsubr (&Sremote_display__clear_area);
   defsubr (&Sremote_display__scroll_run);
   defsubr (&Sremote_display__draw_fringe);

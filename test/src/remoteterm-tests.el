@@ -320,6 +320,7 @@
 (declare-function remote-display--live-sinks "remotetest.c" ())
 (declare-function remote-display--malloc-used "remotetest.c" ())
 (declare-function remote-display--mouse-frame "remotetest.c" (display))
+(declare-function remote-display--mouse-face-window "remotetest.c" (display))
 (declare-function remote-display--record "remotetest.c" (display))
 (declare-function remote-display--scroll-run "remotetest.c"
                   (window current-y desired-y height))
@@ -8041,6 +8042,218 @@ of the mouse highlight of the session."
     (should (equal (remoteterm-tests--daemon-call
                     'remoteterm-tests--track-mouse-case)
                    '(mouse-movement t (11 . 7) nil)))))
+
+;;;; Help events and tip frames
+
+;; A motion message gives a help event when the help text under the
+;; mouse is not nil, or was not nil before, as in pgtkterm.c.  A frame
+;; with the parameter `remote-tip' is transparent to input: its
+;; parent gets each motion, button and wheel input at the same place.
+
+(defconst remoteterm-tests--help "The help"
+  "The `help-echo' text of the tests of help events.")
+
+(defmacro remoteterm-tests--with-help-root (root &rest body)
+  "Bind ROOT to a new root frame that shows a help text, and evaluate BODY.
+ROOT is as in `remoteterm-tests--with-place-root'.  Its window shows
+the buffer of `remoteterm-tests--help-buffer'."
+  (declare (indent 1))
+  `(remoteterm-tests--with-place-root ,root
+     (let ((buffer (remoteterm-tests--help-buffer)))
+       (unwind-protect
+           (progn
+             (select-frame ,root)
+             (set-window-buffer (frame-first-window ,root) buffer)
+             (redisplay t)
+             ,@body)
+         (kill-buffer buffer)))))
+
+(rd-daemon-deftest remoteterm-tests-help-on-motion
+  "A motion over a text with a `help-echo' shows the help (law H1).
+A motion over a plain text after it calls `show-help-function' with
+nil, so the help goes away."
+  (remoteterm-tests--with-help-root root
+    (let ((rd-gen-trials 20))
+      (rd-gen-for-all
+       (lambda () (list (rd-gen-integer 0 39) (rd-gen-integer 0 4)
+                        (rd-gen-integer 1 10)))
+       (pcase-lambda (`(,column ,plain-column ,plain-line))
+         (should (equal (remoteterm-tests--helps-of-motions
+                         (list (remoteterm-tests--cell-point root column 0)
+                               (remoteterm-tests--cell-point
+                                root plain-column plain-line)))
+                        (list remoteterm-tests--help nil))))))))
+
+(rd-daemon-deftest remoteterm-tests-motion-into-child-clears-highlight
+  "A motion from a frame into its child clears the mouse highlight (law H2)."
+  (remoteterm-tests--with-help-root root
+    (let ((child (remoteterm-tests--plain-child root '((left . 30)
+                                                      (top . 20))))
+          (rd-gen-trials 10))
+      (rd-gen-for-all
+       (lambda () (list (rd-gen-integer 0 39) (rd-gen-integer 0 20)
+                        (rd-gen-integer 0 20)))
+       (pcase-lambda (`(,column ,x ,y))
+         (remoteterm-tests--helps-of-motions
+          (list (remoteterm-tests--cell-point root column 0)))
+         (should (eq (remote-display--mouse-face-window
+                      remoteterm-tests--place-display)
+                     (frame-first-window root)))
+         (remoteterm-tests--helps-of-motions (list (list child x y)))
+         (should-not (remote-display--mouse-face-window
+                      remoteterm-tests--place-display)))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-transparent
+  "A tip frame is transparent to input (law H3).
+For a child T of R with the parameter `remote-tip', a motion, button or
+wheel input for T at X, Y has the effect of the same input for R at
+X + left of T, Y + top of T.  A sum outside the range of int32 stops at
+the limit of the range."
+  (remoteterm-tests--with-help-root root
+    (let* ((tip (remoteterm-tests--plain-child root '((remote-tip . t)
+                                                     (left . 30)
+                                                     (top . 20))))
+           (position (frame-position tip))
+           (time 0)
+           (rd-gen-trials 40))
+      (rd-gen-for-all
+       #'remoteterm-tests--tip-input
+       (pcase-lambda (`(,kind ,x ,y))
+         (should (equal (remoteterm-tests--input-effect
+                         tip kind x y (cl-incf time 10000))
+                        (remoteterm-tests--input-effect
+                         root kind
+                         (remoteterm-tests--int32 (+ x (car position)))
+                         (remoteterm-tests--int32 (+ y (cdr position)))
+                         (cl-incf time 10000)))))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-keeps-help
+  "A motion in a tip over the help text of its parent keeps the help (law H4).
+Thus `tooltip-show-help' does not hide the tip when the mouse moves
+onto it."
+  (remoteterm-tests--with-help-root root
+    (let* ((start (remoteterm-tests--cell-point root 2 0))
+           (width (frame-char-width root))
+           (height (frame-char-height root))
+           (tip (remoteterm-tests--plain-child
+                 root `((remote-tip . t)
+                        (left . ,(- (nth 1 start) (/ width 2)))
+                        (top . ,(- (nth 2 start) (/ height 2))))))
+           (rd-gen-trials 20))
+      (rd-gen-for-all
+       (lambda () (list (rd-gen-integer 0 (1- (* 8 width)))
+                        (rd-gen-integer 0 (1- height))))
+       (pcase-lambda (`(,x ,y))
+         (should (equal (last (remoteterm-tests--helps-of-motions
+                               (list (remoteterm-tests--cell-point root 0 5)
+                                     (remoteterm-tests--cell-point root 0 0)
+                                     (list tip x y)))
+                              2)
+                        (list remoteterm-tests--help
+                              remoteterm-tests--help))))))))
+
+(defun remoteterm-tests--help-buffer ()
+  "Return a new buffer with a help text on line 0 and plain text after it.
+Line 0 has 40 characters with the `help-echo' `remoteterm-tests--help'
+and a `mouse-face'.  Each of the next 10 lines has the text \"plain\"."
+  (let ((buffer (generate-new-buffer "remote-help")))
+    (with-current-buffer buffer
+      (insert (propertize (make-string 40 ?h)
+                          'help-echo remoteterm-tests--help
+                          'mouse-face 'highlight)
+              "\n")
+      (dotimes (_ 10)
+        (insert "plain\n")))
+    buffer))
+
+(defun remoteterm-tests--plain-child (parent parameters)
+  "Make a visible child frame of PARENT with PARAMETERS, and return it.
+Its window shows an empty buffer, so it has no help text.  Redisplay
+the frames."
+  (let ((child (remoteterm-tests--place-child parent parameters)))
+    (set-window-buffer (frame-first-window child)
+                       (get-buffer-create " remote-empty"))
+    (redisplay t)
+    child))
+
+(defun remoteterm-tests--cell-point (frame column line)
+  "Return (FRAME X Y), the middle of a cell of the first window of FRAME.
+The cell is at COLUMN and LINE of the text area."
+  (let ((edges (window-inside-pixel-edges (frame-first-window frame)))
+        (width (frame-char-width frame))
+        (height (frame-char-height frame)))
+    (list frame
+          (+ (nth 0 edges) (* column width) (/ width 2))
+          (+ (nth 1 edges) (* line height) (/ height 2)))))
+
+(defun remoteterm-tests--helps-of-motions (points)
+  "Send a motion message to each of POINTS, and return the helps.
+Each point is (FRAME X Y).  The value is the list of the arguments of
+each call of `show-help-function', with no text properties."
+  (let* ((helps nil)
+         (show-help-function
+          (lambda (help)
+            (push (and help (substring-no-properties help)) helps))))
+    (pcase-dolist (`(,frame ,x ,y) points)
+      (remoteterm-tests--input frame 'motion x y 5)
+      (remoteterm-tests--handle-events))
+    (nreverse helps)))
+
+(defun remoteterm-tests--input (frame type x y time &rest fields)
+  "Give the session of FRAME a TYPE message for FRAME at X, Y and TIME.
+FIELDS are the other fields of the message, as a plist."
+  (remote-display--input
+   (terminal-name (frame-terminal frame))
+   (remote-display--encode
+    `(,type :frame ,(remoteterm-tests--frame-id frame) :time ,time
+            :x ,x :y ,y ,@fields))))
+
+(defun remoteterm-tests--handle-events ()
+  "Read the events of Emacs until no event comes.
+`read-event' calls `show-help-function' for each help event."
+  (while (read-event nil nil 0.05)))
+
+(defun remoteterm-tests--tip-input ()
+  "Return a random input for a tip frame: (KIND X Y).
+KIND is `motion', `button' or `wheel'.  X and Y are often from 0 to
+39, in the tip or near it, and sometimes at a limit of int32."
+  (cl-flet ((coordinate ()
+              (if (zerop (rd-gen-random 4))
+                  (rd-gen-int32)
+                (rd-gen-integer 0 39))))
+    (list (rd-gen-element '(motion button wheel))
+          (coordinate) (coordinate))))
+
+(defun remoteterm-tests--input-effect (frame kind x y time)
+  "Give FRAME the input KIND at X, Y and TIME, and return its effect.
+For `motion', the effect is the mouse position.  For `button', it is
+the summaries of the events of a press and a release of button 1.  For
+`wheel', it is the summary of the event of a press of button 4."
+  (pcase kind
+    ('motion
+     (remoteterm-tests--input frame 'motion x y time)
+     (mouse-pixel-position))
+    ('button
+     (dolist (press '(1 0))
+       (remoteterm-tests--input frame 'button x y time
+                                :button 1 :modifiers 0 :press press))
+     (mapcar #'remoteterm-tests--position-summary
+             (remoteterm-tests--read-events 2)))
+    ('wheel
+     (remoteterm-tests--input frame 'button x y time
+                              :button 4 :modifiers 0 :press 1)
+     (mapcar #'remoteterm-tests--position-summary
+             (remoteterm-tests--read-events 1)))))
+
+(defun remoteterm-tests--position-summary (event)
+  "Return the type, the window, the area and the position of EVENT."
+  (let ((position (event-start event)))
+    (list (event-basic-type event) (posn-window position)
+          (posn-area position) (posn-x-y position))))
+
+(defun remoteterm-tests--int32 (n)
+  "Return N, or the limit of the range of int32 that is nearest to N."
+  (max (- (ash 1 31)) (min n (1- (ash 1 31)))))
 
 ;;;; Focus and size input
 

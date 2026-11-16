@@ -34,7 +34,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    releases.  The wheel buttons of rdproto.h are those of X: a press
    gives a wheel event, and a release gives none.  A motion message
    records the position of the mouse in the session, for the
-   mouse_position_hook, and updates the mouse highlight.
+   mouse_position_hook, and updates the mouse highlight.  As in
+   pgtkterm.c, it gives a help event when the help text under the mouse
+   is not nil, or was not nil before, so `show-help-function' can show
+   or hide a tooltip.
+
+   A frame with the frame parameter `remote-tip' is transparent to the
+   input of the mouse: its parent gets each button and motion message
+   at the same place.  Thus a tooltip in a child frame does not hide
+   the text under it from the mouse, and the help does not change when
+   the mouse goes onto the tooltip.  The parameter is not f->tooltip,
+   because generic code treats a frame with f->tooltip as a frame that
+   is not in the frame list.
 
    A focus message gives its frame the focus of the session, or takes
    the focus from it.  Emacs sees each change as a focus-out event of
@@ -78,6 +89,10 @@ static void remote_button_input (struct remote_display_info *,
 				 const struct rd_message *);
 static void remote_motion_input (struct remote_display_info *,
 				 const struct rd_message *);
+static void remote_input_target (struct frame **, int32_t *, int32_t *);
+static struct frame *remote_tip_parent (struct frame *);
+static int32_t remote_add_offset (int32_t, int);
+static void remote_note_mouse (struct frame *, int32_t, int32_t);
 static void remote_focus_input (struct remote_display_info *,
 				const struct rd_message *);
 static void remote_resize_input (struct remote_display_info *,
@@ -159,33 +174,85 @@ static void
 remote_button_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
 {
-  const struct rd_button *button = &message->u.button;
-  struct frame *f = remote_frame_of_id (dpyinfo, button->frame);
-  if (!f || button->button == 0)
+  struct rd_button button = message->u.button;
+  struct frame *f = remote_frame_of_id (dpyinfo, button.frame);
+  if (!f || button.button == 0)
     return;
-  const struct remote_wheel *wheel = remote_wheel_of (button->button);
+  remote_input_target (&f, &button.x, &button.y);
+  const struct remote_wheel *wheel = remote_wheel_of (button.button);
   if (!wheel)
-    remote_click_event (f, button);
-  else if (button->press)
-    remote_wheel_event (f, button, wheel);
+    remote_click_event (f, &button);
+  else if (button.press)
+    remote_wheel_event (f, &button, wheel);
 }
 
 /* Record the mouse position of the motion MESSAGE in DPYINFO, and
-   update the mouse highlight of its frame.  */
+   update the mouse highlight and the help of its frame.  */
 static void
 remote_motion_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
 {
-  const struct rd_motion *motion = &message->u.motion;
-  struct frame *f = remote_frame_of_id (dpyinfo, motion->frame);
+  struct rd_motion motion = message->u.motion;
+  struct frame *f = remote_frame_of_id (dpyinfo, motion.frame);
   if (!f)
     return;
+  remote_input_target (&f, &motion.x, &motion.y);
   dpyinfo->last_mouse_motion_frame = f;
-  dpyinfo->last_mouse_motion_x = motion->x;
-  dpyinfo->last_mouse_motion_y = motion->y;
-  dpyinfo->last_mouse_movement_time = motion->time;
+  dpyinfo->last_mouse_motion_x = motion.x;
+  dpyinfo->last_mouse_motion_y = motion.y;
+  dpyinfo->last_mouse_movement_time = motion.time;
   f->mouse_moved = true;
-  note_mouse_highlight (f, motion->x, motion->y);
+  remote_note_mouse (f, motion.x, motion.y);
+}
+
+/* Change *F, *X and *Y to the frame and the position that get the
+   mouse input at *X, *Y in *F.  While *F is a tip frame with a parent,
+   the parent gets the input, at the position in the parent.  */
+static void
+remote_input_target (struct frame **f, int32_t *x, int32_t *y)
+{
+  struct frame *parent;
+  while ((parent = remote_tip_parent (*f)))
+    {
+      *x = remote_add_offset (*x, (*f)->left_pos);
+      *y = remote_add_offset (*y, (*f)->top_pos);
+      *f = parent;
+    }
+}
+
+/* Return the parent of F if F has the frame parameter `remote-tip'.
+   Return NULL if F has no parent or no such parameter.  */
+static struct frame *
+remote_tip_parent (struct frame *f)
+{
+  return (NILP (get_frame_param (f, Qremote_tip)) ? NULL
+	  : FRAME_PARENT_FRAME (f));
+}
+
+/* Return VALUE + OFFSET, or the limit of int32_t that is nearest to
+   it.  A client can send each value of int32_t.  */
+static int32_t
+remote_add_offset (int32_t value, int offset)
+{
+  return clip_to_bounds (INT32_MIN, (intmax_t) value + offset, INT32_MAX);
+}
+
+/* Update the mouse highlight of F for the mouse at X, Y.  Store a help
+   event if the help text under the mouse is not nil, or was not nil
+   before, as pgtkterm.c does.  */
+static void
+remote_note_mouse (struct frame *f, int32_t x, int32_t y)
+{
+  previous_help_echo_string = help_echo_string;
+  help_echo_string = Qnil;
+  note_mouse_highlight (f, x, y);
+  if (!NILP (help_echo_string) || !NILP (previous_help_echo_string))
+    {
+      Lisp_Object frame;
+      XSETFRAME (frame, f);
+      gen_help_event (help_echo_string, frame, help_echo_window,
+		      help_echo_object, help_echo_pos);
+    }
 }
 
 /* Give the frame of the focus MESSAGE the focus of DPYINFO, or take
