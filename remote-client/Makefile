@@ -39,8 +39,9 @@ GTK_CFLAGS = $(shell $(PKG_CONFIG) --cflags gtk+-3.0)
 GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 
 # test-reconnect asks a window of the program to close through X, as a
-# window manager does.
-X11_LIBS = $(shell $(PKG_CONFIG) --libs x11)
+# window manager does, and sends keys to a menu of the program through
+# the XTEST extension.
+X11_LIBS = $(shell $(PKG_CONFIG) --libs x11 xtst)
 
 RENDER_OBJS = render.o images.o table.o rdproto.o rdchunk.o rdpng.o
 READER_OBJS = reader.o rdproto.o
@@ -51,6 +52,7 @@ CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   listenspec.o rdchunk.o \
   images.o rdpng.o \
   stack.o compose.o \
+  menu.o \
   sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \

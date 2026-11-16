@@ -280,6 +280,12 @@ rc_view_hide_menu (struct rc_view *view, uint32_t serial)
     close_menu (view);
 }
 
+void
+rc_view_close_menu (struct rc_view *view)
+{
+  close_menu (view);
+}
+
 int
 rc_view_window_count (const struct rc_view *view)
 {

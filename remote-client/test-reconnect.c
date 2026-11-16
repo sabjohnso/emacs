@@ -66,6 +66,17 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      the program connects again, a child frame that the server does
      not place again does not show.  The test reads the pixels of the
      window through X.
+   - Menu choice: the program shows the menu of the menu-item and
+     show-menu messages.  The keys Down and Return select its first
+     item, and the program sends the menu-choice message of that item.
+     A show-menu message with no entries gives a dismissal at once.
+   - Menu cancel: the key Escape closes the menu, and the program
+     sends a dismissal.
+   - Menu hide: a hide-menu message closes the menu, and the program
+     sends no choice.
+   - Menu loss: the loss of the connection closes the menu, and the
+     program sends no choice on the next connection.
+     The menu examples send keys through the XTEST extension of X.
    - Usage: a timeout that is not a number, or that is less than
      RC_LINK_PINGS_PER_TIMEOUT, makes the program exit with the
      status 1.  */
@@ -89,6 +100,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
+#include <X11/extensions/XTest.h>
 
 #include <glib.h>
 #include <gtk/gtk.h>
@@ -147,6 +159,17 @@ static bool send_child (int);
 static bool send_clear (int, uint32_t, uint32_t, uint32_t, uint32_t);
 static bool wait_for_color (pid_t, int, int, uint32_t);
 static uint32_t window_pixel (Display *, Window, int, int);
+static bool menu_choice_example (void);
+static bool menu_cancel_example (void);
+static bool menu_hide_example (void);
+static bool menu_loss_example (void);
+static bool send_menu (int, uint32_t);
+static bool send_show_menu (int, uint32_t);
+static bool wait_for_choice (int, int, uint32_t, bool, uint32_t);
+static bool read_choice (int, int, struct rd_menu_choice *);
+static bool menu_shows (bool);
+static bool menu_window_p (Display *);
+static bool press_keys (const KeySym *, int);
 static char *make_text (size_t, char);
 static pid_t start_clipboard_owner (const char *);
 static bool send_clipboard (int, uint32_t, const char *);
@@ -202,6 +225,10 @@ static const struct
     { "font", font_example },
     { "clipboard", clipboard_example },
     { "places", places_example },
+    { "menu choice", menu_choice_example },
+    { "menu cancel", menu_cancel_example },
+    { "menu hide", menu_hide_example },
+    { "menu loss", menu_loss_example },
     { "usage", usage_example },
   };
 
@@ -607,6 +634,238 @@ clipboard_example (void)
   free (server);
   stop_run (&run);
   return passed;
+}
+
+/* The serial of the menu of the menu examples, and the id of its
+   first item.  */
+enum { MENU = 3, FIRST_ITEM = 1 };
+
+/* The menu choice example.  */
+static bool
+menu_choice_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  static const KeySym select[] = { XK_Down, XK_Return };
+  bool passed = (send_define_frame (run.connection)
+		 && send_show_menu (run.connection, MENU + 1)
+		 && wait_for_choice (run.connection, CONNECT_LIMIT, MENU + 1,
+				     false, 0)
+		 && send_menu (run.connection, MENU) && menu_shows (true)
+		 && press_keys (select, 2)
+		 && wait_for_choice (run.connection, CONNECT_LIMIT, MENU, true,
+				     FIRST_ITEM));
+  stop_run (&run);
+  return passed;
+}
+
+/* The menu cancel example.  */
+static bool
+menu_cancel_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  static const KeySym cancel[] = { XK_Escape };
+  bool passed = (send_define_frame (run.connection)
+		 && send_menu (run.connection, MENU) && menu_shows (true)
+		 && press_keys (cancel, 1)
+		 && wait_for_choice (run.connection, CONNECT_LIMIT, MENU, false,
+				     0)
+		 && menu_shows (false));
+  stop_run (&run);
+  return passed;
+}
+
+/* The menu hide example.  After the hide, the key Escape does not
+   close a menu, so no dismissal comes.  */
+static bool
+menu_hide_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  static const KeySym cancel[] = { XK_Escape };
+  struct rd_message hide = { .type = RD_HIDE_MENU,
+			     .u.hide_menu = { .serial = MENU } };
+  struct rd_menu_choice choice;
+  bool passed = (send_define_frame (run.connection)
+		 && send_menu (run.connection, MENU) && menu_shows (true)
+		 && send_message (run.connection, &hide) && menu_shows (false)
+		 && press_keys (cancel, 1)
+		 && !read_choice (run.connection, QUIET_LIMIT, &choice));
+  stop_run (&run);
+  return passed;
+}
+
+/* The menu loss example.  The socket does not exist for a time, so the
+   menu must close at the loss, and not at the next connection.  */
+static bool
+menu_loss_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  static const KeySym cancel[] = { XK_Escape };
+  struct rd_menu_choice choice;
+  bool passed = (send_define_frame (run.connection)
+		 && send_menu (run.connection, MENU) && menu_shows (true));
+  close (run.listener);
+  unlink (run.socket);
+  shutdown (run.connection, SHUT_RDWR);
+  passed = passed && menu_shows (false);
+  run.listener = listen_at (run.socket);
+  passed = (passed && accept_next (&run) && press_keys (cancel, 1)
+	    && !read_choice (run.connection, QUIET_LIMIT, &choice)
+	    && alive_p (&run));
+  stop_run (&run);
+  return passed;
+}
+
+/* Send the entries of the menu SERIAL on the connection FD, and then
+   its show-menu message.  The menu has a title, the item FIRST_ITEM, a
+   separator, and a submenu with one item.  */
+static bool
+send_menu (int fd, uint32_t serial)
+{
+  static const struct
+  {
+    uint8_t kind;
+    uint32_t id;
+    const char *label, *key;
+  } entries[] =
+    {
+      { RD_MENU_KIND_ITEM, FIRST_ITEM, "Open", "C-o" },
+      { RD_MENU_KIND_SEPARATOR, 0, "", "" },
+      { RD_MENU_KIND_SUBMENU_START, 0, "More", "" },
+      { RD_MENU_KIND_ITEM, FIRST_ITEM + 1, "Close", "" },
+      { RD_MENU_KIND_SUBMENU_END, 0, "", "" },
+    };
+  bool sent = true;
+  for (size_t i = 0; sent && i < sizeof entries / sizeof *entries; i++)
+    {
+      struct rd_message message
+	= { .type = RD_MENU_ITEM,
+	    .u.menu_item = { .serial = serial, .kind = entries[i].kind,
+			     .flags = RD_MENU_FLAG_ENABLED,
+			     .id = entries[i].id,
+			     .nlabel = strlen (entries[i].label),
+			     .nkey = strlen (entries[i].key) } };
+      memcpy (message.u.menu_item.label, entries[i].label,
+	      message.u.menu_item.nlabel);
+      memcpy (message.u.menu_item.key, entries[i].key,
+	      message.u.menu_item.nkey);
+      sent = send_message (fd, &message);
+    }
+  return sent && send_show_menu (fd, serial);
+}
+
+/* Send the show-menu message of the menu SERIAL of FRAME, with a
+   title, on the connection FD.  */
+static bool
+send_show_menu (int fd, uint32_t serial)
+{
+  struct rd_message show
+    = { .type = RD_SHOW_MENU,
+	.u.show_menu = { .frame = FRAME, .serial = serial, .x = 10, .y = 10,
+			 .ntitle = 4 } };
+  memcpy (show.u.show_menu.title, "Menu", 4);
+  return send_message (fd, &show);
+}
+
+/* Wait at most LIMIT milliseconds for a menu-choice message on the
+   connection FD.  Return true if it comes and has SERIAL, CHOSEN and
+   ID.  */
+static bool
+wait_for_choice (int fd, int limit, uint32_t serial, bool chosen,
+		 uint32_t id)
+{
+  struct rd_menu_choice choice;
+  return (read_choice (fd, limit, &choice) && choice.serial == serial
+	  && choice.chosen == chosen && choice.id == id);
+}
+
+/* Wait at most LIMIT milliseconds for a menu-choice message on the
+   connection FD, and put it in *CHOICE.  Skip the other messages.
+   Return false if none comes.  */
+static bool
+read_choice (int fd, int limit, struct rd_menu_choice *choice)
+{
+  int64_t end = now_ms () + limit;
+  struct rd_message message;
+  int64_t left;
+  while ((left = end - now_ms ()) > 0)
+    if (read_message (fd, &message, left) == 1
+	&& message.type == RD_MENU_CHOICE)
+      {
+	*choice = message.u.menu_choice;
+	return true;
+      }
+  return false;
+}
+
+/* Wait at most CONNECT_LIMIT milliseconds until a popup menu shows on
+   the display, if SHOWN, or until no popup menu shows.  Return false
+   if that does not occur.  */
+static bool
+menu_shows (bool shown)
+{
+  Display *display = XOpenDisplay (NULL);
+  if (!display)
+    return false;
+  int64_t end = now_ms () + CONNECT_LIMIT;
+  bool done;
+  while (!(done = menu_window_p (display) == shown) && now_ms () < end)
+    poll (NULL, 0, 20);
+  XCloseDisplay (display);
+  return done;
+}
+
+/* Return true if a popup menu shows on DISPLAY: a child of the root
+   window that shows and that the window manager does not manage.  The
+   test runs in Xvfb, and only a menu of the program is such a
+   window.  */
+static bool
+menu_window_p (Display *display)
+{
+  Window root, parent, *children;
+  unsigned int count;
+  if (!XQueryTree (display, DefaultRootWindow (display), &root, &parent,
+		   &children, &count))
+    return false;
+  bool found = false;
+  for (unsigned int i = 0; !found && i < count; i++)
+    {
+      XWindowAttributes attributes;
+      found = (XGetWindowAttributes (display, children[i], &attributes)
+	       && attributes.map_state == IsViewable
+	       && attributes.override_redirect);
+    }
+  XFree (children);
+  return found;
+}
+
+/* Press and release each of the N keys KEYS in order, through the
+   XTEST extension.  Return false if the display has no XTEST.  */
+static bool
+press_keys (const KeySym *keys, int n)
+{
+  Display *display = XOpenDisplay (NULL);
+  if (!display)
+    return false;
+  int event, error, major, minor;
+  bool pressed = XTestQueryExtension (display, &event, &error, &major,
+				      &minor);
+  for (int i = 0; pressed && i < n; i++)
+    {
+      KeyCode code = XKeysymToKeycode (display, keys[i]);
+      XTestFakeKeyEvent (display, code, True, CurrentTime);
+      XTestFakeKeyEvent (display, code, False, CurrentTime);
+    }
+  XSync (display, False);
+  XCloseDisplay (display);
+  return pressed;
 }
 
 /* Return a new text of SIZE bytes or a few more, of ASCII and other

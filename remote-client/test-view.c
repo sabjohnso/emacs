@@ -131,6 +131,7 @@ static bool choose_example (const char *, uint32_t, bool);
 static bool dismiss_example (const char *, void (*) (GtkMenuShell *));
 static bool hide_example (void);
 static bool other_hide_example (void);
+static bool close_menu_example (void);
 static bool replace_example (void);
 static bool no_window_example (void);
 static bool bad_entries_example (void);
@@ -200,6 +201,7 @@ main (int argc, char **argv)
 		 && dismiss_example ("cancel", gtk_menu_shell_cancel)
 		 && dismiss_example ("popdown", popdown)
 		 && hide_example () && other_hide_example ()
+		 && close_menu_example ()
 		 && replace_example () && no_window_example ()
 		 && bad_entries_example () && remove_menu_frame_example ()
 		 && refused_grab_example ()
@@ -730,6 +732,23 @@ hide_example (void)
   passed = passed && choice_count (&example->sent) == 0 && !open_menu ();
   if (!passed)
     fprintf (stderr, "test-view: a hide of a menu is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The connection of the menu ends.  The view must close the menu,
+   and must send no choice.  */
+static bool
+close_menu_example (void)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  rc_view_close_menu (example->view);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 0 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: the close of a menu is wrong\n");
   end_example (example);
   return passed;
 }

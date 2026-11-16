@@ -195,6 +195,9 @@ struct window_mode
   struct rd_chunk_queue clipboard_out;
   guint clipboard_watch;
   char *clipboard_text;
+  /* The entries of the popup menu that has no show-menu message
+     yet.  */
+  struct rc_menu_model menus;
 };
 
 static struct options parse_options (int, char **);
@@ -230,6 +233,8 @@ static void receive_font (struct window_mode *,
 			  const struct rd_font_data *);
 static void receive_clipboard (struct window_mode *,
 			       const struct rd_message *);
+static void show_menu (struct window_mode *, const struct rd_show_menu *);
+static void hide_menu (struct window_mode *, const struct rd_hide_menu *);
 static void clipboard_changed (void *, const char *);
 static gboolean send_clipboard (gint, GIOCondition, gpointer);
 static gboolean read_input (gint, GIOCondition, gpointer);
@@ -583,12 +588,12 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
   return mode.failed ? 1 : 0;
 }
 
-/* Make STREAM the connection of MODE, with no state of the connection
-   before it.  Send the clipboard text to the new connection.  */
+/* Make STREAM the connection of MODE.  close_connection removed the
+   state of the connection before it.  Send the clipboard text to the
+   new connection.  */
 static void
 open_connection (struct window_mode *mode, struct rc_stream *stream)
 {
-  reset_connection_state (mode);
   int fd = rc_stream_fd (stream);
   struct connection *connection = g_new (struct connection, 1);
   *connection = (struct connection)
@@ -602,15 +607,17 @@ open_connection (struct window_mode *mode, struct rc_stream *stream)
 }
 
 /* Forget the state of MODE that belongs to one connection.  The
-   function runs before the first message of each connection.  The
-   server sends a font file only on the connection of its request, so
-   forget the requests.  Drop a clipboard text that did not come
-   complete, and forget the last clipboard text, so the new connection
-   gets the clipboard text again.  The image IDs of the server are
-   valid for one connection, and the server sends each image again, so
-   forget the images.  Forget the places of the frames, because the
-   server places its frames again.  A feature with state for one
-   connection resets it here.  */
+   function runs when a connection ends, so the next connection starts
+   with no state of the old connection.  The server sends a font file
+   only on the connection of its request, so forget the requests.  Drop
+   a clipboard text that did not come complete, and forget the last
+   clipboard text, so the new connection gets the clipboard text again.
+   The image IDs of the server are valid for one connection, and the
+   server sends each image again, so forget the images.  Forget the
+   places of the frames, because the server places its frames again.
+   The serial of a popup menu belongs to one connection, so drop the
+   entries of a menu, and close the open menu with no choice.  A feature
+   with state for one connection resets it here.  */
 static void
 reset_connection_state (struct window_mode *mode)
 {
@@ -620,6 +627,8 @@ reset_connection_state (struct window_mode *mode)
   rd_chunks_free (&mode->clipboard);
   g_free (mode->clipboard_text);
   mode->clipboard_text = NULL;
+  rc_menu_model_free (&mode->menus);
+  rc_view_close_menu (mode->view);
 }
 
 /* Close the connection of MODE, which ended or is lost.  FAILED is
@@ -641,7 +650,8 @@ lose_connection (struct window_mode *mode, bool failed)
   schedule_retry (mode);
 }
 
-/* Close the connection of MODE, if it has one.  */
+/* Close the connection of MODE, if it has one, and forget its
+   state.  */
 static void
 close_connection (struct window_mode *mode)
 {
@@ -658,6 +668,7 @@ close_connection (struct window_mode *mode)
   rc_reader_free (connection->reader);
   g_free (connection);
   mode->connection = NULL;
+  reset_connection_state (mode);
 }
 
 /* Connect MODE again after the next wait of its backoff.  */
@@ -731,7 +742,8 @@ network_changed (GNetworkMonitor *monitor, gboolean available,
 /* The function of the reader of the mode with windows.  DATA is the
    struct window_mode.  Apply MESSAGE, and show its change.  Ask the
    server for the file of a font that has no face, keep the bytes
-   of a font file, and give the place of a frame to the view.  */
+   of a font file, and give the place of a frame to the view.  Give
+   the messages of a popup menu to the menu model and to the view.  */
 static void
 show_message (void *data, const struct rd_message *message)
 {
@@ -745,6 +757,31 @@ show_message (void *data, const struct rd_message *message)
     receive_clipboard (mode, message);
   else if (message->type == RD_PLACE_FRAME)
     rc_view_place (mode->view, &message->u.place_frame);
+  else if (message->type == RD_MENU_ITEM)
+    rc_menu_add (&mode->menus, &message->u.menu_item);
+  else if (message->type == RD_SHOW_MENU)
+    show_menu (mode, &message->u.show_menu);
+  else if (message->type == RD_HIDE_MENU)
+    hide_menu (mode, &message->u.hide_menu);
+}
+
+/* Show the popup menu of SHOW with the entries of its serial in the
+   menu model of MODE.  The view sends the choice of the user.  */
+static void
+show_menu (struct window_mode *mode, const struct rd_show_menu *show)
+{
+  struct rc_menu *menu = rc_menu_show (&mode->menus, show->serial);
+  rc_view_show_menu (mode->view, show, menu);
+  rc_menu_free (menu);
+}
+
+/* Drop the entries of the menu of HIDE, and close the menu if it is
+   open.  */
+static void
+hide_menu (struct window_mode *mode, const struct rd_hide_menu *hide)
+{
+  rc_menu_hide (&mode->menus, hide->serial);
+  rc_view_hide_menu (mode->view, hide->serial);
 }
 
 /* Add the clipboard-data MESSAGE to the clipboard text of MODE that

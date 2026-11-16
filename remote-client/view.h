@@ -110,6 +110,11 @@ extern void rc_view_show_menu (struct rc_view *view,
    no choice for SERIAL.  */
 extern void rc_view_hide_menu (struct rc_view *view, uint32_t serial);
 
+/* Close the open menu of VIEW, if it has one.  Then the view sends no
+   choice for it.  Call this function when the connection of the menu
+   ends.  */
+extern void rc_view_close_menu (struct rc_view *view);
+
 /* Return the number of windows of VIEW.  */
 extern int rc_view_window_count (const struct rc_view *view);
 
