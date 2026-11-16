@@ -561,8 +561,8 @@ send_clipboard (int fd, uint32_t serial, const char *text)
   for (uint32_t i = 0; sent && i < rd_chunk_count (size); i++)
     {
       struct rd_message message;
-      rd_chunk_message (serial, (const unsigned char *) text, size, i,
-			&message);
+      rd_chunk_message (RD_CLIPBOARD_DATA, serial,
+			(const unsigned char *) text, size, i, &message);
       sent = send_message (fd, &message);
     }
   return sent;
@@ -579,10 +579,12 @@ wait_for_clipboard (int fd, int limit, const char *text)
   struct rd_message message;
   int64_t left;
   bool found = false;
+  struct rd_chunk_part part;
   while (!found && (left = end - now_ms ()) > 0)
     if (read_message (fd, &message, left) == 1
-	&& message.type == RD_CLIPBOARD_DATA
-	&& rd_chunks_add (&chunks, &message.u.clipboard_data) == RD_CHUNK_DONE)
+	&& rd_chunk_part_of (&message, &part)
+	&& (rd_chunks_add (&chunks, &part, RD_MAX_CLIPBOARD_SIZE)
+	    == RD_CHUNK_DONE))
       found = (chunks.total == strlen (text)
 	       && !memcmp (chunks.bytes, text, chunks.total));
   rd_chunks_free (&chunks);

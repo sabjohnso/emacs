@@ -1,4 +1,4 @@
-/* Split a clipboard text into messages, and join the messages again.
+/* Split a text into messages, and join the messages again.
 
 Copyright (C) 2026 Free Software Foundation, Inc.
 
@@ -25,8 +25,30 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "rdchunk.h"
 
 static bool continues_p (const struct rd_chunks *,
-			 const struct rd_clipboard_data *);
-static bool start (struct rd_chunks *, const struct rd_clipboard_data *);
+			 const struct rd_chunk_part *);
+static bool start (struct rd_chunks *, const struct rd_chunk_part *, size_t);
+static void set_part (struct rd_message *, const struct rd_chunk_part *);
+
+bool
+rd_chunk_part_of (const struct rd_message *message,
+		  struct rd_chunk_part *part)
+{
+  switch (message->type)
+    {
+    case RD_CLIPBOARD_DATA:
+      {
+	const struct rd_clipboard_data *data = &message->u.clipboard_data;
+	*part = (struct rd_chunk_part) { .serial = data->serial,
+					 .offset = data->offset,
+					 .total = data->total,
+					 .nbytes = data->nbytes,
+					 .bytes = data->bytes };
+	return true;
+      }
+    default:
+      return false;
+    }
+}
 
 uint32_t
 rd_chunk_count (size_t size)
@@ -36,29 +58,28 @@ rd_chunk_count (size_t size)
 }
 
 void
-rd_chunk_message (uint32_t serial, const unsigned char *text, size_t size,
-		  uint32_t index, struct rd_message *message)
+rd_chunk_message (enum rd_type type, uint32_t serial,
+		  const unsigned char *text, size_t size, uint32_t index,
+		  struct rd_message *message)
 {
   size_t offset = (size_t) index * RD_MAX_CLIPBOARD_CHUNK;
   size_t left = size - offset;
-  *message = (struct rd_message) { .type = RD_CLIPBOARD_DATA };
-  struct rd_clipboard_data *data = &message->u.clipboard_data;
-  data->serial = serial;
-  data->offset = offset;
-  data->total = size;
-  data->nbytes = left < RD_MAX_CLIPBOARD_CHUNK ? left
-    : RD_MAX_CLIPBOARD_CHUNK;
-  if (data->nbytes)
-    memcpy (data->bytes, text + offset, data->nbytes);
+  struct rd_chunk_part part
+    = { .serial = serial, .offset = offset, .total = size,
+	.nbytes = (left < RD_MAX_CLIPBOARD_CHUNK ? left
+		   : RD_MAX_CLIPBOARD_CHUNK),
+	.bytes = text + offset };
+  *message = (struct rd_message) { .type = type };
+  set_part (message, &part);
 }
 
 enum rd_chunk_result
-rd_chunks_add (struct rd_chunks *chunks,
-	       const struct rd_clipboard_data *data)
+rd_chunks_add (struct rd_chunks *chunks, const struct rd_chunk_part *data,
+	       size_t limit)
 {
   if (data->offset == 0
       && !(chunks->active && chunks->serial == data->serial)
-      && !start (chunks, data))
+      && !start (chunks, data, limit))
     return RD_CHUNK_REFUSED;
   if (!continues_p (chunks, data))
     {
@@ -101,8 +122,8 @@ rd_chunk_queue_next (struct rd_chunk_queue *queue, struct rd_message *message)
 {
   if (!rd_chunk_queue_pending_p (queue))
     return false;
-  rd_chunk_message (queue->serial, queue->bytes, queue->size, queue->next++,
-		    message);
+  rd_chunk_message (RD_CLIPBOARD_DATA, queue->serial, queue->bytes,
+		    queue->size, queue->next++, message);
   if (queue->next == rd_chunk_count (queue->size))
     rd_chunk_queue_clear (queue);
   return true;
@@ -127,7 +148,7 @@ rd_chunk_queue_clear (struct rd_chunk_queue *queue)
    at or before the end of the text.  */
 static bool
 continues_p (const struct rd_chunks *chunks,
-	     const struct rd_clipboard_data *data)
+	     const struct rd_chunk_part *data)
 {
   return (chunks->active && data->serial == chunks->serial
 	  && data->offset == chunks->received
@@ -136,12 +157,14 @@ continues_p (const struct rd_chunks *chunks,
 }
 
 /* Start the text of DATA in CHUNKS, and drop the text before it.
-   Return false if the text is too large, or if there is no memory.  */
+   Return false if the text has more than LIMIT bytes, or if there is
+   no memory.  */
 static bool
-start (struct rd_chunks *chunks, const struct rd_clipboard_data *data)
+start (struct rd_chunks *chunks, const struct rd_chunk_part *data,
+       size_t limit)
 {
   chunks->active = false;
-  if (data->total > RD_MAX_CLIPBOARD_SIZE)
+  if (data->total > limit)
     return false;
   unsigned char *bytes = realloc (chunks->bytes,
 				  data->total ? data->total : 1);
@@ -150,4 +173,26 @@ start (struct rd_chunks *chunks, const struct rd_clipboard_data *data)
   *chunks = (struct rd_chunks) { .active = true, .serial = data->serial,
 				 .total = data->total, .bytes = bytes };
   return true;
+}
+
+/* Copy the fields of PART to MESSAGE, which has a chunked type.  */
+static void
+set_part (struct rd_message *message, const struct rd_chunk_part *part)
+{
+  switch (message->type)
+    {
+    case RD_CLIPBOARD_DATA:
+      {
+	struct rd_clipboard_data *data = &message->u.clipboard_data;
+	data->serial = part->serial;
+	data->offset = part->offset;
+	data->total = part->total;
+	data->nbytes = part->nbytes;
+	if (part->nbytes)
+	  memcpy (data->bytes, part->bytes, part->nbytes);
+	break;
+      }
+    default:
+      break;
+    }
 }

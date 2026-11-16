@@ -47,7 +47,10 @@ remote_clipboard_input (struct remote_display_info *dpyinfo,
 			const struct rd_message *message)
 {
   struct rd_chunks *chunks = &dpyinfo->clipboard;
-  if (rd_chunks_add (chunks, &message->u.clipboard_data) != RD_CHUNK_DONE)
+  struct rd_chunk_part part;
+  if (!rd_chunk_part_of (message, &part)
+      || (rd_chunks_add (chunks, &part, RD_MAX_CLIPBOARD_SIZE)
+	  != RD_CHUNK_DONE))
     return;
   Lisp_Object terminal;
   XSETTERMINAL (terminal, dpyinfo->terminal);

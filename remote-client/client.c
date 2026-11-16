@@ -222,7 +222,7 @@ static void want_font (struct window_mode *, const struct rd_define_font *);
 static void receive_font (struct window_mode *,
 			  const struct rd_font_data *);
 static void receive_clipboard (struct window_mode *,
-			       const struct rd_clipboard_data *);
+			       const struct rd_message *);
 static void clipboard_changed (void *, const char *);
 static gboolean send_clipboard (gint, GIOCondition, gpointer);
 static gboolean read_input (gint, GIOCondition, gpointer);
@@ -692,17 +692,21 @@ show_message (void *data, const struct rd_message *message)
   else if (message->type == RD_FONT_DATA)
     receive_font (mode, &message->u.font_data);
   else if (message->type == RD_CLIPBOARD_DATA)
-    receive_clipboard (mode, &message->u.clipboard_data);
+    receive_clipboard (mode, message);
 }
 
-/* Add DATA to the clipboard text of MODE that comes from the server.
-   Put a complete text on the clipboard of the desktop.  */
+/* Add the clipboard-data MESSAGE to the clipboard text of MODE that
+   comes from the server.  Put a complete text on the clipboard of the
+   desktop.  */
 static void
 receive_clipboard (struct window_mode *mode,
-		   const struct rd_clipboard_data *data)
+		   const struct rd_message *message)
 {
   struct rd_chunks *chunks = &mode->clipboard;
-  if (rd_chunks_add (chunks, data) != RD_CHUNK_DONE)
+  struct rd_chunk_part part;
+  if (!rd_chunk_part_of (message, &part)
+      || (rd_chunks_add (chunks, &part, RD_MAX_CLIPBOARD_SIZE)
+	  != RD_CHUNK_DONE))
     return;
   g_free (mode->clipboard_text);
   mode->clipboard_text = g_strndup ((const char *) chunks->bytes,

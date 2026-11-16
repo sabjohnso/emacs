@@ -1,4 +1,4 @@
-/* Test the split and the join of clipboard texts.
+/* Test the split and the join of chunked texts.
 
 Copyright (C) 2026 Free Software Foundation, Inc.
 
@@ -40,9 +40,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      message if it is not the first one.  A message of a text after its
      last message gives RD_CHUNK_REFUSED.  After that, a new text with
      another serial comes through.
-   - Limit: a text with more than RD_MAX_CLIPBOARD_SIZE bytes gives
-     RD_CHUNK_REFUSED at its first message, and it drops a text that
-     did not come complete before it.
+   - Limit: a text with more bytes than the limit of the receiver
+     gives RD_CHUNK_REFUSED at its first message, and it drops a text
+     that did not come complete before it.  A text with the limit
+     comes through.
+   - Part: rd_chunk_part_of gives the fields of a clipboard-data
+     message, and no part for a message of another type.
 
    - Queue: the messages of a queue join to its text.  A queue has a
      message until the last message of its text, and is empty after
@@ -84,13 +87,18 @@ static bool round_trip_law (uint64_t *);
 static bool restart_law (uint64_t *);
 static bool damage_law (uint64_t *);
 static bool limit_law (uint64_t *);
+static bool part_law (uint64_t *);
 static bool queue_law (uint64_t *);
 static struct text random_text (uint64_t *);
 static enum rd_chunk_result join (struct rd_chunks *, uint32_t,
 				  const struct text *);
 static bool has_text (const struct rd_chunks *, const struct text *);
-static struct rd_clipboard_data chunk (uint32_t, const struct text *,
-				       uint32_t);
+static struct rd_chunk_part chunk (uint32_t, const struct text *, uint32_t,
+				   struct rd_message *);
+static enum rd_chunk_result add (struct rd_chunks *,
+				 const struct rd_chunk_part *);
+static enum rd_chunk_result add_message (struct rd_chunks *,
+					 const struct rd_message *);
 static uint64_t random_below (uint64_t *, uint64_t);
 static uint64_t random_next (uint64_t *);
 
@@ -106,6 +114,7 @@ static const struct
     { "restart", restart_law },
     { "damage", damage_law },
     { "limit", limit_law },
+    { "part", part_law },
     { "queue", queue_law },
   };
 
@@ -157,9 +166,11 @@ split_law (uint64_t *state)
   size_t offset = 0;
   for (uint32_t i = 0; passed && i < count; i++)
     {
-      struct rd_clipboard_data data = chunk (serial, &text, i);
+      struct rd_message message;
+      struct rd_chunk_part data = chunk (serial, &text, i, &message);
       bool last = i + 1 == count;
-      passed = (data.serial == serial && data.total == text.size
+      passed = (message.type == RD_CLIPBOARD_DATA
+		&& data.serial == serial && data.total == text.size
 		&& data.offset == offset
 		&& (last ? (text.size == 0 || data.nbytes > 0)
 		    : data.nbytes == RD_MAX_CLIPBOARD_CHUNK)
@@ -197,8 +208,9 @@ restart_law (uint64_t *state)
   bool passed = true;
   for (uint32_t i = 0; passed && i < sent; i++)
     {
-      struct rd_clipboard_data data = chunk (serial, &first, i);
-      passed = rd_chunks_add (&chunks, &data) == RD_CHUNK_PARTIAL;
+      struct rd_message message;
+      struct rd_chunk_part data = chunk (serial, &first, i, &message);
+      passed = add (&chunks, &data) == RD_CHUNK_PARTIAL;
     }
   passed = (passed && join (&chunks, serial + 1, &second) == RD_CHUNK_DONE
 	    && has_text (&chunks, &second));
@@ -230,10 +242,12 @@ damage_law (uint64_t *state)
   bool passed = true;
   for (uint32_t i = 0; passed && i < at; i++)
     {
-      struct rd_clipboard_data data = chunk (serial, &text, i);
-      passed = rd_chunks_add (&chunks, &data) == RD_CHUNK_PARTIAL;
+      struct rd_message message;
+      struct rd_chunk_part data = chunk (serial, &text, i, &message);
+      passed = add (&chunks, &data) == RD_CHUNK_PARTIAL;
     }
-  struct rd_clipboard_data data = chunk (serial, &text, at);
+  struct rd_message message;
+  struct rd_chunk_part data = chunk (serial, &text, at, &message);
   if (damage == BAD_OFFSET)
     data.offset += 1 + random_below (state, 3);
   else if (damage == BAD_TOTAL)
@@ -245,14 +259,14 @@ damage_law (uint64_t *state)
     data.nbytes = data.total - data.offset + 1;
   else
     data.total = data.offset + data.nbytes - 1;
-  passed = passed && rd_chunks_add (&chunks, &data) == RD_CHUNK_REFUSED;
+  passed = passed && add (&chunks, &data) == RD_CHUNK_REFUSED;
   /* A correct copy of the damaged message, and the messages after it.
      A correct first message starts the text again, so it is not
      part of this check.  */
   for (uint32_t i = at; passed && at > 0 && i < count; i++)
     {
-      struct rd_clipboard_data rest = chunk (serial, &text, i);
-      passed = rd_chunks_add (&chunks, &rest) == RD_CHUNK_REFUSED;
+      struct rd_chunk_part rest = chunk (serial, &text, i, &message);
+      passed = add (&chunks, &rest) == RD_CHUNK_REFUSED;
     }
   struct text other = random_text (state);
   passed = (passed && join (&chunks, serial + 1, &other) == RD_CHUNK_DONE
@@ -261,8 +275,8 @@ damage_law (uint64_t *state)
   uint32_t last = rd_chunk_count (other.size) - 1;
   if (last > 0)
     {
-      struct rd_clipboard_data again = chunk (serial + 1, &other, last);
-      passed = passed && rd_chunks_add (&chunks, &again) == RD_CHUNK_REFUSED;
+      struct rd_chunk_part again = chunk (serial + 1, &other, last, &message);
+      passed = passed && add (&chunks, &again) == RD_CHUNK_REFUSED;
     }
   free (text.bytes);
   free (other.bytes);
@@ -273,30 +287,70 @@ damage_law (uint64_t *state)
 static bool
 limit_law (uint64_t *state)
 {
+  static const unsigned char zeros[RD_MAX_CLIPBOARD_CHUNK];
   struct rd_chunks chunks = { 0 };
   struct text text = random_text (state);
   uint32_t serial = random_next (state);
-  bool partial = rd_chunk_count (text.size) > 1;
+  /* The limit of the receiver is the size of TEXT, a small size, or
+     the clipboard limit.  */
+  size_t limits[] = { text.size, random_below (state, 3),
+		      RD_MAX_CLIPBOARD_SIZE };
+  size_t limit = limits[random_below (state, 3)];
+  bool partial = rd_chunk_count (text.size) > 1 && text.size <= limit;
+  struct rd_message message;
   if (partial)
     {
-      struct rd_clipboard_data first = chunk (serial, &text, 0);
-      rd_chunks_add (&chunks, &first);
+      struct rd_chunk_part first = chunk (serial, &text, 0, &message);
+      rd_chunks_add (&chunks, &first, limit);
     }
-  struct rd_clipboard_data data
-    = { .serial = random_next (state), .offset = 0,
-	.total = (RD_MAX_CLIPBOARD_SIZE + 1
-		  + random_below (state, 1000)),
-	.nbytes = 1 + random_below (state, RD_MAX_CLIPBOARD_CHUNK) };
-  bool passed = rd_chunks_add (&chunks, &data) == RD_CHUNK_REFUSED;
+  uint32_t total = limit + 1 + random_below (state, 1000);
+  struct rd_chunk_part data
+    = { .serial = random_next (state), .offset = 0, .total = total,
+	.nbytes = 1 + random_below (state, RD_MAX_CLIPBOARD_CHUNK),
+	.bytes = zeros };
+  if (data.nbytes > data.total)
+    data.nbytes = data.total;
+  bool passed = rd_chunks_add (&chunks, &data, limit) == RD_CHUNK_REFUSED;
   if (partial)
     {
-      struct rd_clipboard_data second = chunk (serial, &text, 1);
-      passed = passed && rd_chunks_add (&chunks, &second) == RD_CHUNK_REFUSED;
+      struct rd_chunk_part second = chunk (serial, &text, 1, &message);
+      passed = (passed
+		&& rd_chunks_add (&chunks, &second, limit) == RD_CHUNK_REFUSED);
     }
   free (text.bytes);
-  data.total = RD_MAX_CLIPBOARD_SIZE;
-  passed = passed && rd_chunks_add (&chunks, &data) == RD_CHUNK_PARTIAL;
+  data.total = limit;
+  if (data.nbytes > data.total)
+    data.nbytes = data.total;
+  enum rd_chunk_result expected = (data.nbytes < data.total
+				   ? RD_CHUNK_PARTIAL : RD_CHUNK_DONE);
+  passed = passed && rd_chunks_add (&chunks, &data, limit) == expected;
   rd_chunks_free (&chunks);
+  return passed;
+}
+
+static bool
+part_law (uint64_t *state)
+{
+  struct text text = random_text (state);
+  uint32_t serial = random_next (state);
+  uint32_t index = random_below (state, rd_chunk_count (text.size));
+  struct rd_message message;
+  rd_chunk_message (RD_CLIPBOARD_DATA, serial, text.bytes, text.size, index,
+		    &message);
+  const struct rd_clipboard_data *data = &message.u.clipboard_data;
+  struct rd_chunk_part part;
+  bool passed = (rd_chunk_part_of (&message, &part)
+		 && part.serial == data->serial
+		 && part.offset == data->offset
+		 && part.total == data->total
+		 && part.nbytes == data->nbytes
+		 && part.bytes == data->bytes);
+  /* A message of another type has no part.  */
+  struct rd_message other = { .type = 1 + random_below (state,
+							RD_TYPE_LIMIT - 1) };
+  if (other.type != RD_CLIPBOARD_DATA)
+    passed = passed && !rd_chunk_part_of (&other, &part);
+  free (text.bytes);
   return passed;
 }
 
@@ -319,7 +373,7 @@ queue_law (uint64_t *state)
   for (uint32_t i = 0; passed && i < sent; i++)
     {
       passed = rd_chunk_queue_next (&queue, &message);
-      result = rd_chunks_add (&chunks, &message.u.clipboard_data);
+      result = add_message (&chunks, &message);
     }
   if (replace)
     passed = passed && rd_chunk_queue_pending_p (&queue);
@@ -330,7 +384,7 @@ queue_law (uint64_t *state)
   passed = (passed && rd_chunk_queue_set (&queue, second.bytes, second.size)
 	    && queue.serial != first_serial);
   while (passed && rd_chunk_queue_next (&queue, &message))
-    result = rd_chunks_add (&chunks, &message.u.clipboard_data);
+    result = add_message (&chunks, &message);
   uint32_t second_serial = queue.serial;
   passed = (passed && result == RD_CHUNK_DONE && has_text (&chunks, &second)
 	    && rd_chunk_queue_set (&queue, first.bytes, first.size));
@@ -379,8 +433,9 @@ join (struct rd_chunks *chunks, uint32_t serial, const struct text *text)
   uint32_t count = rd_chunk_count (text->size);
   for (uint32_t i = 0; i < count; i++)
     {
-      struct rd_clipboard_data data = chunk (serial, text, i);
-      enum rd_chunk_result result = rd_chunks_add (chunks, &data);
+      struct rd_message message;
+      struct rd_chunk_part data = chunk (serial, text, i, &message);
+      enum rd_chunk_result result = add (chunks, &data);
       if (i + 1 == count)
 	return result;
       if (result != RD_CHUNK_PARTIAL)
@@ -398,13 +453,34 @@ has_text (const struct rd_chunks *chunks, const struct text *text)
 	      || !memcmp (chunks->bytes, text->bytes, text->size)));
 }
 
-/* Return the message INDEX of TEXT with SERIAL.  */
-static struct rd_clipboard_data
-chunk (uint32_t serial, const struct text *text, uint32_t index)
+/* Set MESSAGE to the clipboard-data message INDEX of TEXT with
+   SERIAL, and return its part.  The bytes of the part are in
+   MESSAGE.  */
+static struct rd_chunk_part
+chunk (uint32_t serial, const struct text *text, uint32_t index,
+       struct rd_message *message)
 {
-  struct rd_message message;
-  rd_chunk_message (serial, text->bytes, text->size, index, &message);
-  return message.u.clipboard_data;
+  rd_chunk_message (RD_CLIPBOARD_DATA, serial, text->bytes, text->size,
+		    index, message);
+  struct rd_chunk_part part;
+  rd_chunk_part_of (message, &part);
+  return part;
+}
+
+/* Add PART to CHUNKS with the clipboard limit.  */
+static enum rd_chunk_result
+add (struct rd_chunks *chunks, const struct rd_chunk_part *part)
+{
+  return rd_chunks_add (chunks, part, RD_MAX_CLIPBOARD_SIZE);
+}
+
+/* Add the part of MESSAGE to CHUNKS with the clipboard limit.  */
+static enum rd_chunk_result
+add_message (struct rd_chunks *chunks, const struct rd_message *message)
+{
+  struct rd_chunk_part part;
+  return (rd_chunk_part_of (message, &part) ? add (chunks, &part)
+	  : RD_CHUNK_REFUSED);
 }
 
 /* Return a random number from 0 to LIMIT - 1.  */
