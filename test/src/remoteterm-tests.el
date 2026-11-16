@@ -6470,22 +6470,45 @@ that extra bytes also arrive.  Stop after 10 seconds."
   "The first redisplay after an attach draws each frame fully.
 A client draws the frame, and then detaches.  While no client is
 attached, random edits change the buffer, point moves, the frame
-changes its size, and redisplay can run.  Law: the bytes of the first redisplay after an
-attach are equal to the bytes of `redraw-frame' and a redisplay for a
-new client."
+changes its size, and redisplay can run.  Law: the bytes of the first
+redisplay after an attach are equal to the bytes of `redraw-frame' and
+a redisplay for a new client."
   (let ((rd-gen-trials 12))
     (rd-gen-for-all
      #'remoteterm-tests--detached-operations
      (lambda (operations)
-       (pcase-let ((`(,attached ,redrawn)
-                    (rd-daemon-eval
-                     (remoteterm-tests--frame-form
-                      '((width . 30) (height . 6))
-                      '(insert "abc\ndef\n")
-                      `(remoteterm-tests--attach-after
-                        ',operations display frame buffer)))))
-         (should (> (length redrawn) 0))
-         (should (equal attached redrawn)))))))
+       (remoteterm-tests--check-attach-redraws
+        `(remoteterm-tests--attach-after
+          ',operations display frame buffer))))))
+
+(rd-daemon-deftest remoteterm-tests-attach-redraws-due-timer
+  "A timer that is due at the attach does not change the attach redraw.
+`redisplay' runs the timers that are due, and if a timer runs, it does
+one more redisplay.  In a slow trial of
+`remoteterm-tests-attach-redraws', an idle timer can become due while
+no client is attached.  Here, the last operation with no client starts
+a timer that is due.  The law is that of
+`remoteterm-tests-attach-redraws'."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     #'remoteterm-tests--detached-operations
+     (lambda (operations)
+       (remoteterm-tests--check-attach-redraws
+        `(remoteterm-tests--attach-after
+          ',(append operations '((timer))) display frame buffer))))))
+
+(defun remoteterm-tests--check-attach-redraws (attach)
+  "Check the law of `remoteterm-tests-attach-redraws' for the form ATTACH.
+ATTACH is the result form of `remoteterm-tests--frame-form'.  Its
+value must be as for `remoteterm-tests--attach-after'."
+  (pcase-let ((`(,attached ,redrawn)
+               (rd-daemon-eval
+                (remoteterm-tests--frame-form
+                 '((width . 30) (height . 6))
+                 '(insert "abc\ndef\n")
+                 attach))))
+    (should (> (length redrawn) 0))
+    (should (equal attached redrawn))))
 
 (defun remoteterm-tests--detached-operations ()
   "Return a random list of operations on a frame with no client.
@@ -6517,16 +6540,27 @@ and a redisplay for one more new client."
   (remote-display--detach display)
   (remoteterm-tests--do-detached-operations operations frame buffer)
   (remote-display--record display)
-  (redisplay t)
+  (remoteterm-tests--redisplay-once)
   (let ((attached (remote-display--take-output display)))
     (remote-display--record display)
     (redraw-frame frame)
-    (redisplay t)
+    (remoteterm-tests--redisplay-once)
     (list attached (remote-display--take-output display))))
+
+(defun remoteterm-tests--redisplay-once ()
+  "Do one redisplay, and run no timer.
+`redisplay' runs the timers that are due before it redisplays.  If a
+timer runs, it redisplays one more time, and the second redisplay can
+draw the cursor again.  Thus the bytes of `redisplay' change with the
+time.  This function holds the timers until the redisplay ends."
+  (let ((timer-list nil)
+        (timer-idle-list nil))
+    (redisplay t)))
 
 (defun remoteterm-tests--do-detached-operations (operations frame buffer)
   "Do OPERATIONS of `remoteterm-tests--detached-operations' on BUFFER.
-FRAME shows BUFFER."
+FRAME shows BUFFER.  An operation can also be (timer), which starts a
+timer that is due now and does nothing."
   (let ((window (frame-root-window frame)))
     (with-current-buffer buffer
       (dolist (operation operations)
@@ -6542,6 +6576,7 @@ FRAME shows BUFFER."
           (`(resize ,columns ,lines)
            (set-frame-size frame columns lines))
           (`(message ,string) (message "%s" string))
+          ('(timer) (run-at-time 0 nil #'ignore))
           ('(redraw) (redraw-frame frame))
           ('(sit) (sit-for 0))
           ('(redisplay) (redisplay t)))))))
