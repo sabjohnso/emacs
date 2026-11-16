@@ -1438,7 +1438,8 @@ line."
 (defun remoteterm-tests--frame-form (parameters setup result)
   "Return a form for the daemon that draws a buffer on a new remote frame.
 This is the setup of each drawing test.  PARAMETERS is the list of the
-parameters of the frame.  The form evaluates the form SETUP with the
+parameters of the frame.  The frame has no bars unless PARAMETERS ask
+for them (see `remoteterm-tests--plain-layout').  The form evaluates the form SETUP with the
 buffer current.  SETUP must insert text, and can use the variables
 FRAME and WINDOW.  The value of the form is the value of the form
 RESULT.  RESULT can use the variable OUTPUT, the bytes that the session
@@ -1448,7 +1449,9 @@ the last character that is not a newline."
   `(let* ((display "remote-draw")
           (frame (progn (x-open-connection display)
                         (x-create-frame-with-faces
-                         '((display . "remote-draw") ,@parameters))))
+                         '((display . "remote-draw")
+                           ,@parameters
+                           ,@remoteterm-tests--plain-layout))))
           (window (frame-root-window frame))
           (buffer (generate-new-buffer "draw")))
      (unwind-protect
@@ -5641,16 +5644,15 @@ the edges of the area of the windows, from the top of the root window
 to the bottom of the minibuffer window.  The bars of `frame-geometry'
 above the windows fill the space between the native top and the inner
 top.  The outer size of `frame-geometry' is the size of the outer
-edges.  A remote frame does not show bars yet, so their heights are 0
-in each trial.  The generator sets the bar parameters, so that the
-laws apply to the bars when remote frames show them."
+edges.  The height of the menu bar is the value of `menu-bar-lines'
+times the height of a line of the frame."
   (let ((rd-gen-trials 12))
     (rd-gen-for-all
      #'remoteterm-tests--frame-parameters
      (lambda (parameters)
        (pcase-let*
            (((map :outer :native :inner :default :size :windows :bars
-                  :outer-size)
+                  :menu-bar :char-height :outer-size)
              (rd-daemon-eval
               (remoteterm-tests--frame-form
                parameters '(insert "abc\n")
@@ -5664,6 +5666,8 @@ laws apply to the bars when remote frames show them."
          (should (equal inner (cl-mapcar #'+ (list left top left top)
                                          windows)))
          (should (= bars (- (nth 1 inner) top)))
+         (should (= menu-bar (* (alist-get 'menu-bar-lines parameters)
+                                char-height)))
          (should (equal outer-size (list (- (nth 2 outer) (nth 0 outer))
                                          (- (nth 3 outer)
                                             (nth 1 outer))))))))))
@@ -5675,8 +5679,9 @@ laws apply to the bars when remote frames show them."
 pixel width and height of FRAME.
 :windows is the edges of the area of the windows of FRAME, relative to
 the native edges.  :bars is the sum of the heights of the bars of
-`frame-geometry' above the windows.  :outer-size is the outer size
-from `frame-geometry'."
+`frame-geometry' above the windows.  :menu-bar is the height of the
+menu bar, and :char-height is the height of a line of FRAME.
+:outer-size is the outer size from `frame-geometry'."
   (let* ((root (window-pixel-edges (frame-root-window frame)))
          (minibuffer (window-pixel-edges (minibuffer-window frame)))
          (geometry (frame-geometry frame))
@@ -5693,8 +5698,74 @@ from `frame-geometry'."
                    (if tool-bar-top
                        (cdr (alist-get 'tool-bar-size geometry))
                      0))
+          :menu-bar (cdr (alist-get 'menu-bar-size geometry))
+          :char-height (frame-char-height frame)
           :outer-size (let ((size (alist-get 'outer-size geometry)))
                         (list (car size) (cdr size))))))
+
+(rd-daemon-deftest remoteterm-tests-menu-bar-mode
+  "The menu bar of a remote frame follows the last change to it.
+A trial applies a random list of changes to a remote frame.  A change
+is a call of `menu-bar-mode' or a change of the `menu-bar-lines'
+parameter of the frame.  Law: after each change, the height of the
+menu bar from `frame-geometry' is the number of lines that the last
+change gives, times the height of a line of the frame."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     (lambda ()
+       (rd-gen-list #'remoteterm-tests--menu-bar-change 6))
+     (lambda (changes)
+       (pcase-let ((`(,char-height . ,heights)
+                    (rd-daemon-eval
+                     `(remoteterm-tests--menu-bar-heights ',changes))))
+         (should (equal heights
+                        (mapcar (lambda (change)
+                                  (* (remoteterm-tests--menu-bar-lines
+                                      change)
+                                     char-height))
+                                changes))))))))
+
+(defun remoteterm-tests--menu-bar-change ()
+  "Return a random change to the menu bar of a frame.
+The change is (mode ARG), a call of `menu-bar-mode' with ARG, or
+\(lines N), a change of the `menu-bar-lines' parameter to N."
+  (if (zerop (rd-gen-random 2))
+      (list 'mode (rd-gen-element '(1 -1)))
+    (list 'lines (rd-gen-random 3))))
+
+(defun remoteterm-tests--menu-bar-lines (change)
+  "Return the number of menu bar lines that CHANGE gives.
+This is the model of the menu bar."
+  (pcase change
+    (`(mode ,arg) (if (> arg 0) 1 0))
+    (`(lines ,n) n)))
+
+(defun remoteterm-tests--menu-bar-heights (changes)
+  "Apply CHANGES to a new remote frame, and return the menu bar heights.
+The value is (CHAR-HEIGHT . HEIGHTS).  CHAR-HEIGHT is the height of a
+line of the frame.  HEIGHTS has the height of the menu bar from
+`frame-geometry' after each change.  The function restores
+`menu-bar-mode' and `default-frame-alist' at the end."
+  (let ((mode menu-bar-mode)
+        (defaults default-frame-alist))
+    (remoteterm-tests--with-display "remote-menu-bar"
+      (remoteterm-tests--with-frame frame "remote-menu-bar" nil
+        (unwind-protect
+            (cons (frame-char-height frame)
+                  (mapcar (lambda (change)
+                            (remoteterm-tests--apply-menu-bar-change
+                             frame change)
+                            (cdr (alist-get 'menu-bar-size
+                                            (frame-geometry frame))))
+                          changes))
+          (menu-bar-mode (if mode 1 -1))
+          (setq default-frame-alist defaults))))))
+
+(defun remoteterm-tests--apply-menu-bar-change (frame change)
+  "Apply CHANGE to the menu bar of FRAME."
+  (pcase change
+    (`(mode ,arg) (menu-bar-mode arg))
+    (`(lines ,n) (set-frame-parameter frame 'menu-bar-lines n))))
 
 (rd-daemon-deftest remoteterm-tests-frame-edges-not-remote
   "The edges and the geometry of a remote frame refuse other frames.

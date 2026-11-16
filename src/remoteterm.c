@@ -921,6 +921,23 @@ remote_set_cursor_type (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
   set_frame_cursor_types (f, arg);
 }
 
+/* The handler of the `menu-bar-lines' frame parameter.  Set the
+   height of the menu bar of F to VALUE lines.  Redisplay draws the
+   menu bar into the menu bar window of F.  */
+static void
+remote_set_menu_bar_lines (struct frame *f, Lisp_Object value,
+			   Lisp_Object oldval)
+{
+  int old_lines = FRAME_MENU_BAR_LINES (f);
+  int lines = TYPE_RANGED_FIXNUMP (int, value) ? XFIXNUM (value) : 0;
+
+  fset_redisplay (f);
+  FRAME_MENU_BAR_LINES (f) = lines;
+  FRAME_MENU_BAR_HEIGHT (f) = lines * FRAME_LINE_HEIGHT (f);
+  if (lines != old_lines)
+    adjust_frame_size (f, -1, -1, 3, true, Qmenu_bar_lines);
+}
+
 /* The handlers of frame parameters, in the order of frame_parms in
    frame.c.  NULL means that the parameter has no effect yet.  */
 static frame_parm_handler remote_frame_parm_handlers[] =
@@ -940,7 +957,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     NULL, /* internal border width */
     gui_set_right_divider_width,
     gui_set_bottom_divider_width,
-    NULL, /* menu bar lines */
+    remote_set_menu_bar_lines,
     NULL, /* mouse color */
     NULL, /* explicitly set name */
     gui_set_scroll_bar_width,
