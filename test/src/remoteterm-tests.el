@@ -6006,8 +6006,8 @@ Laws: the number of colors is 2 to the power of the number of planes,
 and the visual class is `true-color'.  The size in millimeters is the
 size in pixels at `remoteterm-tests--dots-per-inch', with a tolerance
 of 1 millimeter.
-A remote display has a mouse and symbol keys.  It has no popup menus,
-because a remote frame cannot show a menu."
+A remote display has a mouse and symbol keys.  It has popup menus
+exactly when it has a mouse."
   (let ((rd-gen-trials 12))
     (rd-gen-for-all
      #'remoteterm-tests--frame-parameters
@@ -6026,7 +6026,7 @@ because a remote frame cannot show a menu."
                                       1)))
                            pixels mm))
          (should (eq mouse t))
-         (should-not popup)
+         (should (eq popup mouse))
          (should keys))))))
 
 (defun remoteterm-tests--mm (pixels)

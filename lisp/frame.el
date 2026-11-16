@@ -2736,11 +2736,8 @@ Support for popup menus requires that a suitable pointing device
 be available."
   ;; Android menus work fine with touch screens as well, and one must
   ;; be present.
-  (let ((frame-type (framep-on-display display)))
-    (or (eq frame-type 'android)
-        ;; A remote frame cannot show a menu yet.
-        (and (not (eq frame-type 'remote))
-             (display-mouse-p display)))))
+  (or (eq (framep-on-display display) 'android)
+      (display-mouse-p display)))
 
 (defun display-graphic-p (&optional display)
   "Return non-nil if DISPLAY is a graphic display.
