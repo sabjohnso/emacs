@@ -46,7 +46,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    it, keyboard.c makes a drag from the bar to a pixel position, and
    scroll-bar.el cannot use that position.  The grab keeps the press
    position, and no window, so the garbage collector does not need to
-   know it.  */
+   know it.
+
+   While the grab holds, a motion of the mouse is a motion on the bar
+   of the window of the press, so `track-mouse' gives
+   scroll-bar-movement events, and scroll-bar-drag moves the window.
+   The drag of X keeps the offset of the press from the top of the
+   handle.  This file does not: the top of the handle goes to the
+   pointer, as for a click of mouse-2 in the trough.  */
 
 #include <config.h>
 
@@ -85,6 +92,7 @@ static void draw_bar (struct frame *, int, int, int,
 static void keep_layout (struct window *, const int[LAYOUT_SIZE]);
 static bool kept_layout (struct window *, struct rd_scroll_bar_layout *);
 static struct rd_scroll_bar_layout layout_of (const int[LAYOUT_SIZE]);
+static struct window *grab_window (const struct remote_scroll_bar_grab *);
 static struct window *bar_window_at (struct frame *, int, int);
 static void store_click (struct window *,
 			 const struct rd_scroll_bar_layout *,
@@ -115,9 +123,7 @@ remote_scroll_bar_grab_release (struct remote_scroll_bar_grab *grab,
   grab->held = false;
   if (button->press)
     return false;
-  struct window *w = (grab->frame
-		      ? bar_window_at (grab->frame, grab->x, grab->y)
-		      : NULL);
+  struct window *w = grab_window (grab);
   struct rd_scroll_bar_layout layout;
   if (w && kept_layout (w, &layout))
     store_click (w, &layout, button);
@@ -139,6 +145,26 @@ remote_scroll_bar_press (struct remote_scroll_bar_grab *grab,
 	  .y = button->y, .code = button->code };
       store_click (w, &layout, button);
     }
+  return true;
+}
+
+bool
+remote_scroll_bar_motion (const struct remote_scroll_bar_grab *grab, int y,
+			  struct frame **fp, Lisp_Object *bar_window,
+			  enum scroll_bar_part *part, Lisp_Object *offset,
+			  Lisp_Object *range)
+{
+  struct window *w = grab->held ? grab_window (grab) : NULL;
+  struct rd_scroll_bar_layout layout;
+  if (!w || !kept_layout (w, &layout))
+    return false;
+  int bar_offset, bar_range;
+  *part = (enum scroll_bar_part) rd_scroll_bar_hit (&layout, y, &bar_offset,
+						    &bar_range);
+  *fp = grab->frame;
+  XSETWINDOW (*bar_window, w);
+  XSETINT (*offset, bar_offset);
+  XSETINT (*range, bar_range);
   return true;
 }
 
@@ -201,6 +227,16 @@ layout_of (const int args[LAYOUT_SIZE])
   return rd_scroll_bar_layout (args[LAYOUT_TOP], args[LAYOUT_HEIGHT],
 			       args[LAYOUT_WIDTH], args[LAYOUT_PORTION],
 			       args[LAYOUT_WHOLE], args[LAYOUT_POSITION]);
+}
+
+/* Return the window of the press of GRAB, or NULL if the frame of the
+   press was deleted or no bar is at the press position now.  */
+static struct window *
+grab_window (const struct remote_scroll_bar_grab *grab)
+{
+  return (grab->frame
+	  ? bar_window_at (grab->frame, grab->x, grab->y)
+	  : NULL);
 }
 
 /* Return the window whose vertical scroll bar is at X, Y of F, or NULL

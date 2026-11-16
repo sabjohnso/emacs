@@ -36,10 +36,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    The wheel buttons of rdproto.h are those of X: a press
    gives a wheel event, and a release gives none.  A motion message
    records the position of the mouse in the session, for the
-   mouse_position_hook, and updates the mouse highlight.  As in
-   pgtkterm.c, it gives a help event when the help text under the mouse
-   is not nil, or was not nil before, so `show-help-function' can show
-   or hide a tooltip.
+   mouse_position_hook, and updates the mouse highlight.  While the
+   grab of a scroll bar holds, the hook gives the position on that bar
+   (remotescroll.c).  As in pgtkterm.c, a motion message gives a help
+   event when the help text under the mouse is not nil, or was not nil
+   before, so `show-help-function' can show or hide a tooltip.
 
    A frame with the frame parameter `remote-tip' is transparent to the
    input of the mouse: its parent gets each button and motion message
@@ -351,12 +352,16 @@ remote_mouse_position (struct frame **fp, int insist,
   if (!f)
     return;
   remote_clear_mouse_moved (dpyinfo);
+  *timestamp = dpyinfo->last_mouse_movement_time;
+  if (remote_scroll_bar_motion (&dpyinfo->scroll_bar_grab,
+				dpyinfo->last_mouse_motion_y, fp, bar_window,
+				part, x, y))
+    return;
   *fp = f;
   *bar_window = Qnil;
   *part = scroll_bar_above_handle;
   XSETINT (*x, dpyinfo->last_mouse_motion_x);
   XSETINT (*y, dpyinfo->last_mouse_motion_y);
-  *timestamp = dpyinfo->last_mouse_movement_time;
 }
 
 /* Give F the focus of DPYINFO, and store a focus-out event for the

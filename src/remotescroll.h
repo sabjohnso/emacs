@@ -21,6 +21,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #define EMACS_REMOTESCROLL_H
 
 #include "dispextern.h"
+#include "termhooks.h"
 
 struct window;
 struct frame;
@@ -76,6 +77,19 @@ extern bool remote_scroll_bar_grab_release
 extern bool remote_scroll_bar_press
   (struct remote_scroll_bar_grab *grab,
    const struct remote_scroll_bar_button *button);
+
+/* If GRAB holds, report a motion of the mouse to the row Y as a motion
+   on the bar of the window of the press, as x_scroll_bar_report_motion
+   of xterm.c does, and return true.  Set *FP to the frame of the
+   press, *BAR_WINDOW to the window, and *PART to the part of the bar at
+   Y.  Set *OFFSET to Y relative to the inside top of the bar, clamped
+   to [0, range], and *RANGE to the range of the bar.  Return false,
+   and change nothing, if GRAB does not hold or the bar has no
+   layout.  */
+extern bool remote_scroll_bar_motion
+  (const struct remote_scroll_bar_grab *grab, int y, struct frame **fp,
+   Lisp_Object *bar_window, enum scroll_bar_part *part,
+   Lisp_Object *offset, Lisp_Object *range);
 
 /* Remove F from GRAB.  Call this when F is deleted.  */
 extern void remote_scroll_bar_forget_frame
