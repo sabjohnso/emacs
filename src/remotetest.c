@@ -72,8 +72,11 @@ static const struct remote_sink_ops remote_counting_ops =
    of sink: it shows that a session needs only the sink interface.  */
 
 /* The data of a recording sink: the encoded messages that the client
-   has not taken, the number of bytes since the last flush, and the
-   number of bytes that the sink says it did not send.  */
+   has not taken, the number of bytes since the last flush, the number
+   of bytes that the sink says it did not send, and the number of
+   flushes that had bytes to send.  If COUNT_WRITES, the sink also says
+   that it did not send the bytes since the last flush, as a transport
+   does.  */
 struct remote_recording
 {
   unsigned char *output;
@@ -81,6 +84,8 @@ struct remote_recording
   ptrdiff_t size;
   ptrdiff_t unflushed;
   ptrdiff_t queued;
+  ptrdiff_t flushes;
+  bool count_writes;
 };
 
 /* The number of recording and counting sinks that exist.  */
@@ -137,18 +142,21 @@ the session has no recording client.  */)
 }
 
 DEFUN ("remote-display--set-queued", Fremote_display__set_queued,
-       Sremote_display__set_queued, 2, 2, 0,
+       Sremote_display__set_queued, 2, 3, 0,
        doc: /* Make the recording client of DISPLAY report QUEUED bytes.
 These are the bytes that a transport did not send yet.  The recording
 client keeps all bytes, so the number is only what the session sees.
-Signal an error if the session has no recording client.  */)
-  (Lisp_Object display, Lisp_Object queued)
+If COUNT-WRITES is non-nil, the client also reports the bytes since
+the last flush, as a transport does.  Signal an error if the session
+has no recording client.  */)
+  (Lisp_Object display, Lisp_Object queued, Lisp_Object count_writes)
 {
   struct remote_recording *recording
     = remote_sink_data (check_x_display_info (display), &remote_recording_ops);
   if (!recording)
     error ("The session has no recording client");
   recording->queued = check_integer_range (queued, 0, PTRDIFF_MAX);
+  recording->count_writes = !NILP (count_writes);
   return Qnil;
 }
 
@@ -188,6 +196,19 @@ Signal an error if the session has no recording client.  */)
   if (!recording)
     error ("The session has no recording client");
   return make_int (recording->unflushed);
+}
+
+DEFUN ("remote-display--flushes", Fremote_display__flushes,
+       Sremote_display__flushes, 1, 1, 0,
+       doc: /* Return the number of flushes of DISPLAY that had bytes to send.
+Signal an error if the session has no recording client.  */)
+  (Lisp_Object display)
+{
+  struct remote_recording *recording
+    = remote_sink_data (check_x_display_info (display), &remote_recording_ops);
+  if (!recording)
+    error ("The session has no recording client");
+  return make_int (recording->flushes);
 }
 
 DEFUN ("remote-display--flush-display", Fremote_display__flush_display,
@@ -513,6 +534,8 @@ static void
 remote_recording_flush (void *data)
 {
   struct remote_recording *recording = data;
+  if (recording->unflushed > 0)
+    recording->flushes++;
   recording->unflushed = 0;
 }
 
@@ -563,7 +586,8 @@ static ptrdiff_t
 remote_recording_queued (void *data)
 {
   struct remote_recording *recording = data;
-  return recording->queued;
+  return (recording->queued
+	  + (recording->count_writes ? recording->unflushed : 0));
 }
 
 /* The queued function of a counting sink.  It sends each byte at
@@ -586,6 +610,7 @@ syms_of_remotetest (void)
   defsubr (&Sremote_display__detach);
   defsubr (&Sremote_display__take_output);
   defsubr (&Sremote_display__unflushed_bytes);
+  defsubr (&Sremote_display__flushes);
   defsubr (&Sremote_display__flush_display);
   defsubr (&Sremote_display__counted_bytes);
   defsubr (&Sremote_display__kboard_keymap);

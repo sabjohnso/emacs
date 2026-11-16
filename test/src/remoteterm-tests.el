@@ -224,6 +224,30 @@
 ;;     is available, unless the build was configured without it.
 ;; 46. Built-in images: a PBM or XPM image of W x H pixels has the size
 ;;     W x H on a remote frame.
+;; 47. Image data: after a redisplay of a remote frame with an image,
+;;     the image-data messages of one ID join to a PNG file, and the
+;;     size in its IHDR chunk is the size of the image in pixels.
+;; 48. Image scale: with :scale 2, the size of the PNG file is two
+;;     times the size of the file of the same image with :scale 1.
+;; 49. Image before draw: while the sink reports fewer than 65536 bytes
+;;     that it did not send, all the image-data messages of a small
+;;     image come before the first draw-image message with its ID.
+;; 50. Image flush: the image data of an update goes out with the
+;;     draws of the update, in one flush.
+;; 51. Image once: a second redisplay of the frame sends no image data
+;;     for an ID that the client has.  After a new attach, the session
+;;     sends the data again.
+;; 52. Image pace: while the sink reports 65536 bytes or more that it
+;;     did not send, the session sends no image data.  When the
+;;     transport reports an empty queue, the session sends the rest,
+;;     and the next redisplay draws the image after its data.
+;; 53. Image queue: the data of two images of one update go out one
+;;     image after the other, also when the queue of the sink lets the
+;;     update send only a part of the first image.  The redisplay after
+;;     the transfers draws each image after its data.
+;; 54. Image limit: an image with more than 8192 pixels on a side sends
+;;     no image data and no draw-image message.  An image with 8192
+;;     pixels on a side sends its data.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -262,6 +286,7 @@
                   (window width height offset y row-y visible-height))
 (declare-function remote-display--focus "remotetest.c" (frame))
 (declare-function remote-display--focus-frames "remotetest.c" (display))
+(declare-function remote-display--flushes "remotetest.c" (display))
 (declare-function remote-display--flush-display "remotetest.c" (frame))
 (declare-function remote-display--kboard-keymap "remotetest.c" (display))
 (declare-function remote-display--live-sinks "remotetest.c" ())
@@ -7816,6 +7841,347 @@ Emacs has the decoder of each such TYPE in its own code."
              (should (equal (image-size (create-image data type t :scale 1)
                                         t frame)
                             (cons width height))))))))))
+
+;;;; Image transfer
+
+(defconst remoteterm-tests--png-signature
+  (unibyte-string 137 80 78 71 13 10 26 10)
+  "The first bytes of each PNG file.")
+
+(defun remoteterm-tests--draw-images (images before after)
+  "Draw IMAGES on a new remote frame, and return the value of AFTER.
+IMAGES is a list of image objects.  Insert each image on its own line
+of a new buffer of the frame.  Attach a recording client, call BEFORE
+with the name of the session, and redisplay.  Then call AFTER with
+the name of the session, the frame, and the bytes that the session
+sent for the redisplay."
+  (let* ((display "remote-image")
+         (frame (progn (x-open-connection display)
+                       (x-create-frame-with-faces
+                        '((display . "remote-image") (width . 80)
+                          (height . 40)))))
+         (buffer (generate-new-buffer "images")))
+    (unwind-protect
+        (progn
+          (set-window-buffer (frame-root-window frame) buffer)
+          (select-frame frame)
+          (remote-display--focus frame)
+          (with-current-buffer buffer
+            (dolist (image images)
+              (insert-image image)
+              (insert "\n")))
+          (remote-display--record display)
+          (funcall before display)
+          (redisplay t)
+          (funcall after display frame
+                   (remote-display--take-output display)))
+      (delete-frame frame)
+      (kill-buffer buffer))))
+
+(defun remoteterm-tests--redisplay-output (display)
+  "Redisplay, and return the bytes that the session DISPLAY sent."
+  (redisplay t)
+  (remote-display--take-output display))
+
+(defun remoteterm-tests--pbm-image (width height &optional scale)
+  "Return a PBM image of WIDTH x HEIGHT white pixels, with SCALE or 1."
+  (create-image (remoteterm-tests--pbm width height) 'pbm t
+                :scale (or scale 1)))
+
+(defun remoteterm-tests--noise-image (width height)
+  "Return a PBM image of WIDTH x HEIGHT random pixels.
+Random pixels do not compress well, so the PNG file is large."
+  (create-image
+   (concat (format "P1\n%d %d\n" width height)
+           (apply #'string
+                  (cl-loop repeat (* width height)
+                           collect (if (zerop (rd-gen-random 2)) ?0 ?1))))
+   'pbm t :scale 1))
+
+(defun remoteterm-tests--image-files (bytes)
+  "Return the PNG files of the image-data messages in BYTES.
+The value is an alist of (ID . FILE), in the order of the first
+image-data message of each ID.  FILE is as for
+`remoteterm-tests--joined-image'."
+  (let ((data (mapcar #'cdr
+                      (seq-filter (lambda (message)
+                                    (eq (car message) 'image-data))
+                                  (remoteterm-tests--all-messages bytes)))))
+    (mapcar (lambda (id)
+              (cons id (remoteterm-tests--joined-image
+                        (seq-filter (lambda (fields)
+                                      (= (plist-get fields :image) id))
+                                    data))))
+            (seq-uniq (mapcar (lambda (fields) (plist-get fields :image))
+                              data)))))
+
+(defun remoteterm-tests--joined-image (data)
+  "Return the file of DATA, the image-data fields of one image.
+Each message must have the total of the first one, and must start
+where the one before it ends.  If the bytes of DATA are the total
+bytes, the value is a unibyte string with them.  If they are fewer,
+the value is the symbol `partial'.  Else it is the symbol `broken'."
+  (let ((total (plist-get (car data) :total))
+        (offset 0))
+    (cond
+     ((not (cl-every (lambda (fields)
+                       (prog1 (and (= (plist-get fields :total) total)
+                                   (= (plist-get fields :offset) offset))
+                         (setq offset (+ offset (length (plist-get fields
+                                                                   :bytes))))))
+                     data))
+      'broken)
+     ((< offset total) 'partial)
+     ((> offset total) 'broken)
+     (t (apply #'unibyte-string
+               (mapcan (lambda (fields)
+                         (append (plist-get fields :bytes) nil))
+                       data))))))
+
+(defun remoteterm-tests--png-size (file)
+  "Return (WIDTH . HEIGHT) from the IHDR chunk of the PNG FILE.
+Return nil if FILE is not a unibyte string that starts with the PNG
+signature and the IHDR chunk."
+  (and (stringp file)
+       (>= (length file) 24)
+       (string-prefix-p remoteterm-tests--png-signature file)
+       (equal (substring file 12 16) "IHDR")
+       (cons (remoteterm-tests--uint32 file 16)
+             (remoteterm-tests--uint32 file 20))))
+
+(defun remoteterm-tests--uint32 (bytes start)
+  "Return the big-endian 32-bit number at START of the string BYTES."
+  (seq-reduce (lambda (number byte) (+ (* number 256) byte))
+              (substring bytes start (+ start 4)) 0))
+
+(defun remoteterm-tests--image-positions (type id messages)
+  "Return the indexes of the messages of TYPE with the image ID in MESSAGES."
+  (cl-loop for message in messages
+           for index from 0
+           when (and (eq (car message) type)
+                     (eql (plist-get (cdr message) :image) id))
+           collect index))
+
+(defun remoteterm-tests--drawn-after-data-p (id messages)
+  "Return non-nil if MESSAGES draw the image ID after its last data."
+  (let ((data (remoteterm-tests--image-positions 'image-data id messages)))
+    (and data
+         (seq-some (lambda (draw) (> draw (car (last data))))
+                   (remoteterm-tests--image-positions 'draw-image id
+                                                      messages)))))
+
+(defun remoteterm-tests--image-size-case ()
+  "Return a random (WIDTH HEIGHT) of a small image."
+  (list (rd-gen-integer 1 64) (rd-gen-integer 1 64)))
+
+(rd-daemon-deftest remoteterm-tests-image-data
+  "The data of an image is a PNG file with its size (law 47)."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     #'remoteterm-tests--image-size-case
+     (lambda (case)
+       (let* ((image (apply #'remoteterm-tests--pbm-image case))
+              (result (remoteterm-tests--draw-images
+                       (list image) #'ignore
+                       (lambda (_display frame output)
+                         (list (image-size image t frame)
+                               (remoteterm-tests--image-files output))))))
+         (pcase-let ((`(,size ,files) result))
+           (should (= (length files) 1))
+           (should (equal (remoteterm-tests--png-size (cdar files))
+                          size))))))))
+
+(rd-daemon-deftest remoteterm-tests-image-scale
+  "An image with :scale 2 has a PNG file of two times the size (law 48)."
+  (let ((rd-gen-trials 5))
+    (rd-gen-for-all
+     #'remoteterm-tests--image-size-case
+     (lambda (case)
+       (pcase-let* ((`(,width ,height) case)
+                    (files (remoteterm-tests--draw-images
+                            (list (remoteterm-tests--pbm-image width height)
+                                  (remoteterm-tests--pbm-image width height 2))
+                            #'ignore
+                            (lambda (_display _frame output)
+                              (remoteterm-tests--image-files output))))
+                    (`(,one ,two) (mapcar (lambda (file)
+                                            (remoteterm-tests--png-size
+                                             (cdr file)))
+                                          files)))
+         (should (= (length files) 2))
+         (should (equal two (cons (* 2 (car one)) (* 2 (cdr one))))))))))
+
+(rd-daemon-deftest remoteterm-tests-image-before-draw
+  "With room in the queue, image data comes before its draw (law 49)."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda () (cons (rd-gen-integer 0 65535)
+                      (remoteterm-tests--image-size-case)))
+     (lambda (case)
+       (pcase-let* ((`(,queued . ,size) case)
+                    (output (remoteterm-tests--draw-images
+                             (list (apply #'remoteterm-tests--pbm-image size))
+                             (lambda (display)
+                               (remote-display--set-queued display queued))
+                             (lambda (_display _frame output) output)))
+                    (messages (remoteterm-tests--all-messages output))
+                    (files (remoteterm-tests--image-files output))
+                    (id (caar files)))
+         (should (= (length files) 1))
+         (should (stringp (cdar files)))
+         (should (> (car (remoteterm-tests--image-positions
+                          'draw-image id messages))
+                    (car (last (remoteterm-tests--image-positions
+                                'image-data id messages))))))))))
+
+(ert-deftest remoteterm-tests-image-flush ()
+  "The image data of an update goes out with its draws in one flush (law 50)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let ((`(,flushes ,files)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--image-flush-case)))
+      (should (= (length files) 1))
+      (should (stringp (cdar files)))
+      (should (= flushes 1)))))
+
+(defun remoteterm-tests--image-flush-case ()
+  "Draw an image, and return (FLUSHES FILES).
+FLUSHES is the number of flushes of the redisplay that sent bytes, and
+FILES is as for `remoteterm-tests--image-files'."
+  (let ((before 0))
+    (remoteterm-tests--draw-images
+     (list (remoteterm-tests--pbm-image 40 30))
+     (lambda (display) (setq before (remote-display--flushes display)))
+     (lambda (display _frame output)
+       (list (- (remote-display--flushes display) before)
+             (remoteterm-tests--image-files output))))))
+
+(ert-deftest remoteterm-tests-image-once ()
+  "A client gets the data of an image once for each attach (law 51)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let* ((`(,first ,again ,attach)
+                  (remoteterm-tests--daemon-call
+                   'remoteterm-tests--image-once-case))
+                 (files (remoteterm-tests--image-files first))
+                 (id (caar files)))
+      (should (= (length files) 1))
+      (should (stringp (cdar files)))
+      (should-not (remoteterm-tests--image-files again))
+      (should (remoteterm-tests--image-positions
+               'draw-image id (remoteterm-tests--all-messages again)))
+      (should (equal (remoteterm-tests--image-files attach) files)))))
+
+(defun remoteterm-tests--image-once-case ()
+  "Draw an image three times, and return the bytes of each draw.
+The first draw is the first one, the second one is after
+`redraw-frame', and the third one is after a new attach."
+  (remoteterm-tests--draw-images
+   (list (remoteterm-tests--pbm-image 40 30))
+   #'ignore
+   (lambda (display frame output)
+     (list output
+           (progn (redraw-frame frame)
+                  (remoteterm-tests--redisplay-output display))
+           (progn (remote-display--detach display)
+                  (remote-display--record display)
+                  (remoteterm-tests--redisplay-output display))))))
+
+(ert-deftest remoteterm-tests-image-pace ()
+  "Image data waits while the sink of the session is full (law 52)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let* ((`(,full ,drained ,redrawn)
+                  (remoteterm-tests--daemon-call
+                   'remoteterm-tests--image-pace-case))
+                 (files (remoteterm-tests--image-files drained))
+                 (id (caar files)))
+      (should-not (remoteterm-tests--image-files full))
+      (should (= (length files) 1))
+      (should (stringp (cdar files)))
+      (should (remoteterm-tests--drawn-after-data-p
+               id (remoteterm-tests--all-messages
+                   (concat drained redrawn)))))))
+
+(defun remoteterm-tests--image-pace-case ()
+  "Draw an image with a full sink, and return the bytes of three steps.
+The first step is the draw, the second one is an empty queue of the
+transport, and the third one is the redisplay after it."
+  (remoteterm-tests--draw-images
+   (list (remoteterm-tests--pbm-image 40 30))
+   (lambda (display) (remote-display--set-queued display 65536))
+   (lambda (display _frame output)
+     (list output
+           (progn (remote-display--set-queued display 65535)
+                  (remote-display--queue-empty display)
+                  (remote-display--take-output display))
+           (remoteterm-tests--redisplay-output display)))))
+
+(ert-deftest remoteterm-tests-image-queue ()
+  "The data of two images go out one image after the other (law 53)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let* ((`(,update ,rest)
+                  (remoteterm-tests--daemon-call
+                   'remoteterm-tests--image-queue-case))
+                 (first (caar (remoteterm-tests--image-files update)))
+                 (messages (remoteterm-tests--all-messages
+                            (concat update rest)))
+                 (files (remoteterm-tests--image-files (concat update rest)))
+                 (second (car (remove first (mapcar #'car files)))))
+      ;; The queue lets the update send only a part of the first image.
+      (should (eq (cdr (assq first (remoteterm-tests--image-files update)))
+                  'partial))
+      (should (= (length files) 2))
+      (should (cl-every #'stringp (mapcar #'cdr files)))
+      (should (< (car (last (remoteterm-tests--image-positions
+                             'image-data first messages)))
+                 (car (remoteterm-tests--image-positions
+                       'image-data second messages))))
+      (should (remoteterm-tests--drawn-after-data-p first messages))
+      (should (remoteterm-tests--drawn-after-data-p second messages)))))
+
+(defun remoteterm-tests--image-queue-case ()
+  "Draw two large images with a queue that has room for one message.
+Return (UPDATE REST).  UPDATE is the bytes of the update.  REST is
+the bytes after an empty queue of the transport, and of the redisplay
+after it."
+  (remoteterm-tests--draw-images
+   (list (remoteterm-tests--noise-image 300 200)
+         (remoteterm-tests--noise-image 300 200))
+   (lambda (display) (remote-display--set-queued display 65535 t))
+   (lambda (display _frame output)
+     (list output
+           (progn (remote-display--set-queued display 0 t)
+                  (remote-display--queue-empty display)
+                  (concat (remote-display--take-output display)
+                          (remoteterm-tests--redisplay-output display)))))))
+
+(ert-deftest remoteterm-tests-image-limit ()
+  "An image with more than 8192 pixels on a side is not sent (law 54)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let ((`(,large ,largest)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--image-limit-case)))
+      (should-not (seq-some (lambda (message)
+                              (memq (car message) '(image-data draw-image)))
+                            (remoteterm-tests--all-messages large)))
+      (should (equal (mapcar (lambda (file)
+                               (remoteterm-tests--png-size (cdr file)))
+                             (remoteterm-tests--image-files largest))
+                     '((8192 . 1)))))))
+
+(defun remoteterm-tests--image-limit-case ()
+  "Return the bytes of a draw of an image 8193 pixels wide and 8192 wide."
+  (let ((max-image-size 100000))
+    (mapcar (lambda (width)
+              (remoteterm-tests--draw-images
+               (list (remoteterm-tests--pbm-image width 1))
+               #'ignore
+               (lambda (_display _frame output) output)))
+            '(8193 8192))))
 
 ;;;; The loop of the trials
 

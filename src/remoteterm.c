@@ -110,11 +110,13 @@ static void remote_define_frame (struct frame *);
 static void remote_forget_frames (struct remote_display_info *);
 static void remote_send_delete_frame (struct frame *);
 static void remote_flush_frame (struct frame *);
+static void remote_frame_up_to_date (struct frame *);
 static void remote_clear_glyph_string (struct glyph_string *);
 static Emacs_Rectangle remote_glyph_clip (struct glyph_string *);
 static Emacs_Rectangle remote_intersection (Emacs_Rectangle, Emacs_Rectangle);
 static int remote_foreground_x (struct glyph_string *);
 static void remote_draw_chars (struct glyph_string *);
+static void remote_draw_image (struct glyph_string *);
 static void remote_draw_composition (struct glyph_string *);
 static void remote_draw_static_composition (struct glyph_string *);
 static void remote_draw_automatic_composition (struct glyph_string *);
@@ -652,6 +654,16 @@ remote_flush_frame (struct frame *f)
     sink->ops->flush (sink->data);
 }
 
+/* The frame_up_to_date_hook.  The update of F ended, so send the image
+   data that the update did not send.  If the flush at the end of the
+   update sent all the bytes, the transport does not call
+   remote_output_drained, so continue here.  */
+static void
+remote_frame_up_to_date (struct frame *f)
+{
+  remote_send_image_data (FRAME_DISPLAY_INFO (f));
+}
+
 /* The transport of the client of DPYINFO calls this when it sent
    all the bytes that it had.  */
 void
@@ -659,6 +671,7 @@ remote_output_drained (struct remote_display_info *dpyinfo)
 {
   remote_send_font_data (dpyinfo);
   remote_send_clipboard_data (dpyinfo);
+  remote_send_image_data (dpyinfo);
 }
 
 /* Call SEND_ONE with DPYINFO while the sink of DPYINFO has fewer than
@@ -737,6 +750,7 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
   dpyinfo->sink = sink;
   remote_drop_font_transfers (dpyinfo);
   remote_drop_clipboard (dpyinfo);
+  remote_reset_images (dpyinfo);
 
   /* A new client has no font or frame definitions, and shows
      nothing.  */
@@ -1530,11 +1544,11 @@ remote_fringe_rows_above (const struct draw_fringe_bitmap_params *p)
   return max (0, -p->dh);
 }
 
-/* Clear the area of S, and send its glyphs if the protocol can show
-   them.  A client draws only the glyphs of a message, so the clear
-   erases a cursor or older text under S.  The protocol has no message
-   for an image or a glyphless character, so the client shows the
-   background there.  */
+/* Clear the area of S, and send its glyphs or its image if the
+   protocol can show them.  A client draws only the glyphs of a
+   message, so the clear erases a cursor or older text under S.  The
+   protocol has no message for a glyphless character, so the client
+   shows the background there.  */
 static void
 remote_draw_glyph_string (struct glyph_string *s)
 {
@@ -1547,6 +1561,30 @@ remote_draw_glyph_string (struct glyph_string *s)
     remote_draw_chars (s);
   else if (s->first_glyph->type == COMPOSITE_GLYPH)
     remote_draw_composition (s);
+  else if (s->first_glyph->type == IMAGE_GLYPH)
+    remote_draw_image (s);
+}
+
+/* Send a draw-image message for S, a string of one image, after the
+   data of the image.  Send nothing if the protocol cannot send the
+   image.  */
+static void
+remote_draw_image (struct glyph_string *s)
+{
+  uint32_t id = remote_image_prepare (s->f, s->img);
+  if (!id)
+    return;
+  Emacs_Rectangle clip = remote_glyph_clip (s);
+  struct rd_message message =
+    {
+      .type = RD_DRAW_IMAGE,
+      .u.draw_image = { .frame = remote_frame_id (s->f), .image = id,
+			.x = s->x, .y = s->y,
+			.clip_x = clip.x, .clip_y = clip.y,
+			.clip_width = clip.width,
+			.clip_height = clip.height },
+    };
+  remote_send_draw (s->f, &message);
 }
 
 /* Fill the part of the background of S that is visible in its row.  */
@@ -2160,7 +2198,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->update_begin_hook = remote_no_op_frame;
   terminal->update_end_hook = remote_flush_frame;
   terminal->clear_frame_hook = remote_no_op_frame;
-  terminal->frame_up_to_date_hook = remote_no_op_frame;
+  terminal->frame_up_to_date_hook = remote_frame_up_to_date;
   terminal->delete_frame_hook = remote_delete_frame;
   terminal->delete_terminal_hook = remote_delete_terminal;
   terminal->frame_visible_invisible_hook = remote_frame_visible_invisible;

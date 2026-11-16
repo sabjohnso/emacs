@@ -36,11 +36,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 struct rd_message;
 struct remote_font_transfer;
+struct remote_image_transfer;
 
-/* A session sends font data and clipboard data only while its sink has
-   fewer bytes than this that it did not send, so these large transfers
-   do not delay the draws.  The transport calls remote_output_drained
-   when its queue is empty again.  */
+/* A session sends font data, clipboard data and image data only while
+   its sink has fewer bytes than this that it did not send, so these
+   large transfers do not delay the draws.  The transport calls
+   remote_output_drained when its queue is empty again.  */
 enum { REMOTE_PACED_QUEUE_LIMIT = 64 * 1024 };
 
 struct remote_bitmap_record
@@ -127,6 +128,14 @@ struct remote_display_info
   /* The font files that the client asked for and did not get, in
      order.  See remotefonts.c.  */
   struct remote_font_transfer *font_transfers;
+
+  /* The number of the attach of the client, unique for the life of the
+     process; the PNG files that the client did not get complete, in
+     order; and true if a draw-image message went out before the data
+     of its image.  See remoteimage.c.  */
+  uintmax_t image_attach;
+  struct remote_image_transfer *image_transfers;
+  bool image_drawn_early;
 
   /* The sink of the client that receives the messages of this
      session.  The session owns the sink.  A client is attached if
@@ -247,6 +256,11 @@ extern void remote_want_font (struct remote_display_info *,
 			      const struct rd_message *);
 extern void remote_send_font_data (struct remote_display_info *);
 extern void remote_drop_font_transfers (struct remote_display_info *);
+
+/* Defined in remoteimage.c.  */
+extern uint32_t remote_image_prepare (struct frame *, struct image *);
+extern void remote_send_image_data (struct remote_display_info *);
+extern void remote_reset_images (struct remote_display_info *);
 
 /* In remoteterm.c.  */
 extern struct frame *remote_frame_of_id (struct remote_display_info *,
