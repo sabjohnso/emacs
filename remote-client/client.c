@@ -588,12 +588,14 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
   return mode.failed ? 1 : 0;
 }
 
-/* Make STREAM the connection of MODE.  close_connection removed the
-   state of the connection before it.  Send the clipboard text to the
-   new connection.  */
+/* Make STREAM the connection of MODE.  MODE must have no connection.
+   Then it has no state of a connection, because a new mode has none,
+   and close_connection removes it.  Send the clipboard text to the new
+   connection.  */
 static void
 open_connection (struct window_mode *mode, struct rc_stream *stream)
 {
+  g_assert (mode->connection == NULL);
   int fd = rc_stream_fd (stream);
   struct connection *connection = g_new (struct connection, 1);
   *connection = (struct connection)

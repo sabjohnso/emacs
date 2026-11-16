@@ -17,10 +17,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* The laws of menu.c, for random menus.  A random menu is a sequence
-   of entries that nest correctly, with at least one entry.  Its
-   items, separators and submenus have random flags, labels and keys.
-   Its submenu-end entries have only the kind.
+/* The laws of menu.c, for random menus (menugen.h).
 
    - Round trip: the entries of a menu, and then the show of its
      serial, give a tree.  The preorder walk of the tree gives the
@@ -57,26 +54,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <unistd.h>
 
 #include "menu.h"
+#include "menugen.h"
 
 enum { TRIALS = 300 };
-
-/* The most entries of a random menu, before the nest of the depth
-   law.  */
-enum { MAX_ENTRIES = 40 };
-
-/* The most entries of a menu in a test: a random menu in a nest of
-   RC_MENU_MAX_DEPTH + 1 submenus.  */
-enum { MAX_MENU = MAX_ENTRIES + 2 * (RC_MENU_MAX_DEPTH + 1) };
-
-/* The deepest nest of submenus of a random menu.  */
-enum { MAX_RANDOM_DEPTH = 4 };
-
-/* A sequence of entries.  */
-struct menu
-{
-  struct rd_menu_item entries[MAX_MENU];
-  int n;
-};
 
 static const char *run_trial (uint64_t);
 static bool round_trip_law (uint64_t *);
@@ -84,11 +64,6 @@ static bool new_serial_law (uint64_t *);
 static bool damage_law (uint64_t *);
 static bool ids_law (uint64_t *);
 static bool hide_law (uint64_t *);
-static void random_menu (uint64_t *, uint32_t, struct menu *);
-static void random_entries (uint64_t *, uint32_t, int, struct menu *);
-static void random_entry (uint64_t *, uint32_t, uint8_t,
-			  struct rd_menu_item *);
-static struct rd_menu_item end_entry (uint32_t);
 static void flatten (struct menu *);
 static void nest (struct menu *, int);
 static void insert (struct menu *, int, struct rd_menu_item);
@@ -103,8 +78,6 @@ static bool same_entry (const struct rd_menu_item *,
 			const struct rd_menu_item *);
 static void item_ids (const struct rc_menu_node *, size_t, uint32_t *,
 		      int *);
-static uint64_t random_below (uint64_t *, uint64_t);
-static uint64_t random_next (uint64_t *);
 
 /* A law and its name.  */
 static const struct
@@ -295,69 +268,6 @@ hide_law (uint64_t *state)
   return passed;
 }
 
-/* Make in MENU a random menu SERIAL with at least one entry.  */
-static void
-random_menu (uint64_t *state, uint32_t serial, struct menu *menu)
-{
-  do
-    {
-      menu->n = 0;
-      random_entries (state, serial, MAX_RANDOM_DEPTH, menu);
-    }
-  while (menu->n == 0);
-}
-
-/* Add to MENU random entries of the menu SERIAL that nest correctly,
-   with a nest of at most DEPTH submenus.  */
-static void
-random_entries (uint64_t *state, uint32_t serial, int depth,
-		struct menu *menu)
-{
-  int count = random_below (state, 8);
-  /* Keep room for the submenu-end entries of the open submenus.  */
-  for (int i = 0;
-       i < count && menu->n + 2 * (MAX_RANDOM_DEPTH + 1) <= MAX_ENTRIES;
-       i++)
-    {
-      uint8_t kind = random_below (state, 3);
-      if (kind == RD_MENU_KIND_SUBMENU_START && depth == 0)
-	kind = RD_MENU_KIND_ITEM;
-      random_entry (state, serial, kind, &menu->entries[menu->n++]);
-      if (kind == RD_MENU_KIND_SUBMENU_START)
-	{
-	  random_entries (state, serial, depth - 1, menu);
-	  menu->entries[menu->n++] = end_entry (serial);
-	}
-    }
-}
-
-/* Make in ENTRY a random entry of the kind KIND of the menu SERIAL.
-   Only an item has an id.  Some labels have the largest size.  */
-static void
-random_entry (uint64_t *state, uint32_t serial, uint8_t kind,
-	      struct rd_menu_item *entry)
-{
-  entry->serial = serial;
-  entry->kind = kind;
-  entry->flags = random_below (state, 16);
-  entry->id = kind == RD_MENU_KIND_ITEM ? random_next (state) : 0;
-  entry->nlabel = (random_below (state, 10) == 0 ? RD_MAX_MENU_TEXT
-		   : random_below (state, 40));
-  for (int i = 0; i < entry->nlabel; i++)
-    entry->label[i] = random_next (state);
-  entry->nkey = random_below (state, RD_MAX_MENU_KEY + 1);
-  for (int i = 0; i < entry->nkey; i++)
-    entry->key[i] = random_next (state);
-}
-
-/* Return a submenu-end entry of the menu SERIAL.  */
-static struct rd_menu_item
-end_entry (uint32_t serial)
-{
-  return (struct rd_menu_item) { .serial = serial,
-				 .kind = RD_MENU_KIND_SUBMENU_END };
-}
-
 /* Delete the submenu-start and the submenu-end entries of MENU.  Keep
    at least one entry.  */
 static void
@@ -512,20 +422,4 @@ item_ids (const struct rc_menu_node *nodes, size_t n, uint32_t *ids,
 	ids[(*nids)++] = nodes[i].id;
       item_ids (nodes[i].children, nodes[i].nchildren, ids, nids);
     }
-}
-
-static uint64_t
-random_below (uint64_t *state, uint64_t limit)
-{
-  return random_next (state) % limit;
-}
-
-/* Return the next number of the generator splitmix64.  */
-static uint64_t
-random_next (uint64_t *state)
-{
-  uint64_t z = (*state += 0x9e3779b97f4a7c15);
-  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
-  z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
-  return z ^ (z >> 31);
 }

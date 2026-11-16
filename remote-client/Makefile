@@ -144,7 +144,7 @@ test-stack: test-stack.o stack.o
 test-compose: test-compose.o compose.o stack.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
-test-menu: test-menu.o menu.o
+test-menu: test-menu.o menu.o menugen.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-input: test-input.o input.o rdproto.o
@@ -199,7 +199,7 @@ test-link: test-link.o link.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-view: test-view.o view.o input.o sizes.o stack.o compose.o menu.o \
-  $(RENDER_OBJS)
+  menugen.o $(RENDER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
 client.o view.o input.o test-input.o test-view.o test-reconnect.o: %.o: %.c
@@ -268,6 +268,7 @@ test-ssh.o: relayline.h token.h ../src/rdproto.h
 listenspec.o test-listenspec.o relay.o client.o test-relay.o: listenspec.h
 sshconfig.o test-sshconfig.o bootstrap.o client.o: sshconfig.h
 menu.o test-menu.o: menu.h ../src/rdproto.h
+menugen.o test-menu.o test-view.o: menugen.h menu.h ../src/rdproto.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)

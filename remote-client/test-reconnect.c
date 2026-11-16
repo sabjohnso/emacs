@@ -169,6 +169,7 @@ static bool wait_for_choice (int, int, uint32_t, bool, uint32_t);
 static bool read_choice (int, int, struct rd_menu_choice *);
 static bool menu_shows (bool);
 static bool menu_window_p (Display *);
+static int ignore_x_error (Display *, XErrorEvent *);
 static bool press_keys (const KeySym *, int);
 static char *make_text (size_t, char);
 static pid_t start_clipboard_owner (const char *);
@@ -807,19 +808,31 @@ read_choice (int fd, int limit, struct rd_menu_choice *choice)
 
 /* Wait at most CONNECT_LIMIT milliseconds until a popup menu shows on
    the display, if SHOWN, or until no popup menu shows.  Return false
-   if that does not occur.  */
+   if that does not occur.  A window can go away while the test looks
+   at it, so ignore the errors of X while the test waits.  */
 static bool
 menu_shows (bool shown)
 {
   Display *display = XOpenDisplay (NULL);
   if (!display)
     return false;
+  XErrorHandler old = XSetErrorHandler (ignore_x_error);
   int64_t end = now_ms () + CONNECT_LIMIT;
   bool done;
   while (!(done = menu_window_p (display) == shown) && now_ms () < end)
     poll (NULL, 0, 20);
   XCloseDisplay (display);
+  XSetErrorHandler (old);
   return done;
+}
+
+/* The error handler of X while the test waits for a menu.  Ignore the
+   error: the function of X that failed returns 0.  */
+static int
+ignore_x_error (Display *display, XErrorEvent *error)
+{
+  (void) display, (void) error;
+  return 0;
 }
 
 /* Return true if a popup menu shows on DISPLAY: a child of the root

@@ -254,6 +254,12 @@ pixels, so that each frame of the chain moves the origin."
   (rd-gen-list (lambda () (cons (rd-gen-integer 1 30) (rd-gen-integer 1 30)))
                max-length))
 
+(defun rd-gen-text (max-length)
+  "Return a random string of up to MAX-LENGTH characters.
+The characters have 1, 2, 3, or 4 bytes of UTF-8."
+  (apply #'string (rd-gen-list (lambda () (rd-gen-element '(?a ?é ?€ ?😀)))
+                               max-length)))
+
 ;;;; Menus
 
 (defconst rd-gen-menu-separators '("--" "--single-line")

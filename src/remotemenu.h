@@ -27,17 +27,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 struct frame;
 struct rd_message;
 struct remote_display_info;
-struct remote_menu_wait;
 
 /* The popup menu state of a session.  */
 struct remote_menu_state
 {
   /* The serial of the last menu that the session showed.  */
   uint32_t serial;
-
-  /* The menu that the session waits for, or NULL.  See
-     remotemenu.c.  */
-  struct remote_menu_wait *wait;
 };
 
 /* The menu_show_hook of a session.  Show the menu of menu_items on

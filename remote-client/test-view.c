@@ -32,7 +32,27 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    area of the child goes to the child, in the coordinates of the
    child.  As with the implicit grab of X, the input after a press in
    the child goes to the child until the release of the last button,
-   also outside the child.  */
+   also outside the child.
+
+   The menu law holds for each random menu of menugen.h, with a random
+   title.  The labels, keys and titles have random bytes, or UTF-8 that
+   the end can cut in a character.
+   - Widgets: the menu has the title item, if the title is not empty,
+     and then one item for each entry, in order.  A submenu-start
+     entry gives an item with a submenu that has the items of the
+     entries up to its submenu-end entry.  Each item is sensitive if
+     and only if its entry is enabled.  A separator gives a separator
+     item.  A toggle or a radio item gives a check item, drawn as a
+     radio for a radio, and active if and only if it is selected.
+     Each label shows the valid UTF-8 of its bytes (U+FFFD for each
+     bad byte), up to the first NUL byte.  The key shows in a second
+     label, if it is not empty.
+   - Choice: the activation of a random enabled item sends exactly one
+     menu choice, with the id of that item.
+
+   The program runs TRIALS trials of the law from a seed that it gets
+   from the clock, and writes the seed of a failed trial.  With one
+   argument, it runs the trial of that seed only.  */
 
 #include <config.h>
 
@@ -40,10 +60,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <gtk/gtk.h>
 
 #include "menu.h"
+#include "menugen.h"
 #include "view.h"
 
 /* The longest time that an example waits for a message, in
@@ -53,6 +76,18 @@ enum { WAIT_LIMIT = 3000000 };
 /* The place and the size of the child frame of the examples.  */
 enum { CHILD = 2, CHILD_X = 50, CHILD_Y = 40, CHILD_WIDTH = 60,
        CHILD_HEIGHT = 30 };
+
+/* The number of trials of the menu law.  */
+enum { TRIALS = 40 };
+
+/* The enabled items of a menu: the widget of each, and the id of its
+   entry.  */
+struct choices
+{
+  GtkWidget *items[MAX_MENU];
+  uint32_t ids[MAX_MENU];
+  int n;
+};
 
 /* The messages that a view sent, and the frames of the windows that
    the user asked to close.  */
@@ -139,6 +174,23 @@ static bool remove_menu_frame_example (void);
 static bool refused_grab_example (void);
 static bool trigger_example (GdkEventType);
 static bool widgets_example (void);
+static bool menu_laws (void);
+static bool menu_law (struct example *, uint64_t);
+static void show_random_menu (struct example *, const struct menu *,
+			      const uint8_t *, int);
+static bool shows_menu (GtkMenuShell *, const struct menu *,
+			const uint8_t *, int, struct choices *);
+static bool shows_shell (GtkMenuShell *, const struct menu *, int *,
+			 struct choices *);
+static bool shows_items (GList *, const struct menu *, int *,
+			 struct choices *);
+static bool shows_entry (GtkWidget *, const struct menu *, int *,
+			 struct choices *);
+static bool shows_check (GtkWidget *, uint8_t);
+static bool shows_texts (GtkWidget *, const uint8_t *, int, const uint8_t *,
+			 int);
+static bool label_shows (GtkWidget *, const uint8_t *, int);
+static int choices_after (const struct sent *, int);
 static void popdown (GtkMenuShell *);
 static void show_menu (struct example *, uint32_t, uint32_t,
 		       const struct menu_entry *, size_t, const char *);
@@ -184,6 +236,13 @@ main (int argc, char **argv)
   /* A warning of GTK, such as a popup menu with no trigger event, is
      a failure.  */
   g_log_set_always_fatal (G_LOG_LEVEL_CRITICAL | G_LOG_LEVEL_WARNING);
+  if (argc == 2)
+    {
+      struct example *example = start_example (300, 200);
+      bool passed = menu_law (example, strtoull (argv[1], NULL, 10));
+      end_example (example);
+      return passed ? 0 : 1;
+    }
   bool passed = (show_example (300, 200) && show_example (640, 480)
 		 && focus_example (true) && focus_example (false)
 		 && resize_example (300, 200, 420, 260)
@@ -207,10 +266,10 @@ main (int argc, char **argv)
 		 && refused_grab_example ()
 		 && trigger_example (GDK_BUTTON_PRESS)
 		 && trigger_example (GDK_KEY_PRESS)
-		 && widgets_example ());
+		 && widgets_example () && menu_laws ());
   if (!passed)
     return 1;
-  printf ("test-view: the examples passed\n");
+  printf ("test-view: the examples and %d trials passed\n", TRIALS);
   return 0;
 }
 
@@ -382,7 +441,10 @@ start_example (uint32_t width, uint32_t height)
 }
 
 /* Free EXAMPLE.  The view must destroy its window and its menu, so
-   that the next example has only its own window.  */
+   that the next example has only its own window.  GTK can make one
+   tooltip window for the display while a popup menu is open.  GTK
+   keeps that window, and the view has no tooltips, so the check
+   ignores it.  */
 static void
 end_example (struct example *example)
 {
@@ -392,8 +454,11 @@ end_example (struct example *example)
   while (g_main_context_iteration (NULL, false))
     ;
   GList *windows = gtk_window_list_toplevels ();
+  int count = 0;
+  for (GList *w = windows; w; w = w->next)
+    count += strcmp (G_OBJECT_TYPE_NAME (w->data), "GtkTooltipWindow") != 0;
   g_list_free (windows);
-  if (windows)
+  if (count > 0)
     {
       fprintf (stderr, "test-view: a window stays after its view\n");
       abort ();
@@ -945,6 +1010,216 @@ widgets_example (void)
   return passed;
 }
 
+/* Run TRIALS trials of the menu law in one frame, from a seed that
+   comes from the clock.  Write the seed of a failed trial.  */
+static bool
+menu_laws (void)
+{
+  uint64_t base = ((uint64_t) time (NULL) << 20 ^ getpid ()) * TRIALS;
+  struct example *example = start_example (300, 200);
+  bool passed = true;
+  for (int trial = 0; passed && trial < TRIALS; trial++)
+    {
+      passed = menu_law (example, base + trial);
+      if (!passed)
+	fprintf (stderr, "test-view: the menu law failed with seed %llu\n",
+		 (unsigned long long) (base + trial));
+    }
+  end_example (example);
+  return passed;
+}
+
+/* Run the trial SEED of the menu law in the frame of EXAMPLE.  Return
+   true if the law holds.  */
+static bool
+menu_law (struct example *example, uint64_t seed)
+{
+  static struct menu menu;
+  uint64_t state = seed;
+  uint32_t serial = random_next (&state);
+  random_menu (&state, serial, &menu);
+  uint8_t title[RD_MAX_MENU_TEXT];
+  int ntitle = (random_below (&state, 2)
+		? random_below (&state, RD_MAX_MENU_TEXT + 1) : 0);
+  random_text (&state, title, ntitle);
+  int first = example->sent.count;
+  show_random_menu (example, &menu, title, ntitle);
+  GtkMenuShell *shell = wait_for_menu ();
+  static struct choices choices;
+  choices.n = 0;
+  bool passed = shell && shows_menu (shell, &menu, title, ntitle, &choices);
+  if (passed && choices.n > 0)
+    {
+      int chosen = random_below (&state, choices.n);
+      gtk_menu_item_activate (GTK_MENU_ITEM (choices.items[chosen]));
+      passed = wait_for_choice (example, serial, 1, choices.ids[chosen]);
+      run_for (WAIT_LIMIT / 30);
+      passed = passed && choices_after (&example->sent, first) == 1;
+    }
+  rc_view_close_menu (example->view);
+  return passed;
+}
+
+/* Give the entries of MENU, with the NTITLE bytes TITLE, to the view of
+   EXAMPLE at the position 10, 20 of the frame 1, as the client
+   does.  */
+static void
+show_random_menu (struct example *example, const struct menu *menu,
+		  const uint8_t *title, int ntitle)
+{
+  uint32_t serial = menu->entries[0].serial;
+  struct rc_menu_model model = { 0 };
+  for (int i = 0; i < menu->n; i++)
+    rc_menu_add (&model, &menu->entries[i]);
+  struct rd_show_menu show =
+    { .frame = 1, .serial = serial, .x = 10, .y = 20, .ntitle = ntitle };
+  memcpy (show.title, title, ntitle);
+  struct rc_menu *tree = rc_menu_show (&model, serial);
+  rc_view_show_menu (example->view, &show, tree);
+  rc_menu_free (tree);
+  rc_menu_model_free (&model);
+}
+
+/* Return true if SHELL shows the NTITLE bytes TITLE and the entries of
+   MENU, as the widgets part of the menu law says.  Add the enabled
+   items to CHOICES.  */
+static bool
+shows_menu (GtkMenuShell *shell, const struct menu *menu,
+	    const uint8_t *title, int ntitle, struct choices *choices)
+{
+  GList *children = gtk_container_get_children (GTK_CONTAINER (shell));
+  GList *items = children;
+  bool passed = true;
+  if (ntitle > 0)
+    {
+      passed = (items && !gtk_widget_get_sensitive (items->data)
+		&& shows_texts (items->data, title, ntitle, NULL, 0));
+      items = items ? items->next : NULL;
+    }
+  int next = 0;
+  passed = (passed && shows_items (items, menu, &next, choices)
+	    && next == menu->n);
+  g_list_free (children);
+  return passed;
+}
+
+/* Return true if the items of SHELL show the entries of MENU from the
+   entry *NEXT to the submenu-end entry that ends them.  Set *NEXT to
+   the entry after that submenu-end entry.  Add the enabled items to
+   CHOICES.  */
+static bool
+shows_shell (GtkMenuShell *shell, const struct menu *menu, int *next,
+	     struct choices *choices)
+{
+  GList *children = gtk_container_get_children (GTK_CONTAINER (shell));
+  bool passed = shows_items (children, menu, next, choices);
+  g_list_free (children);
+  return passed;
+}
+
+/* Return true if the widgets ITEMS show the entries of MENU from the
+   entry *NEXT to the submenu-end entry that ends them, or to the end of
+   MENU.  Set *NEXT to the entry after that end.  Add the enabled items
+   to CHOICES.  */
+static bool
+shows_items (GList *items, const struct menu *menu, int *next,
+	     struct choices *choices)
+{
+  GList *item = items;
+  bool passed = true;
+  while (passed && *next < menu->n
+	 && menu->entries[*next].kind != RD_MENU_KIND_SUBMENU_END)
+    {
+      passed = item && shows_entry (item->data, menu, next, choices);
+      item = item ? item->next : NULL;
+    }
+  if (*next < menu->n)
+    (*next)++;
+  return passed && !item;
+}
+
+/* Return true if ITEM shows the entry *NEXT of MENU.  Set *NEXT to the
+   entry after it, or after the submenu that it starts.  Add an enabled
+   item to CHOICES.  */
+static bool
+shows_entry (GtkWidget *item, const struct menu *menu, int *next,
+	     struct choices *choices)
+{
+  const struct rd_menu_item *entry = &menu->entries[(*next)++];
+  bool enabled = entry->flags & RD_MENU_FLAG_ENABLED;
+  GtkWidget *submenu = gtk_menu_item_get_submenu (GTK_MENU_ITEM (item));
+  if (gtk_widget_get_sensitive (item) != enabled)
+    return false;
+  switch (entry->kind)
+    {
+    case RD_MENU_KIND_SEPARATOR:
+      return GTK_IS_SEPARATOR_MENU_ITEM (item);
+    case RD_MENU_KIND_SUBMENU_START:
+      return (submenu
+	      && shows_texts (item, entry->label, entry->nlabel, entry->key,
+			      entry->nkey)
+	      && shows_shell (GTK_MENU_SHELL (submenu), menu, next, choices));
+    default:
+      if (enabled)
+	{
+	  choices->items[choices->n] = item;
+	  choices->ids[choices->n++] = entry->id;
+	}
+      return (!submenu && shows_check (item, entry->flags)
+	      && shows_texts (item, entry->label, entry->nlabel, entry->key,
+			      entry->nkey));
+    }
+}
+
+/* Return true if ITEM is a check item if and only if FLAGS has the
+   toggle or the radio flag, and then shows the radio and the selected
+   flags of FLAGS.  */
+static bool
+shows_check (GtkWidget *item, uint8_t flags)
+{
+  if (!(flags & (RD_MENU_FLAG_TOGGLE | RD_MENU_FLAG_RADIO)))
+    return !GTK_IS_CHECK_MENU_ITEM (item);
+  if (!GTK_IS_CHECK_MENU_ITEM (item))
+    return false;
+  GtkCheckMenuItem *check = GTK_CHECK_MENU_ITEM (item);
+  return (gtk_check_menu_item_get_draw_as_radio (check)
+	  == !!(flags & RD_MENU_FLAG_RADIO)
+	  && gtk_check_menu_item_get_active (check)
+	  == !!(flags & RD_MENU_FLAG_SELECTED));
+}
+
+/* Return true if ITEM shows the NLABEL bytes LABEL in a label, and then
+   the NKEY bytes KEY in a second label if NKEY is not 0.  */
+static bool
+shows_texts (GtkWidget *item, const uint8_t *label, int nlabel,
+	     const uint8_t *key, int nkey)
+{
+  GtkWidget *box = gtk_bin_get_child (GTK_BIN (item));
+  if (!GTK_IS_CONTAINER (box))
+    return false;
+  GList *labels = gtk_container_get_children (GTK_CONTAINER (box));
+  bool passed = (g_list_length (labels) == (nkey > 0 ? 2u : 1u)
+		 && label_shows (labels->data, label, nlabel)
+		 && (nkey == 0
+		     || label_shows (labels->next->data, key, nkey)));
+  g_list_free (labels);
+  return passed;
+}
+
+/* Return true if WIDGET is a label whose text is valid UTF-8, and is
+   the valid UTF-8 of the N bytes BYTES up to the first NUL byte.  */
+static bool
+label_shows (GtkWidget *widget, const uint8_t *bytes, int n)
+{
+  if (!GTK_IS_LABEL (widget))
+    return false;
+  const char *text = gtk_label_get_text (GTK_LABEL (widget));
+  char *valid = g_utf8_make_valid ((const char *) bytes, n);
+  bool passed = g_utf8_validate (text, -1, NULL) && !strcmp (text, valid);
+  g_free (valid);
+  return passed;
+}
+
 /* Close MENU as the window system does, with no menu-shell signal.  */
 static void
 popdown (GtkMenuShell *menu)
@@ -1084,6 +1359,17 @@ choice_count (const struct sent *sent)
 {
   int count = 0;
   for (int i = 0; i < sent->count; i++)
+    count += sent->messages[i].type == RD_MENU_CHOICE;
+  return count;
+}
+
+/* Return the number of menu choices in SENT after the first FIRST
+   messages.  */
+static int
+choices_after (const struct sent *sent, int first)
+{
+  int count = 0;
+  for (int i = first; i < sent->count; i++)
     count += sent->messages[i].type == RD_MENU_CHOICE;
   return count;
 }

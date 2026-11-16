@@ -924,14 +924,15 @@ remote_set_cursor_type (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
 }
 
 /* The handler of the `menu-bar-lines' frame parameter.  Set the
-   height of the menu bar of F to VALUE lines.  Redisplay draws the
-   menu bar into the menu bar window of F.  */
+   height of the menu bar of F to VALUE lines.  A VALUE that is not a
+   natural number gives no menu bar.  Redisplay draws the menu bar into
+   the menu bar window of F.  */
 static void
 remote_set_menu_bar_lines (struct frame *f, Lisp_Object value,
 			   Lisp_Object oldval)
 {
   int old_lines = FRAME_MENU_BAR_LINES (f);
-  int lines = TYPE_RANGED_FIXNUMP (int, value) ? XFIXNUM (value) : 0;
+  int lines = RANGED_FIXNUMP (0, value, INT_MAX) ? XFIXNUM (value) : 0;
 
   fset_redisplay (f);
   FRAME_MENU_BAR_LINES (f) = lines;

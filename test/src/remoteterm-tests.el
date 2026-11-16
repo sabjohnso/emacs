@@ -5742,9 +5742,12 @@ menu bar, and :char-height is the height of a line of FRAME.
   "The menu bar of a remote frame follows the last change to it.
 A trial applies a random list of changes to a remote frame.  A change
 is a call of `menu-bar-mode' or a change of the `menu-bar-lines'
-parameter of the frame.  Law: after each change, the height of the
-menu bar from `frame-geometry' is the number of lines that the last
-change gives, times the height of a line of the frame."
+parameter of the frame.  Some parameter values are not a number of
+lines: nil, a negative number, or a number that is not an integer.
+Law: after each change, the height of the menu bar from
+`frame-geometry' is the number of lines that the last change gives,
+times the height of a line of the frame.  A value that is not a
+number of lines gives no menu bar."
   (let ((rd-gen-trials 12))
     (rd-gen-for-all
      (lambda ()
@@ -5763,17 +5766,20 @@ change gives, times the height of a line of the frame."
 (defun remoteterm-tests--menu-bar-change ()
   "Return a random change to the menu bar of a frame.
 The change is (mode ARG), a call of `menu-bar-mode' with ARG, or
-\(lines N), a change of the `menu-bar-lines' parameter to N."
+\(lines N), a change of the `menu-bar-lines' parameter to N.  N is a
+number of lines from 0 to 2, or a value that is not a number of
+lines."
   (if (zerop (rd-gen-random 2))
       (list 'mode (rd-gen-element '(1 -1)))
-    (list 'lines (rd-gen-random 3))))
+    (list 'lines (rd-gen-element (list (rd-gen-random 3) nil -1 1.5)))))
 
 (defun remoteterm-tests--menu-bar-lines (change)
   "Return the number of menu bar lines that CHANGE gives.
-This is the model of the menu bar."
+This is the model of the menu bar.  A value that is not a natural
+number gives 0 lines."
   (pcase change
     (`(mode ,arg) (if (> arg 0) 1 0))
-    (`(lines ,n) n)))
+    (`(lines ,n) (if (natnump n) n 0))))
 
 (defun remoteterm-tests--menu-bar-heights (changes)
   "Apply CHANGES to a new remote frame, and return the menu bar heights.
@@ -7513,6 +7519,31 @@ Return STATE with :answered, :unflushed, and :messages (see
   "Return the text of the UTF-8 BYTES, a vector."
   (decode-coding-string (apply #'unibyte-string (append bytes nil))
                         'utf-8-unix))
+
+(ert-deftest remoteterm-tests-cut-text ()
+  "The model of a cut menu text gives the longest start that fits.
+A trial cuts a random text at a random limit.  Law: the cut text is a
+start of the text, it has at most LIMIT bytes of UTF-8, and it is the
+full text, or the next character of the text makes it longer than
+LIMIT.  The law does not use the model, so law M3 checks the C code
+against a model that this law checks."
+  (rd-gen-for-all
+   (lambda ()
+     (let ((text (rd-gen-text 12)))
+       (list text (rd-gen-random (+ 5 (remoteterm-tests--utf-8-bytes text))))))
+   (lambda (case)
+     (pcase-let* ((`(,text ,limit) case)
+                  (cut (remoteterm-tests--cut-text text limit)))
+       (should (string-prefix-p cut text))
+       (should (<= (remoteterm-tests--utf-8-bytes cut) limit))
+       (should (or (equal cut text)
+                   (> (remoteterm-tests--utf-8-bytes
+                       (substring text 0 (1+ (length cut))))
+                      limit)))))))
+
+(defun remoteterm-tests--utf-8-bytes (text)
+  "Return the number of bytes of TEXT in UTF-8."
+  (length (encode-coding-string text 'utf-8-unix)))
 
 (defun remoteterm-tests--cut-text (text limit)
   "Return the longest start of TEXT with at most LIMIT bytes of UTF-8."

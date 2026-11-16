@@ -59,8 +59,7 @@ struct remote_menu_entries
 };
 
 /* The menu that a session waits for.  It is on the stack of
-   remote_menu_show, and the menu state of the session points to it
-   while the client shows the menu.  */
+   remote_menu_show.  */
 struct remote_menu_wait
 {
   /* The session, or NULL after remote_drop_menu.  */
@@ -86,6 +85,15 @@ struct remote_menu_wait
   uint32_t id;
 };
 
+/* The menu that a session waits for, or NULL.  Only one menu at a
+   time can wait, because a menu holds menu_items until it ends
+   (remote_hold_menu_items).  Only remote_show_menu sets this
+   variable, and only remote_drop_menu and remote_end_menu clear it,
+   before the menu leaves the stack.  */
+static struct remote_menu_wait *remote_waiting_menu;
+
+static struct remote_menu_wait *remote_menu_of
+  (struct remote_display_info *);
 static void remote_show_menu (struct frame *, struct remote_menu_wait *,
 			      int, int, int, Lisp_Object);
 static void remote_wait_menu_answer (struct remote_menu_wait *);
@@ -143,7 +151,7 @@ void
 remote_menu_choice_input (struct remote_display_info *dpyinfo,
 			  const struct rd_message *message)
 {
-  struct remote_menu_wait *wait = dpyinfo->menu.wait;
+  struct remote_menu_wait *wait = remote_menu_of (dpyinfo);
   const struct rd_menu_choice *choice = &message->u.menu_choice;
   if (wait && choice->serial == dpyinfo->menu.serial
       && (!choice->chosen || remote_enabled_item_p (&wait->entries,
@@ -162,13 +170,21 @@ remote_send_menu_messages (struct remote_display_info *dpyinfo)
 void
 remote_drop_menu (struct remote_display_info *dpyinfo)
 {
-  struct remote_menu_wait *wait = dpyinfo->menu.wait;
+  struct remote_menu_wait *wait = remote_menu_of (dpyinfo);
   if (wait)
     {
       remote_answer_menu (wait, false, 0);
       wait->dpyinfo = NULL;
-      dpyinfo->menu.wait = NULL;
+      remote_waiting_menu = NULL;
     }
+}
+
+/* Return the menu that the session DPYINFO waits for, or NULL.  */
+static struct remote_menu_wait *
+remote_menu_of (struct remote_display_info *dpyinfo)
+{
+  struct remote_menu_wait *wait = remote_waiting_menu;
+  return wait && wait->dpyinfo == dpyinfo ? wait : NULL;
 }
 
 /* Make WAIT the menu that the session of the frame F waits for, and
@@ -183,7 +199,8 @@ remote_show_menu (struct frame *f, struct remote_menu_wait *wait, int x,
   uint32_t serial = ++dpyinfo->menu.serial;
   remote_menu_entries (menuflags, &wait->entries);
   remote_make_show_menu (f, serial, x, y, title, &wait->show);
-  dpyinfo->menu.wait = wait;
+  eassert (!remote_waiting_menu);
+  remote_waiting_menu = wait;
   remote_send_menu_messages (dpyinfo);
 }
 
@@ -222,9 +239,9 @@ remote_end_menu (void *data)
 {
   struct remote_menu_wait *wait = data;
   struct remote_display_info *dpyinfo = wait->dpyinfo;
-  if (dpyinfo && dpyinfo->menu.wait == wait)
+  if (remote_waiting_menu == wait)
     {
-      dpyinfo->menu.wait = NULL;
+      remote_waiting_menu = NULL;
       if (wait->shown)
 	{
 	  remote_send_hide_menu (dpyinfo, dpyinfo->menu.serial);
@@ -330,7 +347,7 @@ remote_menu_selection (uint32_t id, int menuflags)
 static bool
 remote_send_menu_step (struct remote_display_info *dpyinfo)
 {
-  struct remote_menu_wait *wait = dpyinfo->menu.wait;
+  struct remote_menu_wait *wait = remote_menu_of (dpyinfo);
   if (!wait || wait->shown)
     return false;
   if (wait->next < wait->entries.count)
