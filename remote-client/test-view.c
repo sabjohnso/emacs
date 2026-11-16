@@ -23,7 +23,15 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
    Each example shows a frame in a view, does to its window what a
    user or a window manager does, and waits for the message that the
-   view must send.  */
+   view must send.
+
+   The examples of child frames use the root frame 1 of 300 by 200 and
+   its child frame 2 of CHILD_WIDTH by CHILD_HEIGHT at CHILD_X,
+   CHILD_Y.  The child has no window of its own.  The input in the
+   area of the child goes to the child, in the coordinates of the
+   child.  As with the implicit grab of X, the input after a press in
+   the child goes to the child until the release of the last button,
+   also outside the child.  */
 
 #include <config.h>
 
@@ -39,6 +47,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 /* The longest time that an example waits for a message, in
    microseconds.  */
 enum { WAIT_LIMIT = 3000000 };
+
+/* The place and the size of the child frame of the examples.  */
+enum { CHILD = 2, CHILD_X = 50, CHILD_Y = 40, CHILD_WIDTH = 60,
+       CHILD_HEIGHT = 30 };
 
 /* The messages that a view sent, and the frames of the windows that
    the user asked to close.  */
@@ -68,6 +80,21 @@ static bool drag_example (void);
 static bool status_example (void);
 static bool count_example (void);
 static bool close_example (void);
+static bool child_window_example (void);
+static bool child_input_example (void);
+static bool grab_example (void);
+static bool hide_root_example (void);
+static bool forget_child_example (void);
+static struct example *start_child_example (void);
+static void place_frame (struct example *, uint32_t, uint32_t, int32_t,
+			 int32_t, bool);
+static void define_any_frame (struct example *, uint32_t, uint32_t,
+			      uint32_t);
+static void remove_any_frame (struct example *, uint32_t);
+static int toplevel_count (void);
+static void send_pointer (GdkEventType, int, int, guint, GdkModifierType);
+static bool wait_for_pointer (struct example *, enum rd_type, uint32_t,
+			      int, int, bool);
 static bool title_p (const char *);
 static void remove_frame (struct example *);
 static void run_for (gint64);
@@ -103,7 +130,10 @@ main (int argc, char **argv)
 		 && define_example (300, 200, 500, 350)
 		 && define_example (600, 400, 250, 180)
 		 && drag_example () && status_example ()
-		 && count_example () && close_example ());
+		 && count_example () && close_example ()
+		 && child_window_example () && child_input_example ()
+		 && grab_example () && hide_root_example ()
+		 && forget_child_example ());
   if (!passed)
     return 1;
   printf ("test-view: the examples passed\n");
@@ -364,6 +394,208 @@ close_example (void)
   return passed;
 }
 
+/* The server places a child frame in the root frame, and defines it.
+   The view must make no window for the child.  */
+static bool
+child_window_example (void)
+{
+  struct example *example = start_child_example ();
+  run_for (WAIT_LIMIT / 10);
+  bool passed = (rc_view_window_count (example->view) == 1
+		 && toplevel_count () == 1);
+  if (!passed)
+    fprintf (stderr, "test-view: a child frame has a window\n");
+  end_example (example);
+  return passed;
+}
+
+/* The user presses a button in the area of the child, and then in the
+   area of the root.  The view must send each press to the frame under
+   the pointer, in the coordinates of that frame.  */
+static bool
+child_input_example (void)
+{
+  struct example *example = start_child_example ();
+  send_pointer (GDK_BUTTON_PRESS, CHILD_X + 10, CHILD_Y + 5, 1, 0);
+  bool passed = wait_for_pointer (example, RD_BUTTON, CHILD, 10, 5, true);
+  send_pointer (GDK_BUTTON_RELEASE, CHILD_X + 10, CHILD_Y + 5, 1,
+		GDK_BUTTON1_MASK);
+  send_pointer (GDK_BUTTON_PRESS, 7, 9, 1, 0);
+  passed = passed && wait_for_pointer (example, RD_BUTTON, 1, 7, 9, true);
+  send_pointer (GDK_MOTION_NOTIFY, CHILD_X + 1, CHILD_Y + 2, 0,
+		GDK_BUTTON1_MASK);
+  passed = passed && wait_for_pointer (example, RD_MOTION, 1, CHILD_X + 1,
+				       CHILD_Y + 2, false);
+  if (!passed)
+    fprintf (stderr, "test-view: the input of a child frame is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The user presses a button in the child, moves the pointer out of
+   the child, and releases the button there.  The motion and the
+   release must go to the child.  The motion after the release must go
+   to the frame under the pointer.  */
+static bool
+grab_example (void)
+{
+  struct example *example = start_child_example ();
+  send_pointer (GDK_BUTTON_PRESS, CHILD_X + 3, CHILD_Y + 4, 1, 0);
+  send_pointer (GDK_MOTION_NOTIFY, 5, 6, 0, GDK_BUTTON1_MASK);
+  bool passed = wait_for_pointer (example, RD_MOTION, CHILD, 5 - CHILD_X,
+				  6 - CHILD_Y, false);
+  send_pointer (GDK_BUTTON_RELEASE, 5, 6, 1, GDK_BUTTON1_MASK);
+  passed = passed && wait_for_pointer (example, RD_BUTTON, CHILD,
+				       5 - CHILD_X, 6 - CHILD_Y, false);
+  send_pointer (GDK_MOTION_NOTIFY, 8, 9, 0, 0);
+  passed = passed && wait_for_pointer (example, RD_MOTION, 1, 8, 9, false);
+  if (!passed)
+    fprintf (stderr, "test-view: the grab of a press in a child frame "
+	     "is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server hides the root frame, and then shows it again.  The
+   window of the root must hide and show.  */
+static bool
+hide_root_example (void)
+{
+  struct example *example = start_example (300, 200);
+  GtkWidget *window = GTK_WIDGET (frame_window ());
+  place_frame (example, 1, 0, 0, 0, false);
+  bool passed = !gtk_widget_get_visible (window);
+  place_frame (example, 1, 0, 0, 0, true);
+  passed = passed && gtk_widget_get_visible (window);
+  if (!passed)
+    fprintf (stderr, "test-view: the visibility of a root is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server deletes the child frame, and later defines a frame with
+   the same number and no place.  That frame is a root, so it must get
+   a window.  */
+static bool
+forget_child_example (void)
+{
+  struct example *example = start_child_example ();
+  remove_any_frame (example, CHILD);
+  define_any_frame (example, CHILD, CHILD_WIDTH, CHILD_HEIGHT);
+  bool passed = rc_view_window_count (example->view) == 2;
+  if (!passed)
+    fprintf (stderr, "test-view: a deleted child keeps its place\n");
+  end_example (example);
+  return passed;
+}
+
+/* Return a new example with the root frame 1 and its child frame
+   CHILD.  As the server does, place the child before its first
+   define-frame.  */
+static struct example *
+start_child_example (void)
+{
+  struct example *example = start_example (300, 200);
+  place_frame (example, CHILD, 1, CHILD_X, CHILD_Y, true);
+  define_any_frame (example, CHILD, CHILD_WIDTH, CHILD_HEIGHT);
+  while (g_main_context_iteration (NULL, false))
+    ;
+  return example;
+}
+
+/* Give FRAME of EXAMPLE the parent PARENT, the position X, Y and the
+   visibility VISIBLE, as a place-frame message does.  */
+static void
+place_frame (struct example *example, uint32_t frame, uint32_t parent,
+	     int32_t x, int32_t y, bool visible)
+{
+  struct rd_place_frame place = { .frame = frame, .parent = parent,
+				  .x = x, .y = y, .z = 1,
+				  .visible = visible };
+  rc_view_place (example->view, &place);
+}
+
+/* Define FRAME of EXAMPLE with the size WIDTH, HEIGHT.  */
+static void
+define_any_frame (struct example *example, uint32_t frame, uint32_t width,
+		  uint32_t height)
+{
+  struct rd_message message =
+    { .type = RD_DEFINE_FRAME,
+      .u.define_frame = { .frame = frame, .width = width,
+			  .height = height } };
+  rc_view_update (example->view, rc_apply (example->renderer, &message));
+}
+
+/* Remove FRAME of EXAMPLE, as the server does.  */
+static void
+remove_any_frame (struct example *example, uint32_t frame)
+{
+  struct rd_message message =
+    { .type = RD_DELETE_FRAME, .u.delete_frame = { .frame = frame } };
+  rc_view_update (example->view, rc_apply (example->renderer, &message));
+}
+
+/* Return the number of the windows of GTK.  */
+static int
+toplevel_count (void)
+{
+  GList *windows = gtk_window_list_toplevels ();
+  int count = g_list_length (windows);
+  g_list_free (windows);
+  return count;
+}
+
+/* Give the drawing area of the window of the example a pointer event
+   of TYPE at X, Y, with BUTTON and the modifier state STATE before the
+   event, as X does.  */
+static void
+send_pointer (GdkEventType type, int x, int y, guint button,
+	      GdkModifierType state)
+{
+  GtkWidget *area = gtk_bin_get_child (GTK_BIN (frame_window ()));
+  GdkEvent *event = gdk_event_new (type);
+  GdkDevice *pointer
+    = gdk_seat_get_pointer (gdk_display_get_default_seat
+			    (gtk_widget_get_display (area)));
+  gdk_event_set_device (event, pointer);
+  if (type == GDK_MOTION_NOTIFY)
+    {
+      event->motion.window = g_object_ref (gtk_widget_get_window (area));
+      event->motion.x = x;
+      event->motion.y = y;
+      event->motion.state = state;
+    }
+  else
+    {
+      event->button.window = g_object_ref (gtk_widget_get_window (area));
+      event->button.x = x;
+      event->button.y = y;
+      event->button.button = button;
+      event->button.state = state;
+    }
+  gtk_widget_event (area, event);
+  gdk_event_free (event);
+}
+
+/* Run the main loop until the view of EXAMPLE sent a message of TYPE
+   (RD_BUTTON or RD_MOTION) for FRAME at X, Y, or until WAIT_LIMIT.
+   For RD_BUTTON, PRESS tells a press from a release.  Return true if
+   the view sent it.  */
+static bool
+wait_for_pointer (struct example *example, enum rd_type type,
+		  uint32_t frame, int x, int y, bool press)
+{
+  struct rd_message expected = { .type = type };
+  if (type == RD_BUTTON)
+    expected.u.button = (struct rd_button) { .frame = frame, .x = x,
+					     .y = y, .press = press };
+  else
+    expected.u.motion = (struct rd_motion) { .frame = frame, .x = x,
+					     .y = y };
+  return wait_for_message (example, &expected);
+}
+
 /* Return true if the window of the example has the title TITLE.  */
 static bool
 title_p (const char *title)
@@ -429,7 +661,9 @@ sent_p (const struct sent *sent, const struct rd_message *message)
   return false;
 }
 
-/* Return true if A and B are the same focus or resize message.  */
+/* Return true if A and B are the same focus, resize, button or motion
+   message.  The time and the modifiers of a button or a motion do not
+   count.  */
 static bool
 same_message_p (const struct rd_message *a, const struct rd_message *b)
 {
@@ -444,8 +678,17 @@ same_message_p (const struct rd_message *a, const struct rd_message *b)
       return (a->u.resize.frame == b->u.resize.frame
 	      && a->u.resize.width == b->u.resize.width
 	      && a->u.resize.height == b->u.resize.height);
+    case RD_BUTTON:
+      return (a->u.button.frame == b->u.button.frame
+	      && a->u.button.x == b->u.button.x
+	      && a->u.button.y == b->u.button.y
+	      && a->u.button.press == b->u.button.press);
+    case RD_MOTION:
+      return (a->u.motion.frame == b->u.motion.frame
+	      && a->u.motion.x == b->u.motion.x
+	      && a->u.motion.y == b->u.motion.y);
     default:
-      /* An example waits only for a focus or a resize message.  */
+      /* An example waits only for these messages.  */
       abort ();
     }
 }

@@ -49,6 +49,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    define-frame or a delete-frame is removed, and a draw in a frame
    that exists draws the frame.  Another message changes no frame.
 
+   The functions for the stack and the composition agree with the
+   model: rc_frame_size gives the size of a defined frame and fails
+   for another frame, and rc_frame_surface_of gives the surface of
+   rc_frame_surface.
+
    One more law does not use the model: a second apply of a message
    that is not copy-area changes nothing.
 
@@ -169,6 +174,8 @@ static bool check_change (struct rc_change, struct model *,
 			  const struct rd_message *, uint64_t, int);
 static struct rc_change expected_change (struct model *,
 					 const struct rd_message *);
+static bool access_agrees_p (const struct model_frame *,
+			     struct rc_renderer *, uint32_t);
 static bool check_frames (const struct model *, struct rc_renderer *,
 			  uint64_t, int, const struct rd_message *);
 static void write_message (const struct rd_message *);
@@ -464,6 +471,9 @@ check_frames (const struct model *model, struct rc_renderer *renderer,
 	= frame_problem (&model->frames[i],
 			 rc_frame_surface (renderer, frame_ids[i]),
 			 text, sizeof text);
+      if (!problem && !access_agrees_p (&model->frames[i], renderer,
+					frame_ids[i]))
+	problem = "rc_frame_size or rc_frame_surface_of is wrong";
       if (problem)
 	{
 	  fprintf (stderr, "test-render: seed %llu, step %d, frame %lu: "
@@ -474,6 +484,21 @@ check_frames (const struct model *model, struct rc_renderer *renderer,
 	}
     }
   return true;
+}
+
+/* Return true if rc_frame_size and rc_frame_surface_of of FRAME in
+   RENDERER agree with MODEL_FRAME, the frame of the model.  */
+static bool
+access_agrees_p (const struct model_frame *model_frame,
+		 struct rc_renderer *renderer, uint32_t frame)
+{
+  int width = -1, height = -1;
+  bool sized = rc_frame_size (renderer, frame, &width, &height);
+  return (sized == model_frame->defined
+	  && (!sized || (width == model_frame->width
+			 && height == model_frame->height))
+	  && (rc_frame_surface_of (renderer, frame)
+	      == rc_frame_surface (renderer, frame)));
 }
 
 /* Write the name and the fields of MESSAGE to the standard error

@@ -19,12 +19,15 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <config.h>
 
+#include <math.h>
 #include <stdbool.h>
 
 #include <gtk/gtk.h>
 
+#include "compose.h"
 #include "input.h"
 #include "sizes.h"
+#include "stack.h"
 #include "table.h"
 #include "view.h"
 
@@ -32,6 +35,8 @@ struct rc_view
 {
   struct rc_renderer *renderer;
   struct rc_view_functions functions;
+  /* The places of the frames.  */
+  struct rc_stack *stack;
   /* The struct rc_window of each frame that has a window.  */
   struct rc_table windows;
   /* True if the client has a connection to its server.  */
@@ -52,8 +57,9 @@ struct clipboard_request
   unsigned sets;
 };
 
-/* The window of FRAME of VIEW, the drawing area in it, and the sizes
-   of the area.  */
+/* The window of the root frame FRAME of VIEW, the drawing area in
+   it, and the sizes of the area.  If GRABBED, the pointer input goes
+   to the frame GRAB until the release of the last button.  */
 struct rc_window
 {
   struct rc_view *view;
@@ -61,11 +67,26 @@ struct rc_window
   GtkWidget *window;
   GtkWidget *area;
   struct rc_sizes sizes;
+  bool grabbed;
+  uint32_t grab;
+};
+
+/* The frame of a pointer event, and the point of the event in the
+   coordinates of that frame.  */
+struct target
+{
+  uint32_t frame;
+  double x;
+  double y;
 };
 
 static void show_frame (struct rc_view *, uint32_t);
+static void remove_frame (struct rc_view *, uint32_t);
 static void remove_window (struct rc_view *, uint32_t);
 static void redraw_frame (struct rc_view *, uint32_t);
+static void place_window (struct rc_view *, uint32_t);
+static void refresh_window (uint32_t, void *, void *);
+static void show_if_visible (struct rc_window *);
 static struct rc_window *add_window (struct rc_view *, uint32_t,
 				     struct rc_size);
 static struct rc_size surface_size (cairo_surface_t *);
@@ -82,6 +103,10 @@ static gboolean scrolled (GtkWidget *, GdkEventScroll *, gpointer);
 static gboolean focus_changed (GtkWidget *, GdkEventFocus *, gpointer);
 static void area_resized (GtkWidget *, GdkRectangle *, gpointer);
 static void send (struct rc_window *, const struct rd_message *);
+static struct target pointer_target (const struct rc_window *, double,
+				     double);
+static void note_button (struct rc_window *, const GdkEventButton *,
+			 uint32_t);
 
 /* The input signals of the drawing area of a frame, and their
    functions.  */
@@ -110,6 +135,7 @@ rc_view_new (struct rc_renderer *renderer,
   view->renderer = renderer;
   view->functions = functions;
   view->connected = true;
+  view->stack = rc_stack_new (rc_frame_size, renderer);
   if (functions.clipboard)
     view->owner_handler
       = g_signal_connect (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD),
@@ -125,6 +151,7 @@ rc_view_free (struct rc_view *view)
     g_signal_handler_disconnect (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD),
 				 view->owner_handler);
   rc_table_free (&view->windows, destroy_window);
+  rc_stack_free (view->stack);
   g_free (view);
 }
 
@@ -156,7 +183,7 @@ rc_view_update (struct rc_view *view, struct rc_change change)
       show_frame (view, change.frame);
       break;
     case RC_FRAME_REMOVED:
-      remove_window (view, change.frame);
+      remove_frame (view, change.frame);
       break;
     case RC_FRAME_DRAWN:
       redraw_frame (view, change.frame);
@@ -164,6 +191,24 @@ rc_view_update (struct rc_view *view, struct rc_change change)
     case RC_NO_CHANGE:
       break;
     }
+}
+
+/* The windows that show the frame before and after the change are
+   the windows of its old and its new root.  */
+void
+rc_view_place (struct rc_view *view, const struct rd_place_frame *place)
+{
+  redraw_frame (view, place->frame);
+  rc_stack_place (view->stack, place);
+  place_window (view, place->frame);
+  redraw_frame (view, place->frame);
+}
+
+void
+rc_view_reset_places (struct rc_view *view)
+{
+  rc_stack_reset (view->stack);
+  rc_table_each (&view->windows, refresh_window, NULL);
 }
 
 void
@@ -179,12 +224,18 @@ rc_view_window_count (const struct rc_view *view)
   return rc_table_count (&view->windows);
 }
 
-/* Make the window of FRAME, or give it the size of the frame.  The
-   window does not take the size of an answer to a resize message, so
-   that the user can change the size of the window.  */
+/* Make the window of the root FRAME, or give it the size of the
+   frame.  The window does not take the size of an answer to a resize
+   message, so that the user can change the size of the window.  A
+   child frame has no window, so draw its root again.  */
 static void
 show_frame (struct rc_view *view, uint32_t frame)
 {
+  if (rc_stack_parent (view->stack, frame) != 0)
+    {
+      redraw_frame (view, frame);
+      return;
+    }
   struct rc_size size
     = surface_size (rc_frame_surface (view->renderer, frame));
   struct rc_window *window = rc_table_get (&view->windows, frame);
@@ -196,6 +247,16 @@ show_frame (struct rc_view *view, uint32_t frame)
   gtk_widget_queue_draw (window->area);
 }
 
+/* Forget FRAME, which the renderer removed.  Draw its root again, so
+   that a child frame goes away from the window of its root.  */
+static void
+remove_frame (struct rc_view *view, uint32_t frame)
+{
+  redraw_frame (view, frame);
+  rc_stack_forget (view->stack, frame);
+  remove_window (view, frame);
+}
+
 /* Remove the window of FRAME, if it has one.  */
 static void
 remove_window (struct rc_view *view, uint32_t frame)
@@ -205,13 +266,51 @@ remove_window (struct rc_view *view, uint32_t frame)
     destroy_window (window);
 }
 
-/* Draw the window of FRAME again, if it has one.  */
+/* Draw again the window of the root of FRAME, if it has one.  */
 static void
 redraw_frame (struct rc_view *view, uint32_t frame)
 {
-  struct rc_window *window = rc_table_get (&view->windows, frame);
+  uint32_t root = rc_stack_root (view->stack, frame);
+  struct rc_window *window = root ? rc_table_get (&view->windows, root)
+    : NULL;
   if (window)
     gtk_widget_queue_draw (window->area);
+}
+
+/* Make the window of FRAME agree with its place: a child frame has no
+   window, and a defined root has a window that shows only if the root
+   is visible.  */
+static void
+place_window (struct rc_view *view, uint32_t frame)
+{
+  struct rc_window *window = rc_table_get (&view->windows, frame);
+  if (rc_stack_parent (view->stack, frame) != 0)
+    remove_window (view, frame);
+  else if (window)
+    show_if_visible (window);
+  else if (rc_frame_surface (view->renderer, frame))
+    show_frame (view, frame);
+}
+
+/* Make the window WINDOW of FRAME agree with its place, and draw it
+   again.  DATA is not used.  This is a function of rc_table_each.  */
+static void
+refresh_window (uint32_t frame, void *window, void *data)
+{
+  (void) frame;
+  (void) data;
+  struct rc_window *w = window;
+  show_if_visible (w);
+  gtk_widget_queue_draw (w->area);
+}
+
+/* Show WINDOW if its root is visible, and hide it if not.  */
+static void
+show_if_visible (struct rc_window *window)
+{
+  gtk_widget_set_visible (window->window,
+			  rc_stack_visible_p (window->view->stack,
+					      window->frame));
 }
 
 /* Make and show a window of the size SIZE for FRAME, and return it.  */
@@ -222,7 +321,7 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
   *window = (struct rc_window) { view, frame,
 				 gtk_window_new (GTK_WINDOW_TOPLEVEL),
 				 gtk_drawing_area_new (),
-				 rc_sizes_new (size) };
+				 rc_sizes_new (size), false, 0 };
   g_signal_connect (window->area, "draw", G_CALLBACK (draw_frame), window);
   g_signal_connect (window->window, "delete-event",
 		    G_CALLBACK (close_requested), window);
@@ -242,7 +341,8 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
   gtk_window_set_default_size (GTK_WINDOW (window->window), size.width,
 			       size.height);
-  gtk_widget_show_all (window->window);
+  gtk_widget_show (window->area);
+  show_if_visible (window);
   rc_table_set (&view->windows, frame, window);
   return window;
 }
@@ -277,20 +377,16 @@ destroy_window (void *data)
   g_free (window);
 }
 
-/* The draw signal of the drawing area of a frame.  DATA is the struct
-   rc_window.  Paint the surface of the frame.  */
+/* The draw signal of the drawing area of a root frame.  DATA is the
+   struct rc_window.  Paint the root and its visible children.  */
 static gboolean
 draw_frame (GtkWidget *area, cairo_t *cr, gpointer data)
 {
   (void) area;
   struct rc_window *window = data;
-  cairo_surface_t *surface = rc_frame_surface (window->view->renderer,
-					       window->frame);
-  if (surface)
-    {
-      cairo_set_source_surface (cr, surface, 0, 0);
-      cairo_paint (cr);
-    }
+  struct rc_view *view = window->view;
+  rc_compose (cr, view->stack, window->frame, rc_frame_surface_of,
+	      view->renderer);
   return true;
 }
 
@@ -325,9 +421,10 @@ key_pressed (GtkWidget *widget, GdkEventKey *event, gpointer data)
 }
 
 /* The button-press-event and button-release-event signals of the
-   drawing area of a frame.  DATA is the struct rc_window.  Send the
-   button message of a press or a release.  GTK also gives a double and
-   a triple press, which Emacs makes itself from the times.  */
+   drawing area of a root frame.  DATA is the struct rc_window.  Send
+   the button message of a press or a release to the target frame.
+   GTK also gives a double and a triple press, which Emacs makes itself
+   from the times.  */
 static gboolean
 button_changed (GtkWidget *widget, GdkEventButton *event, gpointer data)
 {
@@ -335,30 +432,78 @@ button_changed (GtkWidget *widget, GdkEventButton *event, gpointer data)
   if (event->type != GDK_BUTTON_PRESS && event->type != GDK_BUTTON_RELEASE)
     return true;
   struct rc_window *window = data;
+  struct target target = pointer_target (window, event->x, event->y);
+  note_button (window, event, target.frame);
   struct rd_message message
-    = rc_button_message (window->frame, event->button, event->x, event->y,
+    = rc_button_message (target.frame, event->button, target.x, target.y,
 			 event->state, event->time,
 			 event->type == GDK_BUTTON_PRESS);
   send (window, &message);
   return true;
 }
 
-/* The motion-notify-event signal of the drawing area of a frame.  DATA
-   is the struct rc_window.  Send the motion message.  */
+/* Start the grab of WINDOW at the first press of EVENT, in the frame
+   FRAME, and stop it at the release of the last button.  The state of
+   a release has the buttons before the release.  */
+static void
+note_button (struct rc_window *window, const GdkEventButton *event,
+	     uint32_t frame)
+{
+  if (event->type == GDK_BUTTON_PRESS && !window->grabbed)
+    {
+      window->grabbed = true;
+      window->grab = frame;
+      return;
+    }
+  GdkModifierType buttons = (GDK_BUTTON1_MASK | GDK_BUTTON2_MASK
+			     | GDK_BUTTON3_MASK | GDK_BUTTON4_MASK
+			     | GDK_BUTTON5_MASK);
+  GdkModifierType released = (event->button >= 1 && event->button <= 5
+			      ? GDK_BUTTON1_MASK << (event->button - 1)
+			      : 0);
+  if (event->type == GDK_BUTTON_RELEASE
+      && (event->state & buttons & ~released) == 0)
+    window->grabbed = false;
+}
+
+/* The motion-notify-event signal of the drawing area of a root frame.
+   DATA is the struct rc_window.  Send the motion message to the
+   target frame.  */
 static gboolean
 mouse_moved (GtkWidget *widget, GdkEventMotion *event, gpointer data)
 {
   (void) widget;
   struct rc_window *window = data;
-  struct rd_message message = rc_motion_message (window->frame, event->x,
-						 event->y, event->time);
+  struct target target = pointer_target (window, event->x, event->y);
+  struct rd_message message = rc_motion_message (target.frame, target.x,
+						 target.y, event->time);
   send (window, &message);
   return true;
 }
 
-/* The scroll-event signal of the drawing area of a frame.  DATA is the
-   struct rc_window.  Send a press of the wheel button of the scroll, as
-   in X.  */
+/* Return the target of a pointer event at X, Y in WINDOW: the frame of
+   the grab while it holds and its frame is shown, else the frame under
+   the pointer, else the root.  */
+static struct target
+pointer_target (const struct rc_window *window, double x, double y)
+{
+  const struct rc_stack *stack = window->view->stack;
+  int64_t origin_x, origin_y;
+  if (window->grabbed
+      && rc_stack_origin (stack, window->frame, window->grab, &origin_x,
+			  &origin_y))
+    return (struct target) { window->grab, x - origin_x, y - origin_y };
+  int point_x = floor (x), point_y = floor (y);
+  struct rc_hit hit;
+  if (rc_stack_frame_at (stack, window->frame, point_x, point_y, &hit))
+    return (struct target) { hit.frame, x - (point_x - hit.x),
+			     y - (point_y - hit.y) };
+  return (struct target) { window->frame, x, y };
+}
+
+/* The scroll-event signal of the drawing area of a root frame.  DATA
+   is the struct rc_window.  Send a press of the wheel button of the
+   scroll to the target frame, as in X.  */
 static gboolean
 scrolled (GtkWidget *widget, GdkEventScroll *event, gpointer data)
 {
@@ -368,8 +513,9 @@ scrolled (GtkWidget *widget, GdkEventScroll *event, gpointer data)
 				 event->delta_y);
   if (button == 0)
     return true;
+  struct target target = pointer_target (window, event->x, event->y);
   struct rd_message message
-    = rc_button_message (window->frame, button, event->x, event->y,
+    = rc_button_message (target.frame, button, target.x, target.y,
 			 event->state, event->time, true);
   send (window, &message);
   return true;

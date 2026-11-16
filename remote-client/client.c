@@ -40,8 +40,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
    With --render-to=FILE.png, the program opens no window.  It reads
    the messages until the server closes the connection.  Then it
-   writes the surface of the first frame that the server defined to
-   FILE.png, and stops.  This mode needs no display, so a test can use
+   writes the first root frame that the server defined to FILE.png,
+   with its visible child frames on it, and stops.  This mode needs no display, so a test can use
    it.
 
    With --ssh HOST, the program starts a new session on HOST through
@@ -79,6 +79,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <gtk/gtk.h>
 
 #include "bootstrap.h"
+#include "compose.h"
 #include "connector.h"
 #include "direct.h"
 #include "fonts.h"
@@ -93,6 +94,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "relay.h"
 #include "render.h"
 #include "sshargs.h"
+#include "stack.h"
 #include "stream.h"
 #include "unixsocket.h"
 #include "view.h"
@@ -139,7 +141,10 @@ struct options
 struct png_mode
 {
   struct rc_renderer *renderer;
-  /* The frame of the first define-frame message, if HAVE_FIRST.  */
+  /* The places of the frames.  */
+  struct rc_stack *stack;
+  /* The frame of the first define-frame message of a root, if
+     HAVE_FIRST.  */
   uint32_t first_frame;
   bool have_first;
 };
@@ -207,6 +212,7 @@ static void warn_fallback (const struct rc_font_key *);
 static int render_to_file (struct rc_renderer *, struct rc_stream *,
 			   const char *);
 static void record_first_frame (void *, const struct rd_message *);
+static cairo_surface_t *compose_root (struct png_mode *);
 static int show_frames (struct rc_renderer *, struct rc_font_store *,
 			struct rc_stream *, struct rc_connector, int64_t);
 static struct rc_stream *connect_socket (void *);
@@ -473,7 +479,8 @@ static int
 render_to_file (struct rc_renderer *renderer, struct rc_stream *stream,
 		const char *png)
 {
-  struct png_mode mode = { .renderer = renderer };
+  struct png_mode mode = { .renderer = renderer,
+			   .stack = rc_stack_new (rc_frame_size, renderer) };
   struct rc_reader *reader = rc_reader_new (record_first_frame, &mode);
   enum read_result result;
   do
@@ -481,17 +488,18 @@ render_to_file (struct rc_renderer *renderer, struct rc_stream *stream,
   while (result == READ_MORE || result == READ_WAIT);
   rc_reader_free (reader);
   rc_stream_close (stream);
+  cairo_surface_t *surface
+    = result == READ_ERROR ? NULL : compose_root (&mode);
+  rc_stack_free (mode.stack);
   if (result == READ_ERROR)
     return 1;
-  cairo_surface_t *surface
-    = (mode.have_first ? rc_frame_surface (renderer, mode.first_frame)
-       : NULL);
   if (!surface)
     {
       fprintf (stderr, "remote-client: the first frame does not exist\n");
       return 1;
     }
   cairo_status_t status = cairo_surface_write_to_png (surface, png);
+  cairo_surface_destroy (surface);
   if (status != CAIRO_STATUS_SUCCESS)
     {
       fprintf (stderr, "remote-client: %s: %s\n", png,
@@ -501,14 +509,39 @@ render_to_file (struct rc_renderer *renderer, struct rc_stream *stream,
   return 0;
 }
 
+/* Return a new surface with the first root of MODE and its visible
+   children, or NULL if the first root does not exist.  */
+static cairo_surface_t *
+compose_root (struct png_mode *mode)
+{
+  int width, height;
+  if (!mode->have_first
+      || !rc_frame_size (mode->renderer, mode->first_frame, &width,
+			 &height))
+    return NULL;
+  cairo_surface_t *surface
+    = cairo_image_surface_create (CAIRO_FORMAT_RGB24, width, height);
+  cairo_t *cr = cairo_create (surface);
+  rc_compose (cr, mode->stack, mode->first_frame, rc_frame_surface_of,
+	      mode->renderer);
+  cairo_destroy (cr);
+  return surface;
+}
+
 /* The function of the reader of the mode --render-to.  DATA is the
-   struct png_mode.  Apply MESSAGE, and record the first frame.  */
+   struct png_mode.  Apply MESSAGE, keep the places of the frames, and
+   record the first root.  */
 static void
 record_first_frame (void *data, const struct rd_message *message)
 {
   struct png_mode *mode = data;
-  rc_apply (mode->renderer, message);
-  if (message->type == RD_DEFINE_FRAME && !mode->have_first)
+  struct rc_change change = rc_apply (mode->renderer, message);
+  if (message->type == RD_PLACE_FRAME)
+    rc_stack_place (mode->stack, &message->u.place_frame);
+  else if (change.kind == RC_FRAME_REMOVED)
+    rc_stack_forget (mode->stack, change.frame);
+  if (message->type == RD_DEFINE_FRAME && !mode->have_first
+      && rc_stack_parent (mode->stack, message->u.define_frame.frame) == 0)
     {
       mode->first_frame = message->u.define_frame.frame;
       mode->have_first = true;
@@ -575,13 +608,15 @@ open_connection (struct window_mode *mode, struct rc_stream *stream)
    complete, and forget the last clipboard text, so the new connection
    gets the clipboard text again.  The image IDs of the server are
    valid for one connection, and the server sends each image again, so
-   forget the images.  A feature with state for one connection resets
-   it here.  */
+   forget the images.  Forget the places of the frames, because the
+   server places its frames again.  A feature with state for one
+   connection resets it here.  */
 static void
 reset_connection_state (struct window_mode *mode)
 {
   rc_font_store_reset (mode->store);
   rc_renderer_forget_images (mode->renderer);
+  rc_view_reset_places (mode->view);
   rd_chunks_free (&mode->clipboard);
   g_free (mode->clipboard_text);
   mode->clipboard_text = NULL;
@@ -695,8 +730,8 @@ network_changed (GNetworkMonitor *monitor, gboolean available,
 
 /* The function of the reader of the mode with windows.  DATA is the
    struct window_mode.  Apply MESSAGE, and show its change.  Ask the
-   server for the file of a font that has no face, and keep the bytes
-   of a font file.  */
+   server for the file of a font that has no face, keep the bytes
+   of a font file, and give the place of a frame to the view.  */
 static void
 show_message (void *data, const struct rd_message *message)
 {
@@ -708,6 +743,8 @@ show_message (void *data, const struct rd_message *message)
     receive_font (mode, &message->u.font_data);
   else if (message->type == RD_CLIPBOARD_DATA)
     receive_clipboard (mode, message);
+  else if (message->type == RD_PLACE_FRAME)
+    rc_view_place (mode->view, &message->u.place_frame);
 }
 
 /* Add the clipboard-data MESSAGE to the clipboard text of MODE that

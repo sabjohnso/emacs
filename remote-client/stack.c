@@ -47,6 +47,14 @@ struct visit
   struct rc_layer parent;
 };
 
+/* The frame of rc_stack_origin, and its layer.  */
+struct origin_search
+{
+  uint32_t frame;
+  bool found;
+  struct rc_layer layer;
+};
+
 /* The point of rc_stack_frame_at, and the last layer that contains
    it.  */
 struct search
@@ -69,6 +77,7 @@ static int compare_visits (const void *, const void *);
 static struct rc_rect intersect (int64_t, int64_t, int64_t, int64_t,
 				 const struct rc_rect *);
 static void note_layer (const struct rc_layer *, void *);
+static void note_frame_layer (const struct rc_layer *, void *);
 static bool rect_contains_p (const struct rc_rect *, int, int);
 static void *xrealloc (void *, size_t);
 
@@ -125,6 +134,28 @@ rc_stack_parent (const struct rc_stack *stack, uint32_t frame)
   return i < 0 ? 0 : stack->places[i].parent;
 }
 
+/* A chain with no loop has at most one frame for each place, and
+   one root with no place.  */
+uint32_t
+rc_stack_root (const struct rc_stack *stack, uint32_t frame)
+{
+  for (int i = 0; i <= stack->count; i++)
+    {
+      uint32_t parent = rc_stack_parent (stack, frame);
+      if (parent == 0)
+	return frame;
+      frame = parent;
+    }
+  return 0;
+}
+
+bool
+rc_stack_visible_p (const struct rc_stack *stack, uint32_t frame)
+{
+  int i = find_place (stack, frame);
+  return i < 0 || stack->places[i].visible;
+}
+
 /* Walk the tree of ROOT in the paint order.  Each frame of the tree
    goes into the list of visits one time, when the walk visits its
    parent, so the list needs at most one entry for each place.  The
@@ -164,6 +195,20 @@ rc_stack_frame_at (const struct rc_stack *stack, uint32_t root,
   if (search.found)
     *hit = (struct rc_hit) { search.layer.frame,
 			     x - search.layer.x, y - search.layer.y };
+  return search.found;
+}
+
+bool
+rc_stack_origin (const struct rc_stack *stack, uint32_t root,
+		 uint32_t frame, int64_t *x, int64_t *y)
+{
+  struct origin_search search = { .frame = frame };
+  rc_stack_each_layer (stack, root, note_frame_layer, &search);
+  if (search.found)
+    {
+      *x = search.layer.x;
+      *y = search.layer.y;
+    }
   return search.found;
 }
 
@@ -266,6 +311,20 @@ note_layer (const struct rc_layer *layer, void *data)
 {
   struct search *search = data;
   if (rect_contains_p (&layer->clip, search->x, search->y))
+    {
+      search->found = true;
+      search->layer = *layer;
+    }
+}
+
+/* The function of rc_stack_each_layer for rc_stack_origin: keep
+   LAYER in the struct origin_search DATA if it is the layer of the
+   frame of the search.  */
+static void
+note_frame_layer (const struct rc_layer *layer, void *data)
+{
+  struct origin_search *search = data;
+  if (layer->frame == search->frame)
     {
       search->found = true;
       search->layer = *layer;

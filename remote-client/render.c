@@ -195,6 +195,23 @@ rc_frame_surface (struct rc_renderer *renderer, uint32_t frame)
   return rc_table_get (&renderer->frames, frame);
 }
 
+bool
+rc_frame_size (void *renderer, uint32_t frame, int *width, int *height)
+{
+  cairo_surface_t *surface = rc_frame_surface (renderer, frame);
+  if (!surface)
+    return false;
+  *width = cairo_image_surface_get_width (surface);
+  *height = cairo_image_surface_get_height (surface);
+  return true;
+}
+
+cairo_surface_t *
+rc_frame_surface_of (void *renderer, uint32_t frame)
+{
+  return rc_frame_surface (renderer, frame);
+}
+
 /* Return the change of a define-frame message for FRAME of
    RENDERER.  */
 static struct rc_change

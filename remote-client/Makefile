@@ -50,6 +50,7 @@ CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   unixsocket.o relay.o relayline.o token.o flow.o pending.o stream.o tls.o \
   listenspec.o rdchunk.o \
   images.o rdpng.o \
+  stack.o compose.o \
   sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
@@ -190,7 +191,8 @@ test-tls: test-tls.o tls.o stream.o
 test-link: test-link.o link.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-view: test-view.o view.o input.o sizes.o $(RENDER_OBJS)
+test-view: test-view.o view.o input.o sizes.o stack.o compose.o \
+  $(RENDER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
 client.o view.o input.o test-input.o test-view.o test-reconnect.o: %.o: %.c
@@ -231,6 +233,7 @@ fontstore.o test-fontstore.o client.o: fontstore.h fonts.h render.h \
   hashcache.h ../src/rdproto.h
 client.o view.o test-view.o: view.h reader.h fonts.h render.h \
   ../src/rdproto.h
+view.o client.o: stack.h compose.h
 client.o: ../src/rdchunk.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
 sizes.o test-sizes.o view.o: sizes.h

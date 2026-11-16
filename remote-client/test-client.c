@@ -26,6 +26,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      size.  The pixels of the file are
      the pixels of a renderer that got the same messages.  The
      chunks of the stream do not change the pixels.
+   - children: FILE.png has the composite of the first root frame: the
+     pixels of a visible child frame are on the pixels of the root, in
+     the area of the child that is in the root.  The first root can
+     come after the define-frame of its child.
    - error: after a frame with an error, the program exits with the
      status 1, and writes no file.
    - no frame: if the server defined no frame, or the first frame does
@@ -102,6 +106,9 @@ struct run
 };
 
 static bool error_example (void);
+static bool children_example (bool);
+static bool composite_p (const char *);
+static bool png_pixel (cairo_surface_t *, int, int, uint32_t);
 static bool run_trial (uint64_t);
 static int run_client (struct run *, const struct rd_message *, int,
 		       const unsigned char *, size_t, uint64_t *);
@@ -139,7 +146,8 @@ main (int argc, char **argv)
     }
   if (argc == 2)
     return run_trial (strtoull (argv[1], NULL, 10)) ? 0 : 1;
-  if (!error_example () || !fonts_example ())
+  if (!error_example () || !fonts_example () || !children_example (false)
+      || !children_example (true))
     return 1;
   uint64_t base = ((uint64_t) time (NULL) << 20 ^ getpid ()) * TRIALS;
   for (int trial = 0; trial < TRIALS; trial++)
@@ -282,6 +290,81 @@ change_cache_hash (const char *cache, const char *name)
   g_free (end);
   g_strfreev (lines);
   return changed;
+}
+
+/* The colors and the place of the children example.  The child of
+   10 by 10 at CHILD_X, CHILD_Y extends past the bottom of the root of
+   40 by 30.  */
+enum { ROOT_COLOR = 0xff0000, CHILD_COLOR = 0x0000ff, CHILD_X = 10,
+       CHILD_Y = 25 };
+
+/* The children law: FRAME_B is a visible child of FRAME_A.  If
+   CHILD_FIRST, the child is defined before its root.  */
+static bool
+children_example (bool child_first)
+{
+  struct rd_message root[] =
+    {
+      { .type = RD_DEFINE_FRAME, .u.define_frame = { FRAME_A, 40, 30 } },
+      { .type = RD_CLEAR_AREA,
+	.u.clear_area = { FRAME_A, 0, 0, 40, 30, ROOT_COLOR } },
+    };
+  struct rd_message child[] =
+    {
+      { .type = RD_PLACE_FRAME,
+	.u.place_frame = { .frame = FRAME_B, .parent = FRAME_A,
+			   .x = CHILD_X, .y = CHILD_Y, .z = 1,
+			   .visible = 1 } },
+      { .type = RD_DEFINE_FRAME, .u.define_frame = { FRAME_B, 10, 10 } },
+      { .type = RD_CLEAR_AREA,
+	.u.clear_area = { FRAME_B, 0, 0, 10, 10, CHILD_COLOR } },
+    };
+  struct rd_message messages[5];
+  const struct rd_message *first = child_first ? child : root;
+  const struct rd_message *second = child_first ? root : child;
+  int nfirst = child_first ? 3 : 2;
+  memcpy (messages, first, nfirst * sizeof *messages);
+  memcpy (messages + nfirst, second, (5 - nfirst) * sizeof *messages);
+  uint64_t state = 3;
+  struct run run;
+  make_run (&run);
+  bool passed = (run_client (&run, messages, 5, NULL, 0, &state) == 0
+		 && composite_p (run.png));
+  if (!passed)
+    fprintf (stderr, "test-client: example children (child first %d): "
+	     "the file is not the composite of the root\n", child_first);
+  remove_run (&run);
+  return passed;
+}
+
+/* Return true if the PNG file PNG has the composite of the children
+   example: the size of the root, the color of the child in the area
+   of the child, and the color of the root outside it.  */
+static bool
+composite_p (const char *png)
+{
+  cairo_surface_t *file = cairo_image_surface_create_from_png (png);
+  bool passed = (cairo_surface_status (file) == CAIRO_STATUS_SUCCESS
+		 && cairo_image_surface_get_width (file) == 40
+		 && cairo_image_surface_get_height (file) == 30
+		 && png_pixel (file, CHILD_X, CHILD_Y, CHILD_COLOR)
+		 && png_pixel (file, CHILD_X + 9, 29, CHILD_COLOR)
+		 && png_pixel (file, CHILD_X - 1, CHILD_Y, ROOT_COLOR)
+		 && png_pixel (file, CHILD_X + 10, 29, ROOT_COLOR)
+		 && png_pixel (file, CHILD_X, CHILD_Y - 1, ROOT_COLOR));
+  cairo_surface_destroy (file);
+  return passed;
+}
+
+/* Return true if the pixel X, Y of SURFACE has the color COLOR.  */
+static bool
+png_pixel (cairo_surface_t *surface, int x, int y, uint32_t color)
+{
+  uint32_t pixel;
+  memcpy (&pixel, cairo_image_surface_get_data (surface)
+	  + y * cairo_image_surface_get_stride (surface) + x * 4,
+	  sizeof pixel);
+  return (pixel & 0xffffff) == color;
 }
 
 /* The error law: a frame with a length of 0 has no type byte.  */

@@ -108,6 +108,17 @@ extern void rc_stack_reset (struct rc_stack *stack);
 extern uint32_t rc_stack_parent (const struct rc_stack *stack,
 				 uint32_t frame);
 
+/* Return the last frame of the chain of parents of FRAME in STACK:
+   FRAME itself if FRAME is a root.  Return 0 if the chain has a
+   loop.  */
+extern uint32_t rc_stack_root (const struct rc_stack *stack,
+			       uint32_t frame);
+
+/* Return false if the last place of FRAME in STACK hides FRAME, and
+   true if it shows FRAME or if FRAME has no place.  */
+extern bool rc_stack_visible_p (const struct rc_stack *stack,
+				uint32_t frame);
+
 /* Call FUNCTION with each layer of ROOT in the paint order, and with
    DATA.  A frame that is not a root has no layers.  */
 extern void rc_stack_each_layer (const struct rc_stack *stack,
@@ -122,5 +133,11 @@ extern void rc_stack_each_layer (const struct rc_stack *stack,
    return true.  Return false if no layer contains the point.  */
 extern bool rc_stack_frame_at (const struct rc_stack *stack, uint32_t root,
 			       int x, int y, struct rc_hit *hit);
+
+/* Put the position of the top-left corner of FRAME in ROOT in X and
+   Y, and return true.  Return false if FRAME is not a layer of ROOT.
+   The position can be outside ROOT.  */
+extern bool rc_stack_origin (const struct rc_stack *stack, uint32_t root,
+			     uint32_t frame, int64_t *x, int64_t *y);
 
 #endif /* REMOTE_CLIENT_STACK_H */

@@ -40,6 +40,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
       hit.
    6. No place: a frame with no place has no parent.
    7. Reset: after rc_stack_reset, no frame has a parent.
+   8. Root: rc_stack_root of F is the last frame of the chain of
+      parents of F, or 0 if the chain has a loop.
+   9. Visibility: rc_stack_visible_p of F is the visibility of the
+      last place of F, or true if F has no place.
+   10. Origin: rc_stack_origin of F in R gives the origin of the layer
+       of F in R if the model shows F in R, and else fails.
 
    The model shows a frame F in R if F, its parent and each other
    ancestor up to R are visible and have a size, and R has no parent.
@@ -114,6 +120,10 @@ static bool same_layer_p (const struct rc_layer *, const struct rc_layer *);
 static bool model_shows_p (const struct model *, uint32_t, uint32_t,
 			   struct rc_layer *);
 static uint32_t model_parent (const struct model *, uint32_t);
+static uint32_t model_root (const struct model *, uint32_t);
+static bool model_visible_p (const struct model *, uint32_t);
+static bool origin_holds_p (const struct model *, const struct rc_stack *,
+			    uint32_t, uint32_t);
 static bool model_ancestor_p (const struct model *, uint32_t, uint32_t);
 static bool sibling_before_p (const struct model *, uint32_t, uint32_t);
 static struct rc_rect intersect (int64_t, int64_t, int64_t, int64_t,
@@ -236,6 +246,9 @@ laws_hold_p (const struct model *model, struct rc_stack *stack,
       uint32_t parent = model_parent (model, frame);
       if (rc_stack_parent (stack, frame) != parent
 	  || rc_stack_parent (twice, frame) != parent
+	  || rc_stack_root (stack, frame) != model_root (model, frame)
+	  || rc_stack_visible_p (stack, frame) != model_visible_p (model,
+								   frame)
 	  || !root_laws_hold_p (model, stack, twice, frame, state))
 	return false;
     }
@@ -254,6 +267,9 @@ root_laws_hold_p (const struct model *model, struct rc_stack *stack,
       || !order_holds_p (model, &layers)
       || !same_layers_p (&layers, &twice_layers))
     return false;
+  for (uint32_t frame = 1; frame <= UNKNOWN; frame++)
+    if (!origin_holds_p (model, stack, root, frame))
+      return false;
   for (int i = 0; i < POINTS; i++)
     {
       int x = (int) random_below (state, 70) - 10;
@@ -414,6 +430,45 @@ model_parent (const struct model *model, uint32_t frame)
 {
   return (frame <= NFRAMES && model->place[frame].placed
 	  ? model->place[frame].parent : 0);
+}
+
+/* Law 8: return the last frame of the chain of parents of FRAME in
+   MODEL, or 0 if the chain has a loop.  */
+static uint32_t
+model_root (const struct model *model, uint32_t frame)
+{
+  uint32_t f = frame;
+  for (int i = 0; i <= NFRAMES; i++)
+    {
+      uint32_t parent = model_parent (model, f);
+      if (parent == 0)
+	return f;
+      f = parent;
+    }
+  return 0;
+}
+
+/* Law 9: return the visibility of the last place of FRAME in MODEL, or
+   true if FRAME has no place.  */
+static bool
+model_visible_p (const struct model *model, uint32_t frame)
+{
+  return (frame > NFRAMES || !model->place[frame].placed
+	  || model->place[frame].visible);
+}
+
+/* Law 10: return true if rc_stack_origin of FRAME in ROOT agrees with
+   the layer of FRAME that MODEL shows in ROOT.  */
+static bool
+origin_holds_p (const struct model *model, const struct rc_stack *stack,
+		uint32_t root, uint32_t frame)
+{
+  struct rc_layer expected;
+  int64_t x, y;
+  bool found = rc_stack_origin (stack, root, frame, &x, &y);
+  if (!model_shows_p (model, root, frame, &expected))
+    return !found;
+  return found && x == expected.x && y == expected.y;
 }
 
 /* Return true if ANCESTOR is the parent of FRAME in MODEL, or an

@@ -62,6 +62,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      The test runs itself as the other program: "test-reconnect
      clipboard-owner TEXT" owns the clipboard with TEXT, and
      "test-reconnect clipboard-read" writes the text of the clipboard.
+   - Places: a child frame shows in the window of its root.  After
+     the program connects again, a child frame that the server does
+     not place again does not show.  The test reads the pixels of the
+     window through X.
    - Usage: a timeout that is not a number, or that is less than
      RC_LINK_PINGS_PER_TIMEOUT, makes the program exit with the
      status 1.  */
@@ -138,6 +142,11 @@ static bool close_example (void);
 static bool offline_close_example (void);
 static bool font_example (void);
 static bool clipboard_example (void);
+static bool places_example (void);
+static bool send_child (int);
+static bool send_clear (int, uint32_t, uint32_t, uint32_t, uint32_t);
+static bool wait_for_color (pid_t, int, int, uint32_t);
+static uint32_t window_pixel (Display *, Window, int, int);
 static char *make_text (size_t, char);
 static pid_t start_clipboard_owner (const char *);
 static bool send_clipboard (int, uint32_t, const char *);
@@ -192,6 +201,7 @@ static const struct
     { "offline close", offline_close_example },
     { "font", font_example },
     { "clipboard", clipboard_example },
+    { "places", places_example },
     { "usage", usage_example },
   };
 
@@ -408,6 +418,95 @@ offline_close_example (void)
   run.listener = listen_at (run.socket);
   stop_run (&run);
   return passed;
+}
+
+/* The child frame of the places example, its place in FRAME, its
+   size, and the colors of the example.  */
+enum { CHILD = 8, CHILD_X = 20, CHILD_Y = 10, CHILD_WIDTH = 30,
+       CHILD_HEIGHT = 20, ROOT_COLOR = 0xff0000, CHILD_COLOR = 0x0000ff };
+
+/* The places example.  */
+static bool
+places_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  int x = CHILD_X + 5, y = CHILD_Y + 5;
+  bool passed = (send_define_frame (run.connection)
+		 && send_clear (run.connection, FRAME, 200, 100, ROOT_COLOR)
+		 && send_child (run.connection)
+		 && wait_for_color (run.pid, x, y, CHILD_COLOR));
+  shutdown (run.connection, SHUT_RDWR);
+  passed = (passed && accept_next (&run)
+	    && send_define_frame (run.connection)
+	    && send_clear (run.connection, FRAME, 200, 100, ROOT_COLOR)
+	    && wait_for_color (run.pid, x, y, ROOT_COLOR));
+  stop_run (&run);
+  return passed;
+}
+
+/* Place the visible child frame CHILD in FRAME on the connection FD,
+   define it, and fill it with CHILD_COLOR.  */
+static bool
+send_child (int fd)
+{
+  struct rd_message place
+    = { .type = RD_PLACE_FRAME,
+	.u.place_frame = { .frame = CHILD, .parent = FRAME, .x = CHILD_X,
+			   .y = CHILD_Y, .z = 1, .visible = 1 } };
+  struct rd_message define
+    = { .type = RD_DEFINE_FRAME,
+	.u.define_frame = { .frame = CHILD, .width = CHILD_WIDTH,
+			    .height = CHILD_HEIGHT } };
+  return (send_message (fd, &place) && send_message (fd, &define)
+	  && send_clear (fd, CHILD, CHILD_WIDTH, CHILD_HEIGHT, CHILD_COLOR));
+}
+
+/* Fill the area WIDTH, HEIGHT at the origin of FRAME with COLOR on the
+   connection FD.  */
+static bool
+send_clear (int fd, uint32_t frame, uint32_t width, uint32_t height,
+	    uint32_t color)
+{
+  struct rd_message clear
+    = { .type = RD_CLEAR_AREA,
+	.u.clear_area = { .frame = frame, .width = width, .height = height,
+			  .color = color } };
+  return send_message (fd, &clear);
+}
+
+/* Wait at most CONNECT_LIMIT milliseconds until the pixel X, Y of the
+   window of the program PID has the color COLOR.  Return false if it
+   does not get the color.  */
+static bool
+wait_for_color (pid_t pid, int x, int y, uint32_t color)
+{
+  Display *display = XOpenDisplay (NULL);
+  if (!display)
+    return false;
+  Window window = wait_for_window (display, pid);
+  int64_t end = now_ms () + CONNECT_LIMIT;
+  bool found = false;
+  while (window && !(found = window_pixel (display, window, x, y) == color)
+	 && now_ms () < end)
+    poll (NULL, 0, 20);
+  XCloseDisplay (display);
+  return found;
+}
+
+/* Return the color of the pixel X, Y of WINDOW, as 0xRRGGBB.  The
+   screen of Xvfb has 24 bits of color.  */
+static uint32_t
+window_pixel (Display *display, Window window, int x, int y)
+{
+  XImage *image = XGetImage (display, window, x, y, 1, 1, AllPlanes,
+			     ZPixmap);
+  if (!image)
+    return UINT32_MAX;
+  uint32_t pixel = XGetPixel (image, 0, 0) & 0xffffff;
+  XDestroyImage (image);
+  return pixel;
 }
 
 /* The font example, with the files A and B.  */

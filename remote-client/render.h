@@ -125,4 +125,16 @@ extern struct rc_change rc_apply (struct rc_renderer *renderer,
 extern cairo_surface_t *rc_frame_surface (struct rc_renderer *renderer,
 					  uint32_t frame);
 
+/* The functions of the frames for the stack (stack.h) and the
+   composition (compose.h).  RENDERER is the struct rc_renderer.  */
+
+/* Put the size of the surface of FRAME in WIDTH and HEIGHT, and return
+   true.  Return false if the server did not define FRAME.  */
+extern bool rc_frame_size (void *renderer, uint32_t frame, int *width,
+			   int *height);
+
+/* Return rc_frame_surface (RENDERER, FRAME).  */
+extern cairo_surface_t *rc_frame_surface_of (void *renderer,
+					     uint32_t frame);
+
 #endif /* REMOTE_CLIENT_RENDER_H */

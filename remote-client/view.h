@@ -17,9 +17,16 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* A view shows each frame of a renderer in a GTK window of its own.
-   The window of a frame shows the surface of the frame.  The program
-   must call gtk_init before it makes a view.  */
+/* A view shows each root frame of a renderer in a GTK window of its
+   own.  A frame is a root if its place (rc_view_place) has no parent,
+   or if it has no place.  The window of a root shows the surface of
+   the root and the surfaces of its visible child frames (compose.h).
+   A child frame has no window.  The pointer input of a window goes to
+   the frame under the pointer, in the coordinates of that frame.
+   After a press, the pointer input goes to the frame of the press
+   until the release of the last button, as with the implicit grab of
+   X.  The key and focus input goes to the root.  The program must call
+   gtk_init before it makes a view.  */
 
 #ifndef REMOTE_CLIENT_VIEW_H
 #define REMOTE_CLIENT_VIEW_H
@@ -58,6 +65,19 @@ extern void rc_view_free (struct rc_view *view);
    remove the window of a frame, or draw it again.  Call this function
    after each rc_apply of the renderer, before the next one.  */
 extern void rc_view_update (struct rc_view *view, struct rc_change change);
+
+/* Keep the place PLACE of the frame PLACE->frame in VIEW, from a
+   place-frame message.  Remove the window of a frame that gets a
+   parent.  Make a window for a defined frame that becomes a root, and
+   hide or show the window of a root.  Draw again the windows that
+   show the frame before and after the change.  */
+extern void rc_view_place (struct rc_view *view,
+			   const struct rd_place_frame *place);
+
+/* Forget all the places of VIEW.  Use this for a new connection,
+   before its first message.  A child frame that the new connection
+   does not place again is not shown.  */
+extern void rc_view_reset_places (struct rc_view *view);
 
 /* Show in the title of each window of VIEW whether the client has a
    connection to its server: CONNECTED.  A new view is connected.  */
