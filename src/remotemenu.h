@@ -27,6 +27,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 struct frame;
 struct rd_message;
 struct remote_display_info;
+struct remote_menu_wait;
 
 /* The popup menu state of a session.  */
 struct remote_menu_state
@@ -34,15 +35,15 @@ struct remote_menu_state
   /* The serial of the last menu that the session showed.  */
   uint32_t serial;
 
-  /* True if the client answered the menu that the session waits
-     for.  */
-  bool answered;
+  /* The menu that the session waits for, or NULL.  See
+     remotemenu.c.  */
+  struct remote_menu_wait *wait;
 };
 
 /* The menu_show_hook of a session.  Show the menu of menu_items on
    the client of F at the pixel position X, Y of F, with the title
-   TITLE, and wait for the answer of the client.  MENUFLAGS and
-   ERROR_NAME are as for menu_show_hook.  */
+   TITLE, wait for the answer of the client, and return the selection.
+   MENUFLAGS and ERROR_NAME are as for menu_show_hook.  */
 extern Lisp_Object remote_menu_show (struct frame *f, int x, int y,
 				     int menuflags, Lisp_Object title,
 				     const char **error_name);
@@ -51,5 +52,10 @@ extern Lisp_Object remote_menu_show (struct frame *f, int x, int y,
    DPYINFO.  */
 extern void remote_menu_choice_input (struct remote_display_info *dpyinfo,
 				      const struct rd_message *message);
+
+/* End the wait for the menu of DPYINFO as a dismissal, if the session
+   waits for a menu.  Call this before the client of DPYINFO changes,
+   and before DPYINFO is freed.  */
+extern void remote_drop_menu (struct remote_display_info *dpyinfo);
 
 #endif /* EMACS_REMOTEMENU_H */

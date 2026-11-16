@@ -787,6 +787,7 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
   remote_drop_font_transfers (dpyinfo);
   remote_drop_clipboard (dpyinfo);
   remote_reset_images (dpyinfo);
+  remote_drop_menu (dpyinfo);
 
   /* A new client has no font or frame definitions, and shows
      nothing.  */

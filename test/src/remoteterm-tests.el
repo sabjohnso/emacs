@@ -296,6 +296,14 @@
 ;;     the pixel position in the frame that the position argument
 ;;     gives.  The session flushes these messages, and `x-popup-menu'
 ;;     returns only after the client answers.
+;; M4. Menu choice: `x-popup-menu' returns the selection of the item
+;;     that a menu-choice message of the client chose: the keys to the
+;;     item in a keymap menu, or the value of the item in a list of
+;;     panes.  The session ignores a choice with another serial, and a
+;;     choice of an id that is not an enabled item.  After a dismissal,
+;;     `x-popup-menu' returns nil for a click position, and signals
+;;     `quit' for a list position.  The session sends one hide-menu
+;;     message with the serial of the menu, after the show-menu message.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -7420,7 +7428,8 @@ WHERE is `frame' or `window': X and Y are relative to the frame or to
 its root window.  The frame has a menu bar, so the window is below the
 top of the frame.  A timer takes the output of the session while
 `x-popup-menu' waits, and answers with a dismissal for the serial of
-the show-menu message.  Another timer answers after 5 seconds, so a
+the show-menu message.  The position is not a click, so the dismissal
+signals `quit'.  Another timer ends the wait after 5 seconds, so a
 failure does not stop the test.  The value is a plist.  :answered is
 non-nil if the first timer ran before `x-popup-menu' returned.
 :messages are the decoded messages before the answer, and :unflushed
@@ -7438,15 +7447,29 @@ pixel position in the frame."
                                   (lambda ()
                                     (setq state (remoteterm-tests--answer-menu
                                                  "remote-menu" state)))))
-             (guard (run-at-time 5 nil #'remote-display--input "remote-menu"
-                                 (remote-display--encode
-                                  '(menu-choice :serial 0 :chosen 0 :id 0)))))
+             (guard (remoteterm-tests--menu-guard)))
         (unwind-protect
-            (x-popup-menu (list (list x y) (if (eq where 'frame) frame window))
-                          menu)
+            (remoteterm-tests--catch-menu-exit
+             (x-popup-menu (list (list x y) (if (eq where 'frame) frame window))
+                           menu))
           (cancel-timer answer)
           (cancel-timer guard))
         state))))
+
+(defun remoteterm-tests--menu-guard ()
+  "Return a timer that ends the wait of a popup menu after 5 seconds.
+The timer throws `hang' to `remoteterm-tests--catch-menu-exit', so a
+failure does not stop the test."
+  (run-at-time 5 nil #'throw 'remoteterm-tests--menu-exit 'hang))
+
+(defmacro remoteterm-tests--catch-menu-exit (&rest body)
+  "Evaluate BODY, and return its value or the cause of its exit.
+The value is `quit' if BODY signals `quit', and the value of a throw to
+`remoteterm-tests--menu-exit' if BODY throws there."
+  `(catch 'remoteterm-tests--menu-exit
+     (condition-case nil
+         (progn ,@body)
+       (quit 'quit))))
 
 (defun remoteterm-tests--menu-position (where window x y)
   "Return the pixel position (X Y) in the frame of WINDOW.
@@ -7522,8 +7545,18 @@ panes is its first element.  No title is the empty string."
 Each entry is (KIND FLAGS LABEL KEY), as in a menu-item message, with
 the label and the key text cut to their limits.  This is the model of
 law M3."
+  (mapcar #'car (remoteterm-tests--menu-model menu)))
+
+(defun remoteterm-tests--menu-model (menu)
+  "Return the entries of MENU, a value of `rd-gen-menu', with selections.
+Each element is (ENTRY . SELECTION).  ENTRY is as for
+`remoteterm-tests--menu-entries'.  SELECTION is the value of
+`x-popup-menu' when the user chooses the entry: the list of the keys
+to the item in a keymap menu, or the value of the item in a list of
+panes.  It is nil for an entry that is not an item.  This is the model
+of laws M3 and M4."
   (if (keymapp menu)
-      (remoteterm-tests--keymap-entries menu)
+      (remoteterm-tests--keymap-entries menu nil)
     (remoteterm-tests--pane-entries (cdr menu))))
 
 (defun remoteterm-tests--menu-entry (kind flags label key)
@@ -7534,22 +7567,25 @@ LABEL and KEY are strings or nil."
                                     remote-display--max-menu-text)
         (remoteterm-tests--cut-text (or key "") remote-display--max-menu-key)))
 
-(defconst remoteterm-tests--menu-separator '(1 0 "" "")
-  "The entry of a separator.")
+(defconst remoteterm-tests--menu-separator '((1 0 "" ""))
+  "The model element of a separator.")
 
-(defconst remoteterm-tests--menu-end '(3 0 "" "")
-  "The entry of the end of a submenu.")
+(defconst remoteterm-tests--menu-end '((3 0 "" ""))
+  "The model element of the end of a submenu.")
 
-(defun remoteterm-tests--keymap-entries (keymap)
-  "Return the entries of the bindings of KEYMAP, in order."
+(defun remoteterm-tests--keymap-entries (keymap path)
+  "Return the model elements of the bindings of KEYMAP, in order.
+PATH is the list of the keys to KEYMAP."
   (seq-mapcat (lambda (binding)
-                (remoteterm-tests--binding-entries (cdr binding)))
+                (remoteterm-tests--binding-entries
+                 (cdr binding) (append path (list (car binding)))))
               (seq-filter #'consp (cdr keymap))))
 
-(defun remoteterm-tests--binding-entries (binding)
-  "Return the entries of BINDING, (menu-item LABEL DEF . PROPERTIES).
-An enabled submenu gives its start, its entries, and its end.  A
-disabled submenu is a disabled item."
+(defun remoteterm-tests--binding-entries (binding path)
+  "Return the model elements of BINDING, (menu-item LABEL DEF . PROPERTIES).
+PATH is the list of the keys to BINDING.  An enabled submenu gives its
+start, its entries, and its end.  A disabled submenu is a disabled
+item."
   (pcase-let* ((`(menu-item ,label ,def . ,properties) binding)
                (enabled (or (not (plist-member properties :enable))
                             (plist-get properties :enable)))
@@ -7557,15 +7593,16 @@ disabled submenu is a disabled item."
     (cond ((member label rd-gen-menu-separators)
            (list remoteterm-tests--menu-separator))
           ((and (keymapp def) enabled)
-           `(,(remoteterm-tests--menu-entry 2 1 label nil)
-             ,@(remoteterm-tests--keymap-entries def)
+           `((,(remoteterm-tests--menu-entry 2 1 label nil))
+             ,@(remoteterm-tests--keymap-entries def path)
              ,remoteterm-tests--menu-end))
-          (t (list (remoteterm-tests--menu-entry
-                    0 (remoteterm-tests--menu-flags
-                       enabled (plist-get properties :button))
-                    label
-                    (and keys (concat "  " (substitute-command-keys
-                                            keys)))))))))
+          (t (list (cons (remoteterm-tests--menu-entry
+                          0 (remoteterm-tests--menu-flags
+                             enabled (plist-get properties :button))
+                          label
+                          (and keys (concat "  " (substitute-command-keys
+                                                  keys))))
+                         path))))))
 
 (defun remoteterm-tests--menu-flags (enabled button)
   "Return the flags of an item with ENABLED and the `:button' BUTTON."
@@ -7574,7 +7611,7 @@ disabled submenu is a disabled item."
           (if (cdr button) 8 0)))
 
 (defun remoteterm-tests--pane-entries (panes)
-  "Return the entries of PANES, each (NAME ITEM...), in order.
+  "Return the model elements of PANES, each (NAME ITEM...), in order.
 If there are several panes, a pane with a name is a submenu with that
 label.  The items of one pane, or of a pane with no name, are at the
 top of the menu."
@@ -7585,20 +7622,371 @@ top of the menu."
                                   (cdr pane))))
                       (if (equal (car pane) "")
                           items
-                        `(,(remoteterm-tests--menu-entry 2 1 (car pane) nil)
+                        `((,(remoteterm-tests--menu-entry 2 1 (car pane) nil))
                           ,@items ,remoteterm-tests--menu-end))))
                   panes)
     (seq-mapcat #'remoteterm-tests--pane-item-entries (cdar panes))))
 
 (defun remoteterm-tests--pane-item-entries (item)
-  "Return the entries of ITEM of a pane.
+  "Return the model elements of ITEM of a pane.
 A string that is not a separator is a disabled item, and nil gives no
-entry."
+entry.  The selection of (LABEL . VALUE) is VALUE."
   (cond ((null item) nil)
         ((member item rd-gen-menu-separators)
          (list remoteterm-tests--menu-separator))
-        ((stringp item) (list (remoteterm-tests--menu-entry 0 0 item nil)))
-        (t (list (remoteterm-tests--menu-entry 0 1 (car item) nil)))))
+        ((stringp item)
+         (list (list (remoteterm-tests--menu-entry 0 0 item nil))))
+        (t (list (cons (remoteterm-tests--menu-entry 0 1 (car item) nil)
+                       (cdr item))))))
+
+;;;; The choice of a popup menu
+
+(ert-deftest remoteterm-tests-menu-choice ()
+  "Law M4: `x-popup-menu' gives the selection of the item that the client chose.
+A trial pops up a random menu of `rd-gen-menu', at a click position or
+at a list position.  A first timer sends random menu-choice messages
+that the session must ignore: a choice with another serial, or a
+choice of an id that is not an enabled item.  A second timer sends the
+choice of a random enabled item, or a dismissal if the menu has no
+enabled item.  The value of `x-popup-menu' is the selection of the
+item in `remoteterm-tests--menu-model'.  After a dismissal, it is nil
+for a click position, and `x-popup-menu' signals `quit' for a list
+position.  The session sends one hide-menu message with the serial of
+the menu, after the show-menu message."
+  (skip-unless (featurep 'remote-test))
+  (let ((rd-gen-trials 40))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-menu) (rd-gen-random 1000)
+                      (rd-gen-element '(t nil))
+                      (rd-gen-list #'remoteterm-tests--wrong-menu-choice 4)))
+     (lambda (case) (apply #'remoteterm-tests--check-menu-choice case)))))
+
+(ert-deftest remoteterm-tests-menu-client-change ()
+  "A change of the client ends the wait of a popup menu as a dismissal.
+The change is a detach, or an attach of a new client.  The new client
+gets no hide-menu message, because it did not get the menu."
+  (skip-unless (featurep 'remote-test))
+  (dolist (change '(remote-display--detach remote-display--record))
+    (dolist (click '(t nil))
+      (let ((result (remoteterm-tests--answer-popup
+                     (remoteterm-tests--menu-popup
+                      remoteterm-tests--small-menu click)
+                     (list (lambda (_shown) (funcall change "remote-menu"))))))
+        (should (equal (plist-get result :value)
+                       (remoteterm-tests--dismissal-value click)))
+        (should-not (assq 'hide-menu (plist-get result :messages)))))))
+
+(ert-deftest remoteterm-tests-menu-no-client ()
+  "With no client, `x-popup-menu' returns at once as after a dismissal."
+  (skip-unless (featurep 'remote-test))
+  (dolist (click '(t nil))
+    (remoteterm-tests--with-display "remote-menu"
+      (remoteterm-tests--with-frame frame "remote-menu" nil
+        (let ((guard (remoteterm-tests--menu-guard)))
+          (should (equal (unwind-protect
+                             (remoteterm-tests--catch-menu-exit
+                              (funcall (remoteterm-tests--menu-popup
+                                        remoteterm-tests--small-menu click)
+                                       frame))
+                           (cancel-timer guard))
+                         (remoteterm-tests--dismissal-value click))))))))
+
+(ert-deftest remoteterm-tests-menu-keys-wait ()
+  "Key messages that come while a popup menu waits stay in the input.
+The events of the keys come after `x-popup-menu' returns, in order."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--menu-keys-case)
+                   '(nil (?a ?b ?c))))))
+
+(defun remoteterm-tests--menu-keys-case ()
+  "Send keys while a popup menu waits, and return the value and the events.
+The value is the list (VALUE EVENTS).  VALUE is the value of
+`x-popup-menu', after a dismissal for a click position.  EVENTS are
+the events of the keys after `x-popup-menu' returns."
+  (let ((result
+         (remoteterm-tests--answer-popup
+          (remoteterm-tests--menu-popup remoteterm-tests--small-menu t)
+          (list (lambda (shown)
+                  (dolist (key '(?a ?b ?c))
+                    (remoteterm-tests--send-key shown key))
+                  (remoteterm-tests--dismiss-menu shown)))
+          (lambda () (remoteterm-tests--read-events 3)))))
+    (list (plist-get result :value) (plist-get result :after))))
+
+(ert-deftest remoteterm-tests-menu-timers ()
+  "Timers run while a popup menu waits.
+A timer that the wait starts runs three times, and then dismisses the
+menu."
+  (skip-unless (featurep 'remote-test))
+  (let* ((count 0)
+         (ticker nil)
+         (result
+          (unwind-protect
+              (remoteterm-tests--answer-popup
+               (remoteterm-tests--menu-popup remoteterm-tests--small-menu t)
+               (list (lambda (shown)
+                       (setq ticker
+                             (run-at-time
+                              0.01 0.01
+                              (lambda ()
+                                (when (= (cl-incf count) 3)
+                                  (remoteterm-tests--dismiss-menu
+                                   shown))))))))
+            (when ticker
+              (cancel-timer ticker)))))
+    (should (equal (plist-get result :value) nil))
+    (should (>= count 3))))
+
+(ert-deftest remoteterm-tests-menu-hide-on-exit ()
+  "A quit or a throw from a timer during the wait sends one hide-menu message.
+The hide-menu message has the serial of the menu, and comes after the
+show-menu message.  A timer catches an error, so a throw is the
+non-local exit of an error in a process filter."
+  (skip-unless (featurep 'remote-test))
+  (dolist (exit `((quit . ,(lambda (_shown) (signal 'quit nil)))
+                  (thrown . ,(lambda (_shown)
+                               (throw 'remoteterm-tests--menu-exit
+                                      'thrown)))))
+    (let ((result (remoteterm-tests--answer-popup
+                   (remoteterm-tests--menu-popup remoteterm-tests--small-menu t)
+                   (list (cdr exit)))))
+      (should (eq (plist-get result :value) (car exit)))
+      (remoteterm-tests--check-hide-menu (plist-get result :messages)))))
+
+(ert-deftest remoteterm-tests-menu-nested ()
+  "A popup menu from a timer during the wait of a menu signals an error.
+This is the check of `init_menu_items' in menu.c.  The first menu
+then returns the selection of the next valid choice."
+  (skip-unless (featurep 'remote-test))
+  (let* ((nested nil)
+         (result
+          (remoteterm-tests--answer-popup
+           (remoteterm-tests--menu-popup remoteterm-tests--small-menu t)
+           (list (lambda (shown)
+                   (setq nested
+                         (condition-case err
+                             (x-popup-menu (list '(0 0) (plist-get shown :frame))
+                                           remoteterm-tests--small-menu)
+                           (error err)))
+                   (remoteterm-tests--choose-label shown "A"))))))
+    (should (equal nested
+                   '(error "Trying to use a menu from within a menu-entry")))
+    (should (equal (plist-get result :value) '(a)))))
+
+(ert-deftest remoteterm-tests-menu-dialog ()
+  "`x-popup-dialog' on a remote frame gives the value of the chosen button."
+  (skip-unless (featurep 'remote-test))
+  (let ((result (remoteterm-tests--answer-popup
+                 (lambda (frame)
+                   (x-popup-dialog frame '("Question" ("Yes" . yes)
+                                           ("No" . no))))
+                 (list (lambda (shown)
+                         (remoteterm-tests--choose-label shown "No"))))))
+    (should (eq (plist-get result :value) 'no))))
+
+(defconst remoteterm-tests--small-menu '(keymap (a menu-item "A" ignore))
+  "A popup menu with one enabled item.")
+
+(defun remoteterm-tests--check-menu-choice (menu pick click wrongs)
+  "Check law M4 for MENU, PICK, CLICK, and WRONGS.
+PICK selects the enabled item to choose, CLICK is non-nil for a click
+position, and WRONGS are values of `remoteterm-tests--wrong-menu-choice'."
+  (let* ((model (remoteterm-tests--menu-model menu))
+         (enabled (seq-filter
+                   (lambda (index)
+                     (remoteterm-tests--enabled-item-p (car (nth index model))))
+                   (number-sequence 0 (1- (length model)))))
+         (index (and enabled (nth (mod pick (length enabled)) enabled)))
+         (result
+          (remoteterm-tests--answer-popup
+           (remoteterm-tests--menu-popup menu click)
+           (list (lambda (shown)
+                   (dolist (wrong wrongs)
+                     (apply #'remoteterm-tests--send-menu-choice
+                            (remoteterm-tests--wrong-choice shown wrong))))
+                 (lambda (shown)
+                   (if index
+                       (remoteterm-tests--choose-index shown index)
+                     (remoteterm-tests--dismiss-menu shown)))))))
+    (should (equal (plist-get result :value)
+                   (if index
+                       (cdr (nth index model))
+                     (remoteterm-tests--dismissal-value click))))
+    (remoteterm-tests--check-hide-menu (plist-get result :messages))))
+
+(defun remoteterm-tests--enabled-item-p (entry)
+  "Return non-nil if the model ENTRY is an enabled item."
+  (and (eql (nth 0 entry) 0) (eql (logand (nth 1 entry) 1) 1)))
+
+(defun remoteterm-tests--wrong-menu-choice ()
+  "Return a random menu-choice that a session must ignore, as (KIND N).
+KIND `serial' is a choice with another serial, and KIND `id' is the
+choice of an id that is not an enabled item.  N selects the serial or
+the id (see `remoteterm-tests--wrong-choice')."
+  (list (rd-gen-element '(serial id)) (rd-gen-random 1000)))
+
+(defun remoteterm-tests--wrong-choice (shown wrong)
+  "Return the arguments (SERIAL CHOSEN ID) of the menu-choice WRONG.
+SHOWN is the menu that the client got (see
+`remoteterm-tests--answer-popup'), and WRONG is a value of
+`remoteterm-tests--wrong-menu-choice'."
+  (pcase-let* ((`(,kind ,n) wrong)
+               (serial (plist-get shown :serial))
+               (items (plist-get shown :items))
+               (ids (mapcar (lambda (item) (plist-get item :id)) items)))
+    (if (eq kind 'serial)
+        (list (+ serial 1 n) (logand n 1) (or (car (last ids)) 0))
+      (let ((wrong-ids (cons (+ (apply #'max 0 ids) 1 n)
+                             (mapcar (lambda (item) (plist-get item :id))
+                                     (seq-remove
+                                      #'remoteterm-tests--enabled-message-p
+                                      items)))))
+        (list serial 1 (nth (mod n (length wrong-ids)) wrong-ids))))))
+
+(defun remoteterm-tests--enabled-message-p (item)
+  "Return non-nil if the menu-item fields ITEM are an enabled item."
+  (and (eql (plist-get item :kind) 0)
+       (eql (logand (plist-get item :flags) 1) 1)))
+
+(defun remoteterm-tests--check-hide-menu (messages)
+  "Check that MESSAGES have one hide-menu message for the shown menu.
+The hide-menu message comes after the show-menu message, and has its
+serial."
+  (let ((menu-messages (seq-filter (lambda (message)
+                                     (memq (car message)
+                                           '(show-menu hide-menu)))
+                                   messages)))
+    (should (equal (mapcar #'car menu-messages) '(show-menu hide-menu)))
+    (should (eql (plist-get (cdr (nth 0 menu-messages)) :serial)
+                 (plist-get (cdr (nth 1 menu-messages)) :serial)))))
+
+(defun remoteterm-tests--dismissal-value (click)
+  "Return the value of a popup menu after a dismissal.
+CLICK is non-nil for a click position.  The value `quit' means that
+`x-popup-menu' signals `quit'."
+  (if click nil 'quit))
+
+(defun remoteterm-tests--menu-popup (menu click)
+  "Return a function of a frame that pops up MENU on the frame.
+CLICK non-nil means that the position is a click event, and nil means
+the list ((X Y) FRAME)."
+  (lambda (frame)
+    (x-popup-menu (if click
+                      (list 'mouse-3 (list (frame-root-window frame) 1
+                                           '(10 . 20) 0))
+                    (list '(10 20) frame))
+                  menu)))
+
+(defun remoteterm-tests--answer-popup (popup answers &optional after)
+  "Call POPUP with a remote frame, and answer the menu with ANSWERS.
+POPUP pops up a menu on its frame.  The functions of ANSWERS run in
+timers, in order, while POPUP waits: the first one when the client got
+the menu, and each other one 50 milliseconds after the one before it.
+The argument of each function is the menu that the client got: a
+plist with :serial, the serial of the show-menu message, :items, the
+fields of the menu-item messages in order, and :frame, the frame.
+AFTER, if
+non-nil, is a function that runs after POPUP returns.  The value is a
+plist.  :value is the value of POPUP, or the cause of its exit (see
+`remoteterm-tests--catch-menu-exit').  :messages are the messages that
+the session sent to its clients, in order.  :after is the value of
+AFTER."
+  (remoteterm-tests--with-display "remote-menu"
+    (remoteterm-tests--with-frame frame "remote-menu" nil
+      (remote-display--record "remote-menu")
+      (let* ((output "")
+             (take (lambda ()
+                     (setq output (concat output
+                                          (remoteterm-tests--take-menu-output)))))
+             (stop (remoteterm-tests--run-menu-answers
+                    answers
+                    (lambda ()
+                      (funcall take)
+                      (remoteterm-tests--shown-menu output frame))))
+             (guard (remoteterm-tests--menu-guard))
+             (value (unwind-protect
+                        (remoteterm-tests--catch-menu-exit
+                         (funcall popup frame))
+                      (cancel-timer guard)
+                      (funcall stop))))
+        (funcall take)
+        (list :value value :messages (remoteterm-tests--all-messages output)
+              :after (and after (funcall after)))))))
+
+(defun remoteterm-tests--run-menu-answers (answers shown)
+  "Call the functions of ANSWERS in timers, after the client got a menu.
+SHOWN returns the menu that the client got, or nil if the client did
+not get a menu yet.  Call the first function when SHOWN returns a
+menu, and each other function 50 milliseconds after the function
+before it.  Give the menu to each function.  Return a function that
+stops the timers.  A timer is necessary, because `x-popup-dialog' can
+run timers before it shows the menu."
+  (let ((timer nil)
+        (step nil))
+    (setq step (lambda (answers)
+                 (let ((menu (funcall shown)))
+                   (cond ((null answers))
+                         ((null menu)
+                          (setq timer (run-at-time 0.01 nil step answers)))
+                         (t (funcall (car answers) menu)
+                            (setq timer (run-at-time 0.05 nil step
+                                                     (cdr answers))))))))
+    (setq timer (run-at-time 0 nil step answers))
+    (lambda () (cancel-timer timer))))
+
+(defun remoteterm-tests--take-menu-output ()
+  "Return the output of the session \"remote-menu\".
+The value is the empty string if the session has no recording client."
+  (or (ignore-errors (remote-display--take-output "remote-menu")) ""))
+
+(defun remoteterm-tests--shown-menu (output frame)
+  "Return the menu of the bytes OUTPUT for FRAME, or nil if it has none.
+See `remoteterm-tests--answer-popup'."
+  (let* ((messages (remoteterm-tests--all-messages output))
+         (show (alist-get 'show-menu messages)))
+    (and show
+         (list :serial (plist-get show :serial)
+               :items (mapcar #'cdr (seq-filter (lambda (message)
+                                                  (eq (car message)
+                                                      'menu-item))
+                                                messages))
+               :frame frame))))
+
+(defun remoteterm-tests--send-menu-choice (serial chosen id)
+  "Send a menu-choice message with SERIAL, CHOSEN, and ID to the session."
+  (remote-display--input "remote-menu"
+                         (remote-display--encode
+                          `(menu-choice :serial ,serial :chosen ,chosen
+                                        :id ,id))))
+
+(defun remoteterm-tests--dismiss-menu (shown)
+  "Send the dismissal of the menu SHOWN."
+  (remoteterm-tests--send-menu-choice (plist-get shown :serial) 0 0))
+
+(defun remoteterm-tests--choose-index (shown index)
+  "Send the choice of the entry at INDEX of the menu SHOWN."
+  (remoteterm-tests--send-menu-choice
+   (plist-get shown :serial) 1
+   (plist-get (nth index (plist-get shown :items)) :id)))
+
+(defun remoteterm-tests--choose-label (shown label)
+  "Send the choice of the item with LABEL of the menu SHOWN."
+  (remoteterm-tests--choose-index
+   shown (seq-position (plist-get shown :items) label
+                       (lambda (item label)
+                         (equal (remoteterm-tests--menu-bytes-text
+                                 (plist-get item :label))
+                                label)))))
+
+(defun remoteterm-tests--send-key (shown character)
+  "Send a key message for CHARACTER on the frame of the menu SHOWN."
+  (remote-display--input
+   "remote-menu"
+   (remote-display--encode
+    `(key :frame ,(remoteterm-tests--frame-id (plist-get shown :frame))
+          :time 0 :keysym ,character :character ,character :modifiers 0))))
 
 ;;;; Font transfer
 
