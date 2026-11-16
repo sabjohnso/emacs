@@ -35,6 +35,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "window.h"
 #include "remoteterm.h"
 #include "remoteinput.h"
+#include "remotescroll.h"
 #include "rdproto.h"
 
 #include <fcntl.h>
@@ -1214,7 +1215,8 @@ remote_default_frame_parameters (struct frame *f, Lisp_Object parms)
 			 NULL, NULL, RES_TYPE_NUMBER);
   gui_default_parameter (f, parms, Qbottom_divider_width, make_fixnum (0),
 			 NULL, NULL, RES_TYPE_NUMBER);
-  gui_default_parameter (f, parms, Qvertical_scroll_bars, Qnil,
+  gui_default_parameter (f, parms, Qvertical_scroll_bars,
+			 Vdefault_frame_scroll_bars,
 			 "verticalScrollBars", "VerticalScrollBars",
 			 RES_TYPE_SYMBOL);
   gui_default_parameter (f, parms, Qhorizontal_scroll_bars, Qnil,
@@ -2385,6 +2387,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->set_new_font_hook = remote_new_font;
   terminal->set_scroll_bar_default_width_hook
     = remote_set_scroll_bar_default_width;
+  terminal->set_vertical_scroll_bar_hook = remote_set_vertical_scroll_bar;
   return terminal;
 }
 

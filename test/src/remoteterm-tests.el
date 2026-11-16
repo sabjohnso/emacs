@@ -622,6 +622,208 @@ configured width of a vertical scroll bar."
                            (car (window-current-scroll-bars window)))
                      (list request (if side width 0) 0 side))))))
 
+(ert-deftest remoteterm-tests-scroll-bar-default ()
+  "A remote frame has the scroll bars of `default-frame-scroll-bars'.
+A frame with no vertical-scroll-bars parameter gets the default of
+Emacs for this window system."
+  (skip-unless (featurep 'remote-test))
+  (remoteterm-tests--with-display "remote-test"
+    (let ((frame (x-create-frame-with-faces '((display . "remote-test")))))
+      (unwind-protect
+          (should (eq (frame-parameter frame 'vertical-scroll-bars)
+                      default-frame-scroll-bars))
+        (delete-frame frame)))))
+
+(rd-daemon-deftest remoteterm-tests-scroll-bar-draw
+  "Law S3: a redisplay draws the full scroll-bar column of each window.
+The clear-area messages cover the column from the top edge of the
+window to its bottom edge.  In the rows of the text area, the handle
+has the frame foreground, and the trough and the border have the frame
+background.  The handle top in the range of
+the bar agrees with the window start in the buffer, within 1 pixel."
+  (let ((rd-gen-trials 30))
+    (rd-gen-for-all
+     #'remoteterm-tests--scroll-bar-case
+     (lambda (case)
+       (pcase-let (((map :output :columns)
+                    (rd-daemon-eval
+                     (remoteterm-tests--scroll-bar-form case nil)))
+                   (`(,fg ,bg) (mapcar #'remoteterm-tests--rgb-pixel
+                                       (plist-get case :colors))))
+         (dolist (column columns)
+           (remoteterm-tests--should-draw-scroll-bar output column fg bg)))))))
+
+(rd-daemon-deftest remoteterm-tests-scroll-bar-split
+  "A split of a window draws the full scroll-bar column of each window.
+With left scroll bars, `split-window-right' puts the column of the new
+window in the middle of the frame.  A clear covers each pixel of that
+column, also beside the mode line of the new window."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda ()
+       (plist-put (remoteterm-tests--scroll-bar-case) :side 'left))
+     (lambda (case)
+       (pcase-let (((map :output :columns)
+                    (rd-daemon-eval
+                     (remoteterm-tests--scroll-bar-form
+                      case '(split-window-right))))
+                   (`(,fg ,bg) (mapcar #'remoteterm-tests--rgb-pixel
+                                       (plist-get case :colors))))
+         (should (= (length columns) 2))
+         (dolist (column columns)
+           (remoteterm-tests--should-draw-scroll-bar
+            output column fg bg)))))))
+
+(defun remoteterm-tests--scroll-bar-case ()
+  "Return a random case for the tests of the scroll-bar draw.
+The value is a plist.  :side is the side of the bars, :lines the
+number of lines of the buffer, :start the first line in the window,
+:mode-line, :header-line and :tab-line the formats of these lines,
+and :colors the foreground and the background of the frame.  The two
+colors are different."
+  (let ((lines (rd-gen-integer 0 200))
+        (fg (remoteterm-tests--rgb))
+        (bg (remoteterm-tests--rgb)))
+    (list :side (rd-gen-element '(left right))
+          :lines lines
+          :start (rd-gen-integer 0 lines)
+          :mode-line (rd-gen-element '(nil "M"))
+          :header-line (rd-gen-element '(nil "H"))
+          :tab-line (rd-gen-element '(nil "T"))
+          :colors (list (if (equal fg bg)
+                            (mapcar (lambda (c) (logxor c 128)) fg)
+                          fg)
+                        bg))))
+
+(defun remoteterm-tests--scroll-bar-form (case change)
+  "Return a form for the daemon that draws a frame with the scroll bars of CASE.
+CASE is as for `remoteterm-tests--scroll-bar-case'.  If CHANGE is
+non-nil, the form evaluates it in the window after the first draw, and
+redisplays again.  The value of the form is a plist.  :output is the
+bytes of the last draw, and :columns is the list of the scroll-bar
+columns of the windows of the frame, as for
+`remoteterm-tests--scroll-bar-column'."
+  (pcase-let (((map :side :lines :start :mode-line :header-line :tab-line
+                    :colors)
+               case))
+    (remoteterm-tests--frame-form
+     `((width . 40) (height . 20) (vertical-scroll-bars . ,side)
+       (foreground-color . ,(remoteterm-tests--rgb-string (nth 0 colors)))
+       (background-color . ,(remoteterm-tests--rgb-string (nth 1 colors))))
+     `(progn
+        (dotimes (line ,lines)
+          (insert (format "line %d\n" line)))
+        (insert "end")
+        (setq mode-line-format ,mode-line
+              header-line-format ,header-line
+              tab-line-format ,tab-line)
+        (goto-char (point-min))
+        (forward-line ,start)
+        (set-window-start window (point))
+        (set-window-point window (point)))
+     `(progn
+        (when ',change
+          (with-selected-window window ,change)
+          (redisplay t)
+          (setq output (remote-display--take-output display)))
+        (list :output output
+              :columns (mapcar #'remoteterm-tests--scroll-bar-column
+                               (window-list frame 'never)))))))
+
+(defun remoteterm-tests--scroll-bar-column (window)
+  "Return the scroll-bar column of WINDOW as a plist.
+:x and :width are the pixel columns of the column.  :top and :bottom
+are its rows: the top edge of WINDOW, and the bottom edge with no
+bottom divider.  :box-top and :box-bottom are the rows of the text
+area.  :start is the window start and :whole is the size of the
+buffer, both relative to `point-min'."
+  (pcase-let ((`(,left ,top ,right ,bottom) (window-pixel-edges window))
+              (`(,_ ,box-top ,_ ,box-bottom)
+               (window-inside-pixel-edges window))
+              (width (window-scroll-bar-width window)))
+    (with-current-buffer (window-buffer window)
+      (list :x (if (eq (car (window-current-scroll-bars window)) 'left)
+                   left
+                 (- right (window-right-divider-width window) width))
+            :width width
+            :top top
+            :bottom (- bottom (window-bottom-divider-width window))
+            :box-top box-top
+            :box-bottom box-bottom
+            :start (- (window-start window) (point-min))
+            :whole (- (point-max) (point-min))))))
+
+(defun remoteterm-tests--column-pixels (output column)
+  "Return the pixels of COLUMN after the clear-area messages of OUTPUT.
+COLUMN is as for `remoteterm-tests--scroll-bar-column'.  The value is
+a vector of the rows from :top to :bottom of COLUMN, and each row is a
+vector of the pixels from :x over :width.  A pixel is the color of the
+last clear-area message that covers it, or nil if no message covers
+it."
+  (pcase-let* (((map :x :width :top :bottom) column)
+               (rows (apply #'vector
+                            (cl-loop repeat (- bottom top)
+                                     collect (make-vector width nil)))))
+    (dolist (fields (remoteterm-tests--of-type 'clear-area output) rows)
+      (pcase-let (((map (:x area-x) (:y area-y) (:width area-width)
+                        (:height area-height) :color)
+                   fields))
+        (cl-loop for y from (max area-y top)
+                 below (min (+ area-y area-height) bottom)
+                 do (cl-loop for pixel from (max area-x x)
+                             below (min (+ area-x area-width) (+ x width))
+                             do (aset (aref rows (- y top)) (- pixel x)
+                                      color)))))))
+
+(defun remoteterm-tests--should-draw-scroll-bar (output column fg bg)
+  "Check that OUTPUT draws the scroll bar of COLUMN with FG and BG.
+COLUMN is as for `remoteterm-tests--scroll-bar-column'.  FG and BG are
+the protocol colors of the frame foreground and background.  A clear
+covers each pixel of the column.  The mode line, the header line and
+the tab line are full-width rows, so redisplay draws them over the
+column after the bar, and their pixels can have the color of a face."
+  (pcase-let* (((map :width :top :box-top :box-bottom) column)
+               (pixels (remoteterm-tests--column-pixels output column))
+               (box (cl-subseq pixels (- box-top top) (- box-bottom top))))
+    (should (> width 0))
+    (should (cl-every (lambda (row) (cl-notany #'null row)) pixels))
+    (should (cl-every (lambda (row)
+                        (cl-every (lambda (pixel) (memql pixel (list fg bg)))
+                                  row))
+                      box))
+    (remoteterm-tests--should-draw-handle box column fg bg)))
+
+(defun remoteterm-tests--should-draw-handle (box column fg bg)
+  "Check the handle in the pixels BOX of the text-area rows of COLUMN.
+COLUMN is as for `remoteterm-tests--scroll-bar-column'.  The handle is
+the rows with the color FG, which have FG inside the border and BG in
+the border.  It has at least 5 rows if the inside of the bar has them.
+Its top agrees with the window start, within 1 pixel."
+  (pcase-let* (((map :width :box-top :start :whole) column)
+               (inside-top (+ box-top 2))
+               (inside-height (max 0 (- (length box) 4)))
+               (range (max 0 (- inside-height 5)))
+               (handle-row (if (> width 4)
+                               (vconcat (make-vector 2 bg)
+                                        (make-vector (- width 4) fg)
+                                        (make-vector 2 bg))
+                             (make-vector width bg)))
+               (handle (cl-loop for row across box
+                                for y from box-top
+                                when (memql fg (append row nil))
+                                collect y)))
+    (dolist (y handle)
+      (should (equal (aref box (- y box-top)) handle-row)))
+    (should (>= (length handle) (if (> width 4) (min 5 inside-height) 0)))
+    (when handle
+      (should (equal handle (number-sequence (car handle)
+                                             (car (last handle)))))
+      (should (<= inside-top (car handle)))
+      (should (< (car (last handle)) (+ inside-top inside-height)))
+      (should (<= (abs (- (car handle) inside-top
+                          (if (zerop whole) 0 (/ (* start range 1.0) whole))))
+                  1)))))
+
 (ert-deftest remoteterm-tests-display-pixel-size ()
   "The size of a display is the size of the largest frame of its session."
   (skip-unless (featurep 'remote-test))
@@ -2928,9 +3130,10 @@ Each letter M goes past its column at both sides, so the draw of one
 column needs the foreground of the columns next to it.  The form CHANGE
 can use the variable WINDOW.  The value of the form is a plist: :output
 is the bytes that the session sent for CHANGE, :x0 is the left edge of
-the text area, and :width is the width of a column."
+the text area, and :width is the width of a column.  The frame has no
+scroll bar, so the clears of the text are the only clears."
   (remoteterm-tests--frame-form
-   '((width . 40))
+   '((width . 40) (vertical-scroll-bars . nil))
    `(progn
       (insert (propertize (make-string 6 ?M) 'face
                           '(:slant italic :height 2.0))
