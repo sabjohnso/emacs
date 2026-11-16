@@ -276,15 +276,15 @@
 ;;     is attached sends no forget-image message to the next client.
 ;;     An image that goes after the deletion of its session does not
 ;;     crash Emacs.
-;; M1. Menu bar draw: each draw-glyphs message is inside the rows of
+;; 94. Menu bar draw: each draw-glyphs message is inside the rows of
 ;;     the menu bar or below the top of the windows.  A frame with a
 ;;     menu bar draws in its rows.  After each change of the number of
 ;;     menu bar lines, the clear-area messages cover the rows of the
 ;;     old and of the new menu bar, so no stale menu bar text stays.
-;; M2. Menu bar click: a press of button 1 on a menu bar item gives the
+;; 95. Menu bar click: a press of button 1 on a menu bar item gives the
 ;;     prefix event `menu-bar' and then the event of the item, with a
 ;;     position in the area `menu-bar'.  The release gives no event.
-;; M3. Menu entries: `x-popup-menu' on a remote frame sends one
+;; 96. Menu entries: `x-popup-menu' on a remote frame sends one
 ;;     menu-item message for each entry of the menu, in order, and then
 ;;     one show-menu message.  The entries nest correctly, and have the
 ;;     serial of the show-menu message.  They have the labels of the
@@ -296,7 +296,7 @@
 ;;     the pixel position in the frame that the position argument
 ;;     gives.  The session flushes these messages, and `x-popup-menu'
 ;;     returns only after the client answers.
-;; M4. Menu choice: `x-popup-menu' returns the selection of the item
+;; 97. Menu choice: `x-popup-menu' returns the selection of the item
 ;;     that a menu-choice message of the client chose: the keys to the
 ;;     item in a keymap menu, or the value of the item in a list of
 ;;     panes.  The session ignores a choice with another serial, and a
@@ -304,10 +304,10 @@
 ;;     `x-popup-menu' returns nil for a click position, and signals
 ;;     `quit' for a list position.  The session sends one hide-menu
 ;;     message with the serial of the menu, after the show-menu message.
-;; M5. Menu pace: while the sink of a session reports 65536 bytes or
+;; 98. Menu pace: while the sink of a session reports 65536 bytes or
 ;;     more that it did not send, `x-popup-menu' sends no menu-item
 ;;     message and no show-menu message.  When the transport reports an
-;;     empty queue, the session sends the entries in order, as law M3
+;;     empty queue, the session sends the entries in order, as law 96
 ;;     gives them, and then the show-menu message.  A quit, a throw, or a
 ;;     detach while the entries wait sends no entries, no show-menu
 ;;     message, and no hide-menu message.
@@ -556,7 +556,7 @@ OPEN-NAMES is the model: the names that are open before OPERATION."
             default-frame-alist alist))))
 
 (ert-deftest remoteterm-tests-scroll-bar-area ()
-  "Law S1: a remote window has the vertical scroll-bar area of its request.
+  "Law 99: a remote window has the vertical scroll-bar area of its request.
 When a frame starts and after each change of the scroll-bar
 parameters, each window has an area of the configured width on the
 requested side, or no area if the request is nil.  t requests the
@@ -581,7 +581,7 @@ scroll bar, because only toolkit builds have one."
                 frame other width)))))))))
 
 (ert-deftest remoteterm-tests-scroll-bar-default-width ()
-  "Law S2: the default scroll-bar width is whole columns of at least 14 pixels.
+  "Law 100: the default scroll-bar width is whole columns of at least 14 pixels.
 When `scroll-bar-width' is nil, the width of the area is the smallest
 multiple of the column width that is at least 14, as for an X scroll
 bar with no toolkit."
@@ -635,7 +635,7 @@ Emacs for this window system."
         (delete-frame frame)))))
 
 (rd-daemon-deftest remoteterm-tests-scroll-bar-draw
-  "Law S3: a redisplay draws the full scroll-bar column of each window.
+  "Law 101: a redisplay draws the full scroll-bar column of each window.
 The clear-area messages cover the column from the top edge of the
 window to its bottom edge.  In the rows of the text area, the handle
 has the frame foreground, and the trough and the border have the frame
@@ -827,7 +827,7 @@ Its top agrees with the window start, within 1 pixel."
 ;;;; Scroll-bar input
 
 (rd-daemon-deftest remoteterm-tests-scroll-bar-click
-  "Law S4: a press on a bar and its release give scroll-bar events.
+  "Law 102: a press on a bar and its release give scroll-bar events.
 A press of a button that is not a wheel button, at a random row of the
 text area beside a window W, gives a down event at (W
 vertical-scroll-bar (OFFSET . RANGE) TIME PART).  OFFSET is the row
@@ -1278,7 +1278,7 @@ and its release is a plain click."
 ;;;; Scroll-bar drag
 
 (rd-daemon-deftest remoteterm-tests-scroll-bar-drag
-  "Law S5: while the grab of a bar holds, the motion is on the bar.
+  "Law 103: while the grab of a bar holds, the motion is on the bar.
 After a press of button 2 at a random row of the bar of a window W,
 each motion, at a random position of the frame or outside it, gives
 \(scroll-bar-movement (W vertical-scroll-bar (OFFSET . RANGE) TIME
@@ -1476,7 +1476,7 @@ PARENT is on the session \"remote-child\", OTHER is on the session
            ,@body)))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-parent
-  "A frame made with a parent-frame parameter has that parent (law C1).
+  "A frame made with a parent-frame parameter has that parent (law 67).
 A parent that is not a live frame of the same session signals an
 error, and the session then has no new frame."
   (remoteterm-tests--for-each-case
@@ -1501,7 +1501,7 @@ error, and the session then has no new frame."
 
 (rd-daemon-deftest remoteterm-tests-child-frame-minibuffer
   "A minibuffer parameter nil or a window gives no minibuffer of its own.
-With a window, the frame uses that window (law C2).  A minibuffer
+With a window, the frame uses that window (law 68).  A minibuffer
 window of another session signals an error."
   (remoteterm-tests--for-each-case
    '(window nil other-session)
@@ -1536,7 +1536,7 @@ The root window of the frame is its own minibuffer window."
          (should (remoteterm-tests--own-minibuffer-p frame)))))))
 
 (rd-daemon-deftest remoteterm-tests-frame-visibility-parameter
-  "A new frame is visible unless its visibility parameter is nil (law C3).
+  "A new frame is visible unless its visibility parameter is nil (law 69).
 This holds for a root frame and for a child frame.  The client gets a
 draw of the frame only if it is visible."
   (remoteterm-tests--for-each-case
@@ -1550,7 +1550,7 @@ draw of the frame only if it is visible."
                       (list visible visible)))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-no-accept-focus
-  "The no-accept-focus parameter of a new frame reads back (law C4)."
+  "The no-accept-focus parameter of a new frame reads back (law 70)."
   (remoteterm-tests--for-each-case
    '(t nil)
    (lambda (value)
@@ -1560,7 +1560,7 @@ draw of the frame only if it is visible."
          (should (eq (frame-parameter child 'no-accept-focus) value)))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-z-order
-  "A new child frame is above each of its siblings (law C5)."
+  "A new child frame is above each of its siblings (law 71)."
   (let ((rd-gen-trials 10))
     (rd-gen-for-all
      (lambda () (rd-gen-integer 1 5))
@@ -1577,7 +1577,7 @@ draw of the frame only if it is visible."
                  (push new children))))))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-negative-position
-  "A negative position of a new child counts from the far edge (law C6).
+  "A negative position of a new child counts from the far edge (law 72).
 The left edge of the child is at the native width of the parent minus
 the width of the child minus N, for a left value of -N or (- N).  The
 top edge is the same with the heights.  A position that is not
@@ -1717,7 +1717,7 @@ the frames that BODY made, and close the session."
            (delete-frame frame t))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-replay
-  "The client gets the place of each frame (law C7).
+  "The client gets the place of each frame (law 73).
 After random operations on child frames, a replay of the output gives
 each frame that the client knows the parent, the visibility and the
 position that it has in Emacs.  The z values of the siblings have the
@@ -1731,7 +1731,7 @@ order of `frame--z-order-lessp'."
          (remoteterm-tests--check-replay))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-distinct-z
-  "No two siblings have the same z order (law C8).
+  "No two siblings have the same z order (law 74).
 After each random operation, `frame--z-order-lessp' puts each frame
 below or above each sibling.  This is a guard law.  It passed before
 remoteplace.c existed, and it also passed with a raise or lower hook
@@ -1745,7 +1745,7 @@ that did not restack the siblings."
           root ops #'remoteterm-tests--check-distinct-z))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-place-before-define
-  "A client gets the place of a new frame before its definition (law C9).
+  "A client gets the place of a new frame before its definition (law 75).
 After an attach, the place that a client has for a frame at its first
 define-frame is the place of the frame in Emacs.  The order in which
 the client learns the frames does not matter."
@@ -1764,7 +1764,7 @@ the client learns the frames does not matter."
             frames (cdr (remoteterm-tests--replay-output)))))))))
 
 (rd-daemon-deftest remoteterm-tests-frame-place-quiet-redisplay
-  "A redisplay with no change of a place sends no place-frame (law C10).
+  "A redisplay with no change of a place sends no place-frame (law 76).
 This is a guard law.  It passed before remoteplace.c existed, and it
 also passed when `remote_send_place' sent each place, also a place
 that the client had."
@@ -1781,7 +1781,7 @@ that the client had."
          (should-not (remoteterm-tests--places-in-output)))))))
 
 (rd-daemon-deftest remoteterm-tests-frame-place-quiet-roots
-  "A session with only visible root frames sends no place-frame (law C10).
+  "A session with only visible root frames sends no place-frame (law 76).
 Thus the output of such a session is the same as before child frames."
   (let ((rd-gen-trials 10))
     (rd-gen-for-all
@@ -1803,7 +1803,7 @@ Thus the output of such a session is the same as before child frames."
          (should-not (remoteterm-tests--places-in-output)))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-place-flush
-  "A change of the place of a known child reaches the client (law C11).
+  "A change of the place of a known child reaches the client (law 77).
 A move, a raise or a hide of a child, with no redisplay, sends a
 place-frame and flushes it."
   (remoteterm-tests--for-each-case
@@ -1824,7 +1824,7 @@ place-frame and flushes it."
          (should (remoteterm-tests--places-in-output)))))))
 
 (rd-daemon-deftest remoteterm-tests-child-frame-place-reconnect
-  "A new client gets the same places as the last one (law C12).
+  "A new client gets the same places as the last one (law 78).
 After random operations, a detach and an attach, the replay of the
 new output gives the places of the frames in Emacs."
   (let ((rd-gen-trials 20))
@@ -1841,7 +1841,7 @@ new output gives the places of the frames in Emacs."
   "`set-frame-position' with a negative value counts from the far edge.
 With X = -N, the right edge of the child is N pixels from the right
 edge of its parent, and `frame-position' gives a value that is not
-negative.  Y is the same with the bottom edges (law C13)."
+negative.  Y is the same with the bottom edges (law 79)."
   (let ((rd-gen-trials 20))
     (rd-gen-for-all
      (lambda () (list (rd-gen-integer -50 50) (rd-gen-integer -50 50)))
@@ -6685,7 +6685,7 @@ line of the frame.  HEIGHTS has the height of the menu bar from
     (`(lines ,n) (set-frame-parameter frame 'menu-bar-lines n))))
 
 (rd-daemon-deftest remoteterm-tests-menu-bar-draws
-  "Law M1: redisplay draws the menu bar only in its rows.
+  "Law 94: redisplay draws the menu bar only in its rows.
 A trial makes a remote frame with a random number of menu bar lines,
 0 or 1, and then changes that number a random number of times.  After
 the first redisplay and after each change, the output of the
@@ -6805,7 +6805,7 @@ Each rectangle is a list (LEFT TOP RIGHT BOTTOM) that contains the row."
     (>= x right)))
 
 (rd-daemon-deftest remoteterm-tests-menu-bar-click
-  "Law M2: a press on a menu bar item gives the event of that item.
+  "Law 95: a press on a menu bar item gives the event of that item.
 A trial picks a random item K of the menu bar of a remote frame.  A
 button message with button 1 and press 1 at the left pixel of K in
 the first row gives the prefix event `menu-bar' and then an event
@@ -8244,7 +8244,7 @@ Return the CLIPBOARD selection, which was \"before\" before the text."
 (defvar remote-display--max-menu-key)
 
 (ert-deftest remoteterm-tests-menu-entries ()
-  "Law M3: the messages of a popup menu have the entries of the menu.
+  "Law 96: the messages of a popup menu have the entries of the menu.
 A trial pops up a random menu of `rd-gen-menu' at a random position,
 relative to a frame or to its window.  A timer takes the output of the
 session while `x-popup-menu' waits, and answers with a dismissal.  The
@@ -8270,7 +8270,7 @@ model of the entries is `remoteterm-tests--menu-entries'."
       (should (equal (remote-display--take-output "remote-menu") "")))))
 
 (defun remoteterm-tests--check-menu-entries (menu result)
-  "Check law M3 for MENU and RESULT, a value of `remoteterm-tests--popup-menu'."
+  "Check law 96 for MENU and RESULT, a value of `remoteterm-tests--popup-menu'."
   (pcase-let* (((map :answered :unflushed :messages :frame :position) result)
                (menu-messages (seq-filter
                                (lambda (message)
@@ -8401,7 +8401,7 @@ Return STATE with :answered, :unflushed, and :messages (see
 A trial cuts a random text at a random limit.  Law: the cut text is a
 start of the text, it has at most LIMIT bytes of UTF-8, and it is the
 full text, or the next character of the text makes it longer than
-LIMIT.  The law does not use the model, so law M3 checks the C code
+LIMIT.  The law does not use the model, so law 96 checks the C code
 against a model that this law checks."
   (rd-gen-for-all
    (lambda ()
@@ -8458,7 +8458,7 @@ panes is its first element.  No title is the empty string."
   "Return the entries of MENU, a value of `rd-gen-menu', in order.
 Each entry is (KIND FLAGS LABEL KEY), as in a menu-item message, with
 the label and the key text cut to their limits.  This is the model of
-law M3."
+law 96."
   (mapcar #'car (remoteterm-tests--menu-model menu)))
 
 (defun remoteterm-tests--menu-model (menu)
@@ -8468,7 +8468,7 @@ Each element is (ENTRY . SELECTION).  ENTRY is as for
 `x-popup-menu' when the user chooses the entry: the list of the keys
 to the item in a keymap menu, or the value of the item in a list of
 panes.  It is nil for an entry that is not an item.  This is the model
-of laws M3 and M4."
+of laws 96 and 97."
   (if (keymapp menu)
       (remoteterm-tests--keymap-entries menu nil)
     (remoteterm-tests--pane-entries (cdr menu))))
@@ -8556,7 +8556,7 @@ entry.  The selection of (LABEL . VALUE) is VALUE."
 ;;;; The choice of a popup menu
 
 (ert-deftest remoteterm-tests-menu-choice ()
-  "Law M4: `x-popup-menu' gives the selection of the item that the client chose.
+  "Law 97: `x-popup-menu' gives the selection of the item that the client chose.
 A trial pops up a random menu of `rd-gen-menu', at a click position or
 at a list position.  A first timer sends random menu-choice messages
 that the session must ignore: a choice with another serial, or a
@@ -8704,7 +8704,7 @@ then returns the selection of the next valid choice."
   "A popup menu with one enabled item.")
 
 (defun remoteterm-tests--check-menu-choice (menu pick click wrongs)
-  "Check law M4 for MENU, PICK, CLICK, and WRONGS.
+  "Check law 97 for MENU, PICK, CLICK, and WRONGS.
 PICK selects the enabled item to choose, CLICK is non-nil for a click
 position, and WRONGS are values of `remoteterm-tests--wrong-menu-choice'."
   (let* ((model (remoteterm-tests--menu-model menu))
@@ -8905,7 +8905,7 @@ See `remoteterm-tests--answer-popup'."
 ;;;; The pace of a large popup menu
 
 (ert-deftest remoteterm-tests-menu-paced ()
-  "Law M5: the entries of a popup menu go at the pace of the connection.
+  "Law 98: the entries of a popup menu go at the pace of the connection.
 A trial pops up a large random menu of `rd-gen-large-menu' while the
 sink of the session reports 65536 bytes.  Then a timer drains the
 queue, or quits, throws, or detaches the client while the entries
@@ -8921,7 +8921,7 @@ wait.  See `remoteterm-tests--paced-popup'."
               (list (apply #'remoteterm-tests--paced-popup case)))))))
 
 (defun remoteterm-tests--check-menu-paced (menu exit result)
-  "Check law M5 for MENU, EXIT, and RESULT.
+  "Check law 98 for MENU, EXIT, and RESULT.
 RESULT is the value of `remoteterm-tests--paced-popup' for MENU and
 EXIT."
   (pcase-let (((map :full :sent :value :after) result))
@@ -10005,7 +10005,7 @@ the buffer of `remoteterm-tests--help-buffer'."
          (kill-buffer buffer)))))
 
 (rd-daemon-deftest remoteterm-tests-help-on-motion
-  "A motion over a text with a `help-echo' shows the help (law H1).
+  "A motion over a text with a `help-echo' shows the help (law 80).
 A motion over a plain text after it calls `show-help-function' with
 nil, so the help goes away."
   (remoteterm-tests--with-help-root root
@@ -10021,7 +10021,7 @@ nil, so the help goes away."
                         (list remoteterm-tests--help nil))))))))
 
 (rd-daemon-deftest remoteterm-tests-motion-into-child-clears-highlight
-  "A motion from a frame into its child clears the mouse highlight (law H2)."
+  "A motion from a frame into its child clears the mouse highlight (law 81)."
   (remoteterm-tests--with-help-root root
     (let ((child (remoteterm-tests--plain-child root '((left . 30)
                                                       (top . 20))))
@@ -10040,7 +10040,7 @@ nil, so the help goes away."
                       remoteterm-tests--place-display)))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-transparent
-  "A tip frame is transparent to input (law H3).
+  "A tip frame is transparent to input (law 82).
 For a child T of R with the parameter `remote-tip', a motion, button or
 wheel input for T at X, Y has the effect of the same input for R at
 X + left of T, Y + top of T.  A sum outside the range of int32 stops at
@@ -10064,7 +10064,7 @@ the limit of the range."
                          (cl-incf time 10000)))))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-keeps-help
-  "A motion in a tip over the help text of its parent keeps the help (law H4).
+  "A motion in a tip over the help text of its parent keeps the help (law 83).
 Thus `tooltip-show-help' does not hide the tip when the mouse moves
 onto it."
   (remoteterm-tests--with-help-root root
@@ -10203,7 +10203,7 @@ the summaries of the events of a press and a release of button 1.  For
 (defvar remote-display-tip-default-offsets)
 
 (ert-deftest remoteterm-tests-tip-position ()
-  "The place of a tooltip keeps it in the root and off the mouse (law T1).
+  "The place of a tooltip keeps it in the root and off the mouse (law 84).
 On each axis: an integer left or top in the parameters gives that
 exact position.  Else a tooltip that is not larger than the root is in
 the root.  If the tooltip fits in the root before or after the mouse
@@ -10228,7 +10228,7 @@ than the root."
         y-case (cdr remote-display-tip-default-offsets) y)))))
 
 (defun remoteterm-tests--check-tip-axis (case default-offset start)
-  "Check the law T1 for START, the place of a tooltip on one axis.
+  "Check the law 84 for START, the place of a tooltip on one axis.
 CASE is a value of `rd-gen-tip-axis'.  DEFAULT-OFFSET is the offset
 of the axis when the offset of CASE is nil."
   (pcase-let ((`(,mouse ,size ,limit ,offset ,explicit) case))
@@ -10243,12 +10243,12 @@ of the axis when the offset of CASE is nil."
           (should (= start (max 0 (- limit size)))))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-show
-  "After `x-show-tip', the root has one visible tooltip with the text (law T2).
+  "After `x-show-tip', the root has one visible tooltip with the text (law 85).
 The text area of the tooltip is as wide as the longest line, but not
 wider than `x-max-tooltip-size'.  It is as high as the lines, but not
 higher than `x-max-tooltip-size'.  A line that wraps can make it
 higher, up to `x-max-tooltip-size'.  The session has no mouse
-position, so the place of the tooltip is that of law T1 for the mouse
+position, so the place of the tooltip is that of law 84 for the mouse
 at the top-left corner of the root."
   (remoteterm-tests--with-place-root root
     (let ((rd-gen-trials 20))
@@ -10266,9 +10266,9 @@ at the top-left corner of the root."
             (remoteterm-tests--check-tip root text) root '(0 . 0))))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-settings
-  "A tooltip has no bars and no fullscreen state (law T3).
+  "A tooltip has no bars and no fullscreen state (law 86).
 The frame defaults and the bar modes do not change this, and the size
-is that of law T2."
+is that of law 85."
   (let ((rd-gen-trials 10))
     (rd-gen-for-all
      (lambda () (list (rd-gen-tip-text 4 100) (rd-gen-frame-defaults)
@@ -10303,7 +10303,7 @@ Then give the two modes their old states again."
       (tab-bar-mode (if old-tab-bar 1 -1)))))
 
 (rd-daemon-deftest remoteterm-tests-tip-hide
-  "`x-hide-tip' returns t once, and then nil (law T4).
+  "`x-hide-tip' returns t once, and then nil (law 87).
 This is true after one or more calls of `x-show-tip'.  After it, the
 session has no tooltip frame."
   (let ((rd-gen-trials 10))
@@ -10318,10 +10318,10 @@ session has no tooltip frame."
          (should-not (remoteterm-tests--tip-frames)))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-under-child
-  "A tooltip goes to the root of the frame under the mouse (law T9).
+  "A tooltip goes to the root of the frame under the mouse (law 92).
 The mouse is at a point of the last frame of a chain of 0 to 3 nested
 child frames of a root.  The tooltip is a child of the root.  Its place
-is that of law T1 for the mouse position in the root: the point plus
+is that of law 84 for the mouse position in the root: the point plus
 the position of each frame of the chain."
   (let ((rd-gen-trials 10))
     (rd-gen-for-all
@@ -10342,10 +10342,10 @@ the position of each frame of the chain."
                   (apply #'+ y (mapcar #'cdr positions))))))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-no-mouse
-  "With no mouse position, a tooltip goes to the root of FRAME (law T10).
+  "With no mouse position, a tooltip goes to the root of FRAME (law 93).
 FRAME is the last frame of a chain of 0 to 3 nested child frames of a
 root, and the session had no motion.  The tooltip is a child of the
-root.  Its place is that of law T1 for the mouse at the top-left
+root.  Its place is that of law 84 for the mouse at the top-left
 corner of the root."
   (let ((rd-gen-trials 10))
     (rd-gen-for-all
@@ -10358,11 +10358,11 @@ corner of the root."
            (remoteterm-tests--check-tip-place
             (remoteterm-tests--check-tip root "tip") root '(0 . 0))))))))
 
-;; Laws T5 and T6 use a few examples and not random inputs, because
+;; Laws 88 and 89 use a few examples and not random inputs, because
 ;; they wait on timers and on real time.  Each case takes a long time.
 
 (rd-daemon-deftest remoteterm-tests-tip-timeout
-  "A small TIMEOUT hides the tooltip (law T5).
+  "A small TIMEOUT hides the tooltip (law 88).
 The TIMEOUT `most-positive-fixnum' of mouse.el gives no error, and the
 tooltip stays."
   (remoteterm-tests--for-each-case
@@ -10377,7 +10377,7 @@ tooltip stays."
        (should (= (length (remoteterm-tests--tip-frames)) count))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-mode
-  "With `tooltip-mode', a motion over a help text shows a tooltip (law T6).
+  "With `tooltip-mode', a motion over a help text shows a tooltip (law 89).
 A motion into the tooltip after that does not delete it."
   (remoteterm-tests--for-each-case
    '((2 2) (10 5))
@@ -10406,14 +10406,14 @@ A motion into the tooltip after that does not delete it."
            (kill-buffer buffer)))))))
 
 (ert-deftest remoteterm-tests-tip-hide-calls-lisp ()
-  "The C function `x-hide-tip' returns the value of the Lisp hide (law T7)."
+  "The C function `x-hide-tip' returns the value of the Lisp hide (law 90)."
   (skip-unless (featurep 'remote))
   (cl-letf (((symbol-function 'remote-display--hide-tip)
              (lambda () 'hidden)))
     (should (eq (x-hide-tip) 'hidden))))
 
 (ert-deftest remoteterm-tests-frame-border-width ()
-  "A new frame can have a border-width parameter (law T8).
+  "A new frame can have a border-width parameter (law 91).
 `tooltip-frame-parameters' give one.  The client draws no outer
 border, so the border width of the frame and the outer border width
 of its geometry stay 0."
@@ -10426,7 +10426,7 @@ of its geometry stay 0."
 
 (defun remoteterm-tests--check-tip (root text)
   "Check that ROOT has one visible tooltip that shows TEXT, and return it.
-Check the size of law T2."
+Check the size of law 85."
   (let ((tips (seq-filter (lambda (frame)
                             (and (eq (frame-parent frame) root)
                                  (frame-visible-p frame)))
@@ -10442,7 +10442,7 @@ Check the size of law T2."
       tip)))
 
 (defun remoteterm-tests--check-tip-place (tip root mouse)
-  "Check that the tooltip TIP of ROOT has the place of law T1.
+  "Check that the tooltip TIP of ROOT has the place of law 84.
 MOUSE is the mouse position (X . Y) in ROOT.  The call of `x-show-tip'
 gave no offsets and no parameters."
   (should (equal (frame-position tip)
@@ -10464,7 +10464,7 @@ frame in its parent."
             positions)))
 
 (defun remoteterm-tests--check-tip-size (tip text)
-  "Check that the text area of the tooltip TIP fits TEXT (law T2)."
+  "Check that the text area of the tooltip TIP fits TEXT (law 85)."
   (let* ((window (frame-root-window tip))
          (lines (string-lines text))
          (longest (apply #'max (mapcar #'length lines)))
