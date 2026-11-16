@@ -88,8 +88,19 @@ enum rd_cursor_kind
 /* The message types.  A row is MESSAGE (ENUM, NAME, FIELDS): the name
    of the enum rd_type value is RD_ENUM, and the struct is struct
    rd_NAME.  FIELDS is the list of its fields.  The type byte of a row
-   is its position, starting at 1, so a new type goes at the end.  */
+   is its position, starting at 1, so a new type goes at the end of its
+   block.  The rows come in blocks, one block for each feature, in a
+   fixed order.  A feature adds its rows only to its own block.  Each
+   block after the base has its own section below, with its field lists
+   and its limits.  */
 #define RD_MESSAGES(MESSAGE)						\
+  RD_BASE_MESSAGES (MESSAGE)						\
+  RD_IMAGE_MESSAGES (MESSAGE)						\
+  RD_CHILD_FRAME_MESSAGES (MESSAGE)					\
+  RD_MENU_MESSAGES (MESSAGE)
+
+/* The messages of the base protocol.  */
+#define RD_BASE_MESSAGES(MESSAGE)					\
   MESSAGE (HELLO, hello, RD_HELLO_FIELDS)				\
   MESSAGE (DRAW_GLYPHS, draw_glyphs, RD_DRAW_GLYPHS_FIELDS)		\
   MESSAGE (CLEAR_AREA, clear_area, RD_CLEAR_AREA_FIELDS)		\
@@ -320,6 +331,21 @@ enum rd_cursor_kind
   FIELD (M, uint32, offset)						\
   FIELD (M, uint32, total)						\
   ARRAY (M, uint8, bytes, nbytes, RD_MAX_CLIPBOARD_CHUNK)
+
+/* Images (PLAN.org feature-images).  */
+
+/* The messages of images.  The block has no rows now.  */
+#define RD_IMAGE_MESSAGES(MESSAGE)
+
+/* Tooltips and child frames (PLAN.org feature-child-frames).  */
+
+/* The messages of child frames.  The block has no rows now.  */
+#define RD_CHILD_FRAME_MESSAGES(MESSAGE)
+
+/* Menus drawn by Emacs (PLAN.org feature-menus).  */
+
+/* The messages of menus.  The block has no rows now.  */
+#define RD_MENU_MESSAGES(MESSAGE)
 
 /* The buttons of a button message that are the mouse wheel.  */
 enum rd_wheel_button
