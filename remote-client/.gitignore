@@ -24,3 +24,4 @@ test-listenspec
 test-sshconfig
 test-fontstore
 test-rdchunk
+test-rdpng

@@ -4365,7 +4365,7 @@ if test "$window_system" = "remote"; then
   HAVE_REMOTE_DISPLAY=yes
   REMOTE_DISPLAY_OBJ="remotefns.o rdproto.o remoteterm.o remoteproc.o"
   REMOTE_DISPLAY_OBJ="$REMOTE_DISPLAY_OBJ remoteinput.o remotefonts.o"
-  REMOTE_DISPLAY_OBJ="$REMOTE_DISPLAY_OBJ remoteclip.o rdchunk.o"
+  REMOTE_DISPLAY_OBJ="$REMOTE_DISPLAY_OBJ remoteclip.o rdchunk.o rdpng.o"
   AC_DEFINE([HAVE_REMOTE_DISPLAY], [1],
     [Define to 1 if the remote display protocol is the window system.])
   if test "${enable_remote_display_tests}" = "yes"; then

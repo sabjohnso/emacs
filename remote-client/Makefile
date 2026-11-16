@@ -55,7 +55,7 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-backoff test-reconnect test-relayline \
   test-relay test-flow test-pending test-unixsocket \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
-  test-fontstore test-rdchunk
+  test-fontstore test-rdchunk test-rdpng
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -74,6 +74,7 @@ check: remote-client $(TESTS)
 	./test-fonts
 	./test-fontstore
 	./test-rdchunk
+	./test-rdpng
 	./test-input
 	./test-client
 	./test-sizes
@@ -120,6 +121,9 @@ test-fontstore: test-fontstore.o $(RENDER_OBJS) $(FONTS_OBJS)
 
 test-rdchunk: test-rdchunk.o rdchunk.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^
+
+test-rdpng: test-rdpng.o rdpng.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 test-input: test-input.o input.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
@@ -188,6 +192,11 @@ rdchunk.o: ../src/rdchunk.c ../src/rdchunk.h ../src/rdproto.h config.h
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
 test-rdchunk.o: ../src/rdchunk.h ../src/rdproto.h
+
+rdpng.o: ../src/rdpng.c ../src/rdpng.h ../src/rdproto.h config.h
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+
+test-rdpng.o: ../src/rdpng.h ../src/rdproto.h
 
 %.o: %.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<

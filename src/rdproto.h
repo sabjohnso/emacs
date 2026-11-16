@@ -349,6 +349,10 @@ enum rd_cursor_kind
 enum { RD_MAX_IMAGE_CHUNK = RD_MAX_FONT_CHUNK };
 enum { RD_MAX_IMAGE_SIZE = 64 * 1024 * 1024 };
 
+/* The maximum number of pixels on each side of an image.  A client
+   does not decode a PNG file with more.  */
+enum { RD_MAX_IMAGE_SIDE = 8192 };
+
 /* Paint the pixels of IMAGE with its top-left pixel at X, Y of FRAME,
    over the pixels that are there.  A client changes only the pixels
    inside the rectangle at CLIP_X, CLIP_Y with the size CLIP_WIDTH,
