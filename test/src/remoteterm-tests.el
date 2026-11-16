@@ -276,6 +276,14 @@
 ;;     is attached sends no forget-image message to the next client.
 ;;     An image that goes after the deletion of its session does not
 ;;     crash Emacs.
+;; M1. Menu bar draw: each draw-glyphs message is inside the rows of
+;;     the menu bar or below the top of the windows.  A frame with a
+;;     menu bar draws in its rows.  After each change of the number of
+;;     menu bar lines, the clear-area messages cover the rows of the
+;;     old and of the new menu bar, so no stale menu bar text stays.
+;; M2. Menu bar click: a press of button 1 on a menu bar item gives the
+;;     prefix event `menu-bar' and then the event of the item, with a
+;;     position in the area `menu-bar'.  The release gives no event.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -1439,13 +1447,13 @@ line."
   "Return a form for the daemon that draws a buffer on a new remote frame.
 This is the setup of each drawing test.  PARAMETERS is the list of the
 parameters of the frame.  The frame has no bars unless PARAMETERS ask
-for them (see `remoteterm-tests--plain-layout').  The form evaluates the form SETUP with the
-buffer current.  SETUP must insert text, and can use the variables
-FRAME and WINDOW.  The value of the form is the value of the form
-RESULT.  RESULT can use the variable OUTPUT, the bytes that the session
-sent for the first draw, the variables DISPLAY and BUFFER, and the
-variables of `remoteterm-tests--geometry-form'.  FONT is the font of
-the last character that is not a newline."
+for them (see `remoteterm-tests--plain-layout').  The form evaluates
+the form SETUP with the buffer current.  SETUP must insert text, and
+can use the variables FRAME and WINDOW.  The value of the form is the
+value of the form RESULT.  RESULT can use the variable OUTPUT, the
+bytes that the session sent for the first draw, the variables DISPLAY
+and BUFFER, and the variables of `remoteterm-tests--geometry-form'.
+FONT is the font of the last character that is not a newline."
   `(let* ((display "remote-draw")
           (frame (progn (x-open-connection display)
                         (x-create-frame-with-faces
@@ -5766,6 +5774,181 @@ line of the frame.  HEIGHTS has the height of the menu bar from
   (pcase change
     (`(mode ,arg) (menu-bar-mode arg))
     (`(lines ,n) (set-frame-parameter frame 'menu-bar-lines n))))
+
+(rd-daemon-deftest remoteterm-tests-menu-bar-draws
+  "Law M1: redisplay draws the menu bar only in its rows.
+A trial makes a remote frame with a random number of menu bar lines,
+0 or 1, and then changes that number a random number of times.  After
+the first redisplay and after each change, the output of the
+redisplay obeys these laws:
+ - Each draw-glyphs message has a clip inside the rows of the menu
+   bar, or below the top of the windows.
+ - With a menu bar, at least one draw-glyphs message is inside the
+   rows of the menu bar.
+ - The clear-area messages cover the rows of the old and of the new
+   menu bar on the full width of the frame.  Thus no stale menu bar
+   text stays after the menu bar goes away."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     #'remoteterm-tests--menu-bar-toggles
+     (lambda (toggles)
+       (let ((old-height 0))
+         (dolist (step (remoteterm-tests--menu-bar-draw-steps toggles))
+           (remoteterm-tests--check-menu-bar-draw step old-height)
+           (setq old-height (plist-get step :height))))))))
+
+(defun remoteterm-tests--menu-bar-toggles ()
+  "Return a random list of menu bar line counts, each 0 or 1.
+Each count is not the same as the count before it, so each element
+after the first is a change."
+  (let ((lines (rd-gen-random 2)))
+    (cons lines
+          (cl-loop repeat (rd-gen-integer 1 3)
+                   collect (setq lines (- 1 lines))))))
+
+(defun remoteterm-tests--menu-bar-draw-steps (toggles)
+  "Draw a remote frame with each menu bar line count of TOGGLES.
+The first count is a parameter of the new frame, and each other count
+is a change of the `menu-bar-lines' parameter.  Return a plist for
+each count.  :lines is the count, :height is the height of the menu
+bar, :char-height is the height of a line, :top is the top of the
+windows, :width is the width of the frame, and :output is the bytes
+of the redisplay after the change."
+  (remoteterm-tests--with-display "remote-menu-draw"
+    (remoteterm-tests--with-frame frame "remote-menu-draw"
+                                  `((menu-bar-lines . ,(car toggles))
+                                    (width . 60) (height . 10))
+      (let ((buffer (generate-new-buffer "menu-draw")))
+        (unwind-protect
+            (progn
+              (with-current-buffer buffer (insert "abc\ndef\n"))
+              (set-window-buffer (frame-root-window frame) buffer)
+              (select-frame frame)
+              (remote-display--focus frame)
+              (remote-display--record "remote-menu-draw")
+              (cons (remoteterm-tests--menu-bar-draw-step
+                     frame (car toggles))
+                    (mapcar (lambda (lines)
+                              (set-frame-parameter frame 'menu-bar-lines
+                                                   lines)
+                              (remoteterm-tests--menu-bar-draw-step
+                               frame lines))
+                            (cdr toggles))))
+          (kill-buffer buffer))))))
+
+(defun remoteterm-tests--menu-bar-draw-step (frame lines)
+  "Redisplay FRAME, and return the plist of a step with LINES lines.
+See `remoteterm-tests--menu-bar-draw-steps'."
+  (redisplay t)
+  (list :lines lines
+        :height (cdr (alist-get 'menu-bar-size (frame-geometry frame)))
+        :char-height (frame-char-height frame)
+        :top (nth 1 (window-pixel-edges (frame-root-window frame)))
+        :width (frame-native-width frame)
+        :output (remote-display--take-output "remote-menu-draw")))
+
+(defun remoteterm-tests--check-menu-bar-draw (step old-height)
+  "Check the laws of `remoteterm-tests-menu-bar-draws' for STEP.
+OLD-HEIGHT is the height of the menu bar before the change of STEP."
+  (pcase-let* (((map :lines :height :char-height :top :width :output) step)
+               (menu-bar (list 0 0 width height))
+               (clips (mapcar #'remoteterm-tests--clip
+                              (remoteterm-tests--of-type 'draw-glyphs
+                                                         output))))
+    (should (= height (* lines char-height)))
+    (dolist (clip clips)
+      (should (or (remoteterm-tests--inside-p clip menu-bar)
+                  (<= top (nth 1 clip)))))
+    (when (= lines 1)
+      (should (cl-some (lambda (clip)
+                         (remoteterm-tests--inside-p clip menu-bar))
+                       clips)))
+    (should (remoteterm-tests--covered-p
+             (list 0 0 width (max height old-height))
+             (mapcar #'remoteterm-tests--clear-rectangle
+                     (remoteterm-tests--of-type 'clear-area output))))))
+
+(defun remoteterm-tests--clear-rectangle (fields)
+  "Return the rectangle of the clear-area FIELDS as (LEFT TOP RIGHT BOTTOM)."
+  (pcase-let (((map :x :y :width :height) fields))
+    (list x y (+ x width) (+ y height))))
+
+(defun remoteterm-tests--covered-p (area rectangles)
+  "Return non-nil if the union of RECTANGLES covers the rectangle AREA.
+Each is a list (LEFT TOP RIGHT BOTTOM).  Check each pixel row of AREA."
+  (pcase-let ((`(,left ,top ,right ,bottom) area))
+    (cl-loop for y from top below bottom
+             always (remoteterm-tests--row-covered-p
+                     left right
+                     (seq-filter (lambda (rectangle)
+                                   (and (<= (nth 1 rectangle) y)
+                                        (< y (nth 3 rectangle))))
+                                 rectangles)))))
+
+(defun remoteterm-tests--row-covered-p (left right rectangles)
+  "Return non-nil if RECTANGLES cover the pixels from LEFT to RIGHT.
+Each rectangle is a list (LEFT TOP RIGHT BOTTOM) that contains the row."
+  (let ((x left))
+    (dolist (rectangle (sort (copy-sequence rectangles)
+                             (lambda (a b) (< (car a) (car b)))))
+      (when (<= (nth 0 rectangle) x)
+        (setq x (max x (nth 2 rectangle)))))
+    (>= x right)))
+
+(rd-daemon-deftest remoteterm-tests-menu-bar-click
+  "Law M2: a press on a menu bar item gives the event of that item.
+A trial picks a random item K of the menu bar of a remote frame.  A
+button message with button 1 and press 1 at the left pixel of K in
+the first row gives the prefix event `menu-bar' and then an event
+with the head K, whose position is in the area `menu-bar'.  The
+release after it gives no event.  The model of the positions of the
+items is `menu-bar-item-at-x'."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda () (rd-gen-random 1000))
+     (lambda (choice)
+       (pcase-let ((`(,key ,events) (remoteterm-tests--menu-bar-click
+                                     choice)))
+         (should (= (length events) 2))
+         (should (eq (car events) 'menu-bar))
+         (should (eq (car-safe (cadr events)) key))
+         (should (eq (posn-area (event-start (cadr events)))
+                     'menu-bar)))))))
+
+(defun remoteterm-tests--menu-bar-click (choice)
+  "Click on an item of the menu bar of a remote frame.
+CHOICE modulo the number of items selects the item.  Return a list
+\(KEY EVENTS): KEY is the key of the item, and EVENTS is the list of
+the events of the press and of the release."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (set-frame-parameter frame 'width 120)
+     (set-frame-parameter frame 'menu-bar-lines 1)
+     (redisplay t)
+     (pcase-let* ((items (with-current-buffer
+                             (window-buffer (frame-selected-window frame))
+                           (remoteterm-tests--menu-bar-items
+                            (frame-width frame))))
+                  (`(,key . ,column) (nth (mod choice (length items))
+                                          items))
+                  (x (* column (frame-char-width frame))))
+       (process-send-string
+        client-side
+        (mapconcat
+         (lambda (step)
+           (remote-display--encode
+            `(button :frame ,(remoteterm-tests--frame-id frame)
+                     :time ,(car step) :x ,x :y 0 :button 1 :modifiers 0
+                     :press ,(cdr step))))
+         '((1000 . 1) (1050 . 0))))
+       (list key (remoteterm-tests--read-events 3))))))
+
+(defun remoteterm-tests--menu-bar-items (columns)
+  "Return the items of the menu bar in the first COLUMNS columns.
+Each item is (KEY . COLUMN), with the left column of the item, as
+`menu-bar-item-at-x' gives it."
+  (seq-uniq (delq nil (mapcar #'menu-bar-item-at-x
+                              (number-sequence 0 (1- columns))))))
 
 (rd-daemon-deftest remoteterm-tests-frame-edges-not-remote
   "The edges and the geometry of a remote frame refuse other frames.
