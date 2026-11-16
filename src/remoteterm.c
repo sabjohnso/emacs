@@ -86,6 +86,16 @@ static bool remote_terminal_has_frames (struct terminal *);
 static Lisp_Object remote_frame_session_arg (Lisp_Object);
 static struct frame *remote_make_frame_on (struct remote_display_info *,
 					   Lisp_Object);
+static struct frame *
+remote_make_frame_with_minibuffer (struct remote_display_info *,
+				   Lisp_Object);
+static Lisp_Object remote_parent_frame_arg (struct remote_display_info *,
+					    Lisp_Object);
+static bool remote_session_frame_p (Lisp_Object,
+				    struct remote_display_info *);
+static void remote_set_initial_parent (struct frame *, Lisp_Object);
+static bool remote_initially_visible_p (Lisp_Object);
+static void remote_calc_absolute_position (struct frame *);
 static void remote_assign_frame_id (struct frame *);
 static bool remote_frame_id_used_p (struct remote_display_info *, uint32_t);
 static uint32_t remote_frame_id (struct frame *);
@@ -990,14 +1000,17 @@ remote_create_frame (Lisp_Object parms)
 
   struct remote_display_info *dpyinfo
     = check_x_display_info (remote_frame_session_arg (parms));
+  Lisp_Object parent = remote_parent_frame_arg (dpyinfo, parms);
   struct frame *f = remote_make_frame_on (dpyinfo, parms);
   Lisp_Object frame;
   XSETFRAME (frame, f);
   record_unwind_protect (remote_unwind_create_frame, frame);
 
+  remote_set_initial_parent (f, parent);
   remote_init_frame_font (f, parms);
   remote_default_frame_parameters (f, parms);
   remote_finish_frame (f, parms);
+  remote_calc_absolute_position (f);
   return unbind_to (count, frame);
 }
 
@@ -1019,7 +1032,7 @@ remote_frame_session_arg (Lisp_Object parms)
 static struct frame *
 remote_make_frame_on (struct remote_display_info *dpyinfo, Lisp_Object parms)
 {
-  struct frame *f = make_frame (true);
+  struct frame *f = remote_make_frame_with_minibuffer (dpyinfo, parms);
   frame_set_id_from_params (f, parms);
   f->terminal = dpyinfo->terminal;
   f->output_method = output_remote;
@@ -1030,6 +1043,82 @@ remote_make_frame_on (struct remote_display_info *dpyinfo, Lisp_Object parms)
   fset_name (f, Vinvocation_name);
   f->explicit_name = false;
   return f;
+}
+
+/* Return the frame that the parent-frame parameter in PARMS names, or
+   nil if PARMS give no parent.  Signal an error if the parent is not a
+   live frame of the session DPYINFO.  */
+static Lisp_Object
+remote_parent_frame_arg (struct remote_display_info *dpyinfo,
+			 Lisp_Object parms)
+{
+  Lisp_Object parent = gui_display_get_arg (dpyinfo, parms, Qparent_frame,
+					    NULL, NULL, RES_TYPE_SYMBOL);
+  if (BASE_EQ (parent, Qunbound) || NILP (parent))
+    return Qnil;
+  if (!remote_session_frame_p (parent, dpyinfo))
+    error ("The parent frame must be a live frame of the same session");
+  return parent;
+}
+
+/* Return true if FRAME is a live frame of the session DPYINFO.  */
+static bool
+remote_session_frame_p (Lisp_Object frame, struct remote_display_info *dpyinfo)
+{
+  return (FRAMEP (frame)
+	  && FRAME_LIVE_P (XFRAME (frame))
+	  && FRAME_REMOTE_P (XFRAME (frame))
+	  && FRAME_DISPLAY_INFO (XFRAME (frame)) == dpyinfo);
+}
+
+/* Return a new frame with the minibuffer window that PARMS ask for.
+   With no minibuffer parameter or a value that is not nil and not a
+   window, the frame has a minibuffer window of its own.  With nil, the
+   frame uses the minibuffer window of the default minibuffer frame of
+   its session.  With a window, the frame uses that window, which must
+   be on the same session.  */
+static struct frame *
+remote_make_frame_with_minibuffer (struct remote_display_info *dpyinfo,
+				   Lisp_Object parms)
+{
+  Lisp_Object minibuffer = gui_display_get_arg (dpyinfo, parms, Qminibuffer,
+						NULL, NULL, RES_TYPE_SYMBOL);
+  if (NILP (minibuffer) || WINDOWP (minibuffer))
+    return make_frame_without_minibuffer (minibuffer,
+					  dpyinfo->terminal->kboard,
+					  XCAR (dpyinfo->name_list_element));
+  return make_frame (true);
+}
+
+/* Make PARENT the parent of the new frame F, above each sibling of F.
+   PARENT nil means that F is a root frame.  Do this before the size
+   and the position of F, because a relative position uses the size of
+   the parent.  */
+static void
+remote_set_initial_parent (struct frame *f, Lisp_Object parent)
+{
+  fset_parent_frame (f, parent);
+  store_frame_param (f, Qparent_frame, parent);
+  if (!NILP (parent))
+    f->z_order = 1 + max_child_z_order (XFRAME (parent));
+}
+
+/* Make a negative position of the child frame F count from the right
+   or the bottom edge of its parent, as x_calc_absolute_position does.
+   After this, left_pos and top_pos give the top-left corner of F in
+   the parent.  A root frame keeps its position, because the client
+   does not place a root frame.  */
+static void
+remote_calc_absolute_position (struct frame *f)
+{
+  struct frame *parent = FRAME_PARENT_FRAME (f);
+  if (!parent)
+    return;
+  if (f->size_hint_flags & XNegative)
+    f->left_pos += FRAME_PIXEL_WIDTH (parent) - FRAME_PIXEL_WIDTH (f);
+  if (f->size_hint_flags & YNegative)
+    f->top_pos += FRAME_PIXEL_HEIGHT (parent) - FRAME_PIXEL_HEIGHT (f);
+  f->size_hint_flags &= ~(XNegative | YNegative);
 }
 
 /* Give F the next frame ID of its session.  The counter wraps at the
@@ -1145,7 +1234,8 @@ remote_default_frame_parameters (struct frame *f, Lisp_Object parms)
 
 }
 
-/* Make the frame F a member of the frame list, and show it.  */
+/* Make the frame F a member of the frame list.  Show it, unless the
+   visibility parameter in PARMS is nil.  */
 static void
 remote_finish_frame (struct frame *f, Lisp_Object parms)
 {
@@ -1164,7 +1254,7 @@ remote_finish_frame (struct frame *f, Lisp_Object parms)
   adjust_frame_size (f, FRAME_TEXT_WIDTH (f), FRAME_TEXT_HEIGHT (f),
 		     0, true, Qx_create_frame_2);
 
-  SET_FRAME_VISIBLE (f, true);
+  SET_FRAME_VISIBLE (f, remote_initially_visible_p (parms));
 
   if (FRAME_HAS_MINIBUF_P (f)
       && (!FRAMEP (KVAR (kb, Vdefault_minibuffer_frame))
@@ -1176,6 +1266,16 @@ remote_finish_frame (struct frame *f, Lisp_Object parms)
       fset_param_alist (f, Fcons (XCAR (tem), f->param_alist));
 
   Vwindow_list = Qnil;
+}
+
+/* Return false if the visibility parameter in PARMS is nil, else true.
+   x-create-frame-with-faces gives nil, and then makes the frame
+   visible when it is complete.  */
+static bool
+remote_initially_visible_p (Lisp_Object parms)
+{
+  return !NILP (gui_display_get_arg (NULL, parms, Qvisibility, NULL, NULL,
+				     RES_TYPE_SYMBOL));
 }
 
 /* The default_font_parameter of the redisplay interface.  */

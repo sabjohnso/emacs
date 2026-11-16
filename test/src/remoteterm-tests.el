@@ -576,6 +576,237 @@ REQUEST names the case in a failure."
           (should (= (display-pixel-width frame)
                      (frame-pixel-width frame))))))))
 
+;;;; Child frames
+
+(defmacro remoteterm-tests--with-child (child parent parameters &rest body)
+  "Bind CHILD to a new child frame of PARENT, and evaluate BODY.
+PARAMETERS are more parameters of CHILD.  Then delete CHILD."
+  (declare (indent 3))
+  `(let ((,child (remoteterm-tests--make-child-frame
+                  (terminal-name (frame-terminal ,parent))
+                  (cons (cons 'parent-frame ,parent) ,parameters))))
+     (unwind-protect
+         (progn ,@body)
+       (delete-frame ,child))))
+
+(defmacro remoteterm-tests--with-parent-and-other (parent other &rest body)
+  "Bind PARENT and OTHER to new frames, and evaluate BODY.
+PARENT is on the session \"remote-child\", OTHER is on the session
+\"remote-other\".  Then delete the frames and close the sessions."
+  (declare (indent 2))
+  `(remoteterm-tests--with-display "remote-child"
+     (remoteterm-tests--with-display "remote-other"
+       (remoteterm-tests--with-frame ,parent "remote-child" nil
+         (remoteterm-tests--with-frame ,other "remote-other" nil
+           ,@body)))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-parent
+  "A frame made with a parent-frame parameter has that parent (law C1).
+A parent that is not a live frame of the same session signals an
+error, and the session then has no new frame."
+  (remoteterm-tests--for-each-case
+   '(same-session other-session dead terminal symbol number)
+   (lambda (kind)
+     (remoteterm-tests--with-parent-and-other parent other
+       (let ((candidate (pcase kind
+                          ('same-session parent)
+                          ('other-session other)
+                          ('dead (remoteterm-tests--dead-frame "remote-child"))
+                          ('terminal terminal-frame)
+                          ('symbol 'parent)
+                          ('number 1))))
+         (if (eq kind 'same-session)
+             (remoteterm-tests--with-child child candidate nil
+               (should (eq (frame-parent child) parent)))
+           (let ((frames (remoteterm-tests--session-frames "remote-child")))
+             (should-error (remoteterm-tests--make-child-frame
+                            "remote-child" `((parent-frame . ,candidate))))
+             (should (equal (remoteterm-tests--session-frames "remote-child")
+                            frames)))))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-minibuffer
+  "A minibuffer parameter nil or a window gives no minibuffer of its own.
+With a window, the frame uses that window (law C2).  A minibuffer
+window of another session signals an error."
+  (remoteterm-tests--for-each-case
+   '(window nil other-session)
+   (lambda (kind)
+     (remoteterm-tests--with-parent-and-other parent other
+       (pcase kind
+         ('window
+          (let ((window (minibuffer-window parent)))
+            (remoteterm-tests--with-child child parent
+                `((minibuffer . ,window))
+              (should (eq (minibuffer-window child) window))
+              (should-not (remoteterm-tests--own-minibuffer-p child)))))
+         ('nil
+          (remoteterm-tests--with-child child parent '((minibuffer . nil))
+            (should-not (remoteterm-tests--own-minibuffer-p child))))
+         ('other-session
+          (should-error (remoteterm-tests--make-child-frame
+                         "remote-child"
+                         `((parent-frame . ,parent)
+                           (minibuffer . ,(minibuffer-window other)))))))))))
+
+(rd-daemon-deftest remoteterm-tests-frame-visibility-parameter
+  "A new frame is visible unless its visibility parameter is nil (law C3).
+This holds for a root frame and for a child frame.  The client gets a
+draw of the frame only if it is visible."
+  (remoteterm-tests--for-each-case
+   (mapcan (lambda (kind)
+             (mapcar (lambda (visibility) (list kind visibility))
+                     '(absent t nil)))
+           '(root child))
+   (lambda (case)
+     (let ((visible (not (null (cadr case)))))
+       (should (equal (apply #'remoteterm-tests--visibility-outcome case)
+                      (list visible visible)))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-no-accept-focus
+  "The no-accept-focus parameter of a new frame reads back (law C4)."
+  (remoteterm-tests--for-each-case
+   '(t nil)
+   (lambda (value)
+     (remoteterm-tests--with-parent-and-other parent other
+       (remoteterm-tests--with-child child parent
+           `((no-accept-focus . ,value))
+         (should (eq (frame-parameter child 'no-accept-focus) value)))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-z-order
+  "A new child frame is above each of its siblings (law C5)."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 1 5))
+     (lambda (count)
+       (remoteterm-tests--with-display "remote-child"
+         (remoteterm-tests--with-frame parent "remote-child" nil
+           (let ((children nil))
+             (dotimes (_ count)
+               (let ((new (remoteterm-tests--make-child-frame
+                           "remote-child" `((parent-frame . ,parent)))))
+                 (dolist (old children)
+                   (should (frame--z-order-lessp old new))
+                   (should-not (frame--z-order-lessp new old)))
+                 (push new children))))))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-negative-position
+  "A negative position of a new child counts from the far edge (law C6).
+The left edge of the child is at the native width of the parent minus
+the width of the child minus N, for a left value of -N or (- N).  The
+top edge is the same with the heights.  A position that is not
+negative does not change."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     #'remoteterm-tests--child-position-case
+     (lambda (case)
+       (pcase-let ((`(,expected ,position)
+                    (apply #'remoteterm-tests--child-position case)))
+         (should (equal position expected))
+         (should (>= (car position) 0))
+         (should (>= (cdr position) 0)))))))
+
+(defun remoteterm-tests--child-position-case ()
+  "Return a random case of the position law: (LEFT TOP).
+Each one is N, -N or (- N), with N a small number of pixels."
+  (cl-flet ((offset ()
+              (let ((n (rd-gen-integer 0 50)))
+                (pcase (rd-gen-random 3)
+                  (0 n)
+                  (1 (- (1+ n)))
+                  (2 `(- ,n))))))
+    (list (offset) (offset))))
+
+(defun remoteterm-tests--child-position (left top)
+  "Make a child frame at LEFT and TOP, and return (EXPECTED POSITION).
+POSITION is the `frame-position' of the child.  EXPECTED is the
+position that the law of `remoteterm-tests-child-frame-negative-position'
+gives."
+  (remoteterm-tests--with-display "remote-child"
+    (remoteterm-tests--with-frame parent "remote-child"
+        '((width . 60) (height . 30))
+      (remoteterm-tests--with-child child parent
+          `((width . 10) (height . 4) (left . ,left) (top . ,top))
+        (list (cons (remoteterm-tests--edge
+                     left (frame-native-width parent)
+                     (frame-pixel-width child))
+                    (remoteterm-tests--edge
+                     top (frame-native-height parent)
+                     (frame-pixel-height child)))
+              (frame-position child))))))
+
+(defun remoteterm-tests--edge (offset parent-size size)
+  "Return the edge that OFFSET gives to a frame of SIZE in PARENT-SIZE."
+  (pcase offset
+    (`(- ,n) (- parent-size size n))
+    ((pred cl-minusp) (+ parent-size (- size) offset))
+    (_ offset)))
+
+(defun remoteterm-tests--visibility-outcome (kind visibility)
+  "Make a frame of KIND with VISIBILITY, redisplay it, and return the outcome.
+KIND is root or child.  VISIBILITY is absent, t or nil.  The value is
+\(VISIBLE DRAWN).  VISIBLE is the value of `frame-visible-p' when
+`make-frame' returns.  DRAWN is non-nil if the client got a draw of
+the frame.  The frame is the selected frame, because a redisplay in
+the daemon does not draw the frames that are not selected."
+  (let ((display "remote-visible"))
+    (remoteterm-tests--with-display display
+      (remoteterm-tests--with-frame parent display nil
+        (remote-display--record display)
+        (let ((frame (remoteterm-tests--make-child-frame
+                      display
+                      (append (unless (eq visibility 'absent)
+                                `((visibility . ,visibility)))
+                              (when (eq kind 'child)
+                                `((parent-frame . ,parent)))))))
+          (unwind-protect
+              (let ((visible (frame-visible-p frame)))
+                (select-frame frame)
+                (redisplay t)
+                (list visible
+                      (remoteterm-tests--draws-frame-p
+                       frame (remote-display--take-output display))))
+            (delete-frame frame)))))))
+
+(defun remoteterm-tests--draws-frame-p (frame bytes)
+  "Return non-nil if BYTES have a draw message for FRAME."
+  (let ((id (remoteterm-tests--frame-id frame)))
+    (and (seq-find (lambda (message)
+                     (eql (plist-get (cdr message) :frame) id))
+                   (remoteterm-tests--draws bytes))
+         t)))
+
+(defun remoteterm-tests--make-child-frame (display parameters)
+  "Make a frame on DISPLAY with PARAMETERS and no bars, with `make-frame'.
+Only a test that runs in a daemon can call this function, because
+`make-frame' makes no graphical frames in batch mode.  The test of a
+child frame uses `make-frame', because packages make child frames
+with it."
+  (make-frame (cons (cons 'display display)
+                    (append parameters remoteterm-tests--plain-layout))))
+
+(defun remoteterm-tests--dead-frame (display)
+  "Return a frame of DISPLAY that was deleted."
+  (let ((frame (remoteterm-tests--make-frame display nil)))
+    (delete-frame frame)
+    frame))
+
+(defun remoteterm-tests--for-each-case (cases check)
+  "Call CHECK with each element of CASES, one trial for each case.
+A failure names the case, as in `rd-gen-for-all'."
+  (let ((rd-gen-trials (length cases))
+        (rest cases))
+    (rd-gen-for-all (lambda () (pop rest)) check)))
+
+(defun remoteterm-tests--session-frames (display)
+  "Return the list of the live frames of the session DISPLAY."
+  (seq-filter (lambda (frame)
+                (equal (terminal-name (frame-terminal frame)) display))
+              (frame-list)))
+
+(defun remoteterm-tests--own-minibuffer-p (frame)
+  "Return non-nil if FRAME has a minibuffer window of its own."
+  (eq (window-frame (minibuffer-window frame)) frame))
+
 ;;;; Colors
 
 (defun remoteterm-tests--rgb ()
