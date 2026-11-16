@@ -3422,7 +3422,7 @@ fi
 HAVE_RSVG=no
 if test "${HAVE_X11}" = "yes" || test "${HAVE_NS}" = "yes" \
    || test "${opsys}" = "mingw32" || test "${HAVE_BE_APP}" = "yes" \
-   || test "${window_system}" = "pgtk" \
+   || test "${window_system}" = "pgtk" || test "${window_system}" = "remote" \
    || test "${REALLY_ANDROID}" = "yes"; then
   if test "${with_rsvg}" != "no"; then
     RSVG_REQUIRED=2.14.0
@@ -3451,6 +3451,7 @@ if test "${with_webp}" != "no"; then
    if test "${HAVE_X11}" = "yes" || test "${opsys}" = "mingw32" \
    || test "${HAVE_W32}" = "yes" || test "${HAVE_NS}" = "yes" \
    || test "${HAVE_BE_APP}" = "yes" || test "${HAVE_PGTK}" = "yes" \
+   || test "${window_system}" = "remote" \
    || test "${REALLY_ANDROID}" = "yes"; then
       WEBP_REQUIRED=0.6.0
       # Definitions from webp/decode.h are in libwebp, and those from
@@ -4789,7 +4790,7 @@ LIBJPEG=
 JPEG_CFLAGS=
 if test "${HAVE_X11}" = "yes" || test "${HAVE_W32}" = "yes" \
    || test "${HAVE_NS}" = "yes" || test "${HAVE_BE_APP}" = "yes" \
-   || test "$window_system" = "pgtk" \
+   || test "$window_system" = "pgtk" || test "$window_system" = "remote" \
    || test "${REALLY_ANDROID}" = "yes"; then
   if test "${with_jpeg}" != "no"; then
     if test "${REALLY_ANDROID}" = "yes"; then
@@ -5210,7 +5211,7 @@ if test "${with_png}" != no; then
     AC_CHECK_HEADER([png.h], [HAVE_PNG=yes])
   elif test "${HAVE_X11}" = "yes" || test "${HAVE_W32}" = "yes" \
        || test "${HAVE_NS}" = "yes" || test "${HAVE_BE_APP}" = "yes" \
-       || test "$window_system" = "pgtk" \
+       || test "$window_system" = "pgtk" || test "$window_system" = "remote" \
        || test "${REALLY_ANDROID}" = "yes"; then
     EMACS_CHECK_MODULES([PNG], [libpng >= 1.0.0])
     if test $HAVE_PNG = yes; then
@@ -5289,7 +5290,7 @@ if test "${opsys}" = "mingw32"; then
   fi
 elif test "${HAVE_X11}" = "yes" || test "${HAVE_W32}" = "yes" \
      || test "${HAVE_NS}" = "yes" || test "${HAVE_BE_APP}" = "yes" \
-     || test "$window_system" = "pgtk" \
+     || test "$window_system" = "pgtk" || test "$window_system" = "remote" \
      || test "${REALLY_ANDROID}" = "yes"; then
   if test "${with_tiff}" != "no"; then
     if test "${REALLY_ANDROID}" != "yes"; then
@@ -5337,6 +5338,7 @@ if test "${opsys}" = "mingw32"; then
 elif test "${HAVE_X11}" = "yes" && test "${with_gif}" != "no" \
         || test "${HAVE_W32}" = "yes" || test "${HAVE_NS}" = "yes" \
 	|| test "${HAVE_BE_APP}" = "yes" || test "$window_system" = "pgtk" \
+	|| test "$window_system" = "remote" \
 	|| test "${REALLY_ANDROID}" = "yes" \
 	&& test "${with_gif}" != "no"; then
   AC_CHECK_HEADER([gif_lib.h],

@@ -220,6 +220,10 @@
 ;;     the transport reports an empty queue, the session sends the
 ;;     text.  A second kill before then replaces the first text, so only
 ;;     the second text goes to the client.
+;; 45. Image types: each image type of `remoteterm-tests--image-types'
+;;     is available, unless the build was configured without it.
+;; 46. Built-in images: a PBM or XPM image of W x H pixels has the size
+;;     W x H on a remote frame.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -7750,6 +7754,68 @@ Return the size of the frame after each step."
       (should (equal (remoteterm-tests--daemon-call
                       'remoteterm-tests--resize-limit-case)
                      `((,limit . 300) (,limit . 300) (,limit . 300)))))))
+
+;;;; Image types
+
+(defconst remoteterm-tests--image-types
+  '((xpm . "xpm") (png . "png") (jpeg . "jpeg") (svg . "rsvg")
+    (gif . "gif") (tiff . "tiff") (webp . "webp") (pbm) (xbm))
+  "The image types of a remote build.
+The cdr of each entry is the name of the configure option of the
+type, or nil if the type has no option.")
+
+(defun remoteterm-tests--configured-without-p (option)
+  "Return non-nil if the build was configured with --without-OPTION."
+  (and option
+       (string-match-p (concat "--without-" (regexp-quote option) "\\_>")
+                       system-configuration-options)))
+
+(ert-deftest remoteterm-tests-image-types ()
+  "Each image type is available, unless the build was configured without it."
+  (skip-unless (featurep 'remote-test))
+  (pcase-dolist (`(,type . ,option) remoteterm-tests--image-types)
+    (ert-info ((symbol-name type) :prefix "Type: ")
+      (unless (remoteterm-tests--configured-without-p option)
+        (should (image-type-available-p type))))))
+
+(defun remoteterm-tests--pbm (width height)
+  "Return the data of a plain PBM image of WIDTH x HEIGHT pixels."
+  (concat (format "P1\n%d %d\n" width height)
+          (mapconcat (lambda (_) (make-string width ?0))
+                     (make-list height nil) "\n")
+          "\n"))
+
+(defun remoteterm-tests--xpm (width height)
+  "Return the data of an XPM image of WIDTH x HEIGHT pixels."
+  (concat "/* XPM */\nstatic char *image[] = {\n"
+          (format "\"%d %d 1 1\",\n\". c #000000\",\n" width height)
+          (mapconcat (lambda (_) (format "\"%s\"" (make-string width ?.)))
+                     (make-list height nil) ",\n")
+          "};\n"))
+
+(defun remoteterm-tests--built-in-image ()
+  "Return a random (TYPE WIDTH HEIGHT) for an image that Emacs decodes.
+Emacs has the decoder of each such TYPE in its own code."
+  (list (rd-gen-element '(pbm xpm)) (rd-gen-integer 1 64)
+        (rd-gen-integer 1 64)))
+
+(ert-deftest remoteterm-tests-built-in-image-size ()
+  "An image of a built-in type has its size in pixels on a remote frame."
+  (skip-unless (featurep 'remote-test))
+  (let ((rd-gen-trials 30))
+    (remoteterm-tests--with-display "remote-test"
+      (remoteterm-tests--with-frame frame "remote-test" nil
+        (rd-gen-for-all
+         #'remoteterm-tests--built-in-image
+         (lambda (case)
+           (pcase-let* ((`(,type ,width ,height) case)
+                        (data (funcall (if (eq type 'pbm)
+                                           #'remoteterm-tests--pbm
+                                         #'remoteterm-tests--xpm)
+                                       width height)))
+             (should (equal (image-size (create-image data type t :scale 1)
+                                        t frame)
+                            (cons width height))))))))))
 
 ;;;; The loop of the trials
 

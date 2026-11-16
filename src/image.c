@@ -1364,7 +1364,7 @@ struct image_type
 #if defined HAVE_RSVG || defined HAVE_PNG || defined HAVE_GIF || \
   defined HAVE_TIFF || defined HAVE_JPEG || defined HAVE_XPM || \
   defined HAVE_NS || defined HAVE_HAIKU || defined HAVE_PGTK || \
-  defined HAVE_WEBP || defined HAVE_ANDROID
+  defined HAVE_REMOTE_DISPLAY || defined HAVE_WEBP || defined HAVE_ANDROID
 # ifdef WINDOWSNT
 #  define IMAGE_TYPE_INIT(f) f
 # else
@@ -5915,7 +5915,7 @@ examples.  */)
  ***********************************************************************/
 
 #if defined (HAVE_XPM) || defined (HAVE_NS) || defined (HAVE_PGTK) \
-  || defined (HAVE_ANDROID)
+  || defined HAVE_REMOTE_DISPLAY || defined (HAVE_ANDROID)
 
 static bool xpm_image_p (Lisp_Object object);
 static bool xpm_load (struct frame *f, struct image *img);
@@ -5967,7 +5967,7 @@ enum xpm_keyword_index
 };
 
 #if defined HAVE_XPM || defined HAVE_NS || defined HAVE_HAIKU	\
-  || defined HAVE_PGTK || defined HAVE_ANDROID
+  || defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY || defined HAVE_ANDROID
 /* Vector of image_keyword structures describing the format
    of valid XPM image specifications.  */
 
@@ -6208,7 +6208,7 @@ init_xpm_functions (void)
 #endif /* WINDOWSNT */
 
 #if defined HAVE_XPM || defined HAVE_NS || defined HAVE_HAIKU	\
-  || defined HAVE_PGTK || defined HAVE_ANDROID
+  || defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY || defined HAVE_ANDROID
 /* Value is true if COLOR_SYMBOLS is a valid color symbols list
    for XPM images.  Such a list must consist of conses whose car and
    cdr are strings.  */
@@ -6620,6 +6620,7 @@ xpm_load (struct frame *f, struct image *img)
   || (defined HAVE_NS && !defined HAVE_XPM)	\
   || (defined HAVE_HAIKU && !defined HAVE_XPM)  \
   || (defined HAVE_PGTK && !defined HAVE_XPM)	\
+  || (defined HAVE_REMOTE_DISPLAY && !defined HAVE_XPM)	\
   || (defined HAVE_ANDROID && !defined HAVE_XPM)
 
 /* XPM support functions for NS, Haiku and Android where libxpm is not
@@ -13464,7 +13465,7 @@ static struct image_type const image_types[] =
    IMAGE_TYPE_INIT (init_jpeg_functions) },
 #endif
 #if defined HAVE_XPM || defined HAVE_NS || defined HAVE_HAIKU	\
-  || defined HAVE_PGTK || defined HAVE_ANDROID
+  || defined HAVE_PGTK || defined HAVE_REMOTE_DISPLAY || defined HAVE_ANDROID
  { SYMBOL_INDEX (Qxpm), xpm_image_p, xpm_load, image_clear_image,
    IMAGE_TYPE_INIT (init_xpm_functions) },
 #endif
@@ -13640,7 +13641,7 @@ non-numeric, there is no explicit limit on the size of images.  */);
 
 #if defined (HAVE_XPM) || defined (HAVE_NS) \
   || defined (HAVE_HAIKU) || defined (HAVE_PGTK) \
-  || defined (HAVE_ANDROID)
+  || defined HAVE_REMOTE_DISPLAY || defined (HAVE_ANDROID)
   DEFSYM (Qxpm, "xpm");
   add_image_type (Qxpm);
 #endif
