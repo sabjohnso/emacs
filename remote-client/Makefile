@@ -61,7 +61,7 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
   test-fontstore test-rdchunk test-rdpng \
   test-images test-stack test-compose \
-  test-menu
+  test-menu test-rdscrollbar
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -85,6 +85,7 @@ check: remote-client $(TESTS)
 	./test-stack
 	./test-compose
 	./test-menu
+	./test-rdscrollbar
 	./test-input
 	./test-client
 	./test-sizes
@@ -145,6 +146,9 @@ test-compose: test-compose.o compose.o stack.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 test-menu: test-menu.o menu.o menugen.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-rdscrollbar: test-rdscrollbar.o rdscrollbar.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-input: test-input.o input.o rdproto.o
@@ -220,6 +224,11 @@ rdpng.o: ../src/rdpng.c ../src/rdpng.h ../src/rdproto.h config.h
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
 test-rdpng.o: ../src/rdpng.h ../src/rdproto.h
+
+rdscrollbar.o: ../src/rdscrollbar.c ../src/rdscrollbar.h config.h
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+
+test-rdscrollbar.o: ../src/rdscrollbar.h
 
 %.o: %.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
