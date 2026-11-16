@@ -56,9 +56,10 @@ extern bool rd_chunk_part_of (const struct rd_message *message,
 extern uint32_t rd_chunk_count (size_t size);
 
 /* Set MESSAGE to the message INDEX of the type TYPE of the text SERIAL,
-   which has the SIZE bytes TEXT.  TYPE is a chunked type.  INDEX is
-   less than rd_chunk_count (SIZE), and SIZE fits in the total
-   field.  */
+   which has the SIZE bytes TEXT.  These are the preconditions: TYPE
+   is a chunked type (a row of RD_CHUNKED_MESSAGES in rdproto.h), INDEX
+   is less than rd_chunk_count (SIZE), and SIZE fits in the total
+   field.  With another TYPE, the program stops (abort).  */
 extern void rd_chunk_message (enum rd_type type, uint32_t serial,
 			      const unsigned char *text, size_t size,
 			      uint32_t index, struct rd_message *message);
@@ -95,6 +96,12 @@ enum rd_chunk_result
    refused.  */
 extern enum rd_chunk_result rd_chunks_add
   (struct rd_chunks *chunks, const struct rd_chunk_part *part, size_t limit);
+
+/* Add the part of MESSAGE to the state CHUNKS, as rd_chunks_add does
+   with LIMIT.  Return RD_CHUNK_REFUSED, and do not change CHUNKS, if
+   MESSAGE is not a chunked message.  */
+extern enum rd_chunk_result rd_chunks_add_message
+  (struct rd_chunks *chunks, const struct rd_message *message, size_t limit);
 
 /* Free the memory of CHUNKS, and make it empty.  */
 extern void rd_chunks_free (struct rd_chunks *chunks);

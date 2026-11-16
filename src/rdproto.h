@@ -347,6 +347,15 @@ enum rd_cursor_kind
 /* The messages of menus.  The block has no rows now.  */
 #define RD_MENU_MESSAGES(MESSAGE)
 
+/* The chunked message types (rdchunk.h).  A row is CHUNKED (ENUM,
+   NAME): the type RD_ENUM, and the member NAME of the union of struct
+   rd_message.  The fields of the type are serial, offset and total,
+   and the array bytes with its count nbytes.  The type also has a row
+   in its block of RD_MESSAGES.  A new chunked type adds one row
+   here.  */
+#define RD_CHUNKED_MESSAGES(CHUNKED)					\
+  CHUNKED (CLIPBOARD_DATA, clipboard_data)
+
 /* The buttons of a button message that are the mouse wheel.  */
 enum rd_wheel_button
   {

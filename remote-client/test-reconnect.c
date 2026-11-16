@@ -579,11 +579,9 @@ wait_for_clipboard (int fd, int limit, const char *text)
   struct rd_message message;
   int64_t left;
   bool found = false;
-  struct rd_chunk_part part;
   while (!found && (left = end - now_ms ()) > 0)
     if (read_message (fd, &message, left) == 1
-	&& rd_chunk_part_of (&message, &part)
-	&& (rd_chunks_add (&chunks, &part, RD_MAX_CLIPBOARD_SIZE)
+	&& (rd_chunks_add_message (&chunks, &message, RD_MAX_CLIPBOARD_SIZE)
 	    == RD_CHUNK_DONE))
       found = (chunks.total == strlen (text)
 	       && !memcmp (chunks.bytes, text, chunks.total));

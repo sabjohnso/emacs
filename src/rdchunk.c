@@ -29,22 +29,41 @@ static bool continues_p (const struct rd_chunks *,
 static bool start (struct rd_chunks *, const struct rd_chunk_part *, size_t);
 static void set_part (struct rd_message *, const struct rd_chunk_part *);
 
+/* The part of the struct DATA of a chunked message (RD_CHUNKED_MESSAGES
+   in rdproto.h).  */
+#define PART_OF(DATA)							\
+  ((struct rd_chunk_part) { .serial = (DATA)->serial,			\
+			    .offset = (DATA)->offset,			\
+			    .total = (DATA)->total,			\
+			    .nbytes = (DATA)->nbytes,			\
+			    .bytes = (DATA)->bytes })
+
+/* Copy the fields of the part PART to the struct DATA of a chunked
+   message.  */
+#define SET_PART(DATA, PART)						\
+  do									\
+    {									\
+      (DATA)->serial = (PART)->serial;					\
+      (DATA)->offset = (PART)->offset;					\
+      (DATA)->total = (PART)->total;					\
+      (DATA)->nbytes = (PART)->nbytes;					\
+      if ((PART)->nbytes)						\
+	memcpy ((DATA)->bytes, (PART)->bytes, (PART)->nbytes);		\
+    }									\
+  while (false)
+
 bool
 rd_chunk_part_of (const struct rd_message *message,
 		  struct rd_chunk_part *part)
 {
   switch (message->type)
     {
-    case RD_CLIPBOARD_DATA:
-      {
-	const struct rd_clipboard_data *data = &message->u.clipboard_data;
-	*part = (struct rd_chunk_part) { .serial = data->serial,
-					 .offset = data->offset,
-					 .total = data->total,
-					 .nbytes = data->nbytes,
-					 .bytes = data->bytes };
-	return true;
-      }
+#define PART_OF_CASE(ENUM, NAME)				\
+    case RD_##ENUM:						\
+      *part = PART_OF (&message->u.NAME);			\
+      return true;
+      RD_CHUNKED_MESSAGES (PART_OF_CASE)
+#undef PART_OF_CASE
     default:
       return false;
     }
@@ -93,6 +112,15 @@ rd_chunks_add (struct rd_chunks *chunks, const struct rd_chunk_part *data,
     return RD_CHUNK_PARTIAL;
   chunks->active = false;
   return RD_CHUNK_DONE;
+}
+
+enum rd_chunk_result
+rd_chunks_add_message (struct rd_chunks *chunks,
+		       const struct rd_message *message, size_t limit)
+{
+  struct rd_chunk_part part;
+  return (rd_chunk_part_of (message, &part)
+	  ? rd_chunks_add (chunks, &part, limit) : RD_CHUNK_REFUSED);
 }
 
 void
@@ -181,18 +209,16 @@ set_part (struct rd_message *message, const struct rd_chunk_part *part)
 {
   switch (message->type)
     {
-    case RD_CLIPBOARD_DATA:
-      {
-	struct rd_clipboard_data *data = &message->u.clipboard_data;
-	data->serial = part->serial;
-	data->offset = part->offset;
-	data->total = part->total;
-	data->nbytes = part->nbytes;
-	if (part->nbytes)
-	  memcpy (data->bytes, part->bytes, part->nbytes);
-	break;
-      }
+#define SET_PART_CASE(ENUM, NAME)				\
+    case RD_##ENUM:						\
+      SET_PART (&message->u.NAME, part);			\
+      break;
+      RD_CHUNKED_MESSAGES (SET_PART_CASE)
+#undef SET_PART_CASE
     default:
+      /* The caller gives only a chunked type (rdchunk.h).  The server
+	 build defines NDEBUG, so an assertion would do nothing there.  */
+      abort ();
       break;
     }
 }

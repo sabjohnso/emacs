@@ -715,10 +715,8 @@ receive_clipboard (struct window_mode *mode,
 		   const struct rd_message *message)
 {
   struct rd_chunks *chunks = &mode->clipboard;
-  struct rd_chunk_part part;
-  if (!rd_chunk_part_of (message, &part)
-      || (rd_chunks_add (chunks, &part, RD_MAX_CLIPBOARD_SIZE)
-	  != RD_CHUNK_DONE))
+  if (rd_chunks_add_message (chunks, message, RD_MAX_CLIPBOARD_SIZE)
+      != RD_CHUNK_DONE)
     return;
   g_free (mode->clipboard_text);
   mode->clipboard_text = g_strndup ((const char *) chunks->bytes,
