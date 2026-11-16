@@ -27,3 +27,4 @@ test-rdchunk
 test-rdpng
 test-images
 test-stack
+test-compose

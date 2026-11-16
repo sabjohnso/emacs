@@ -57,7 +57,7 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-relay test-flow test-pending test-unixsocket \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
   test-fontstore test-rdchunk test-rdpng \
-  test-images test-stack
+  test-images test-stack test-compose
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -79,6 +79,7 @@ check: remote-client $(TESTS)
 	./test-rdpng
 	./test-images
 	./test-stack
+	./test-compose
 	./test-input
 	./test-client
 	./test-sizes
@@ -134,6 +135,9 @@ test-images: test-images.o images.o table.o rdchunk.o rdpng.o rdproto.o
 
 test-stack: test-stack.o stack.o
 	$(CC) $(LDFLAGS) -o $@ $^
+
+test-compose: test-compose.o compose.o stack.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 test-input: test-input.o input.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
@@ -231,6 +235,7 @@ client.o: ../src/rdchunk.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
 sizes.o test-sizes.o view.o: sizes.h
 stack.o test-stack.o: stack.h ../src/rdproto.h
+compose.o test-compose.o: compose.h stack.h ../src/rdproto.h
 link.o test-link.o client.o: link.h
 backoff.o test-backoff.o test-reconnect.o client.o: backoff.h
 test-reconnect.o: ../src/rdproto.h ../src/rdchunk.h
