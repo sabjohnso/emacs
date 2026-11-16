@@ -847,7 +847,9 @@ order of `frame--z-order-lessp'."
 (rd-daemon-deftest remoteterm-tests-child-frame-distinct-z
   "No two siblings have the same z order (law C8).
 After each random operation, `frame--z-order-lessp' puts each frame
-below or above each sibling."
+below or above each sibling.  This is a guard law.  It passed before
+remoteplace.c existed, and it also passed with a raise or lower hook
+that did not restack the siblings."
   (let ((rd-gen-trials 20))
     (rd-gen-for-all
      (lambda () (rd-gen-child-frame-ops 12))
@@ -876,7 +878,10 @@ the client learns the frames does not matter."
             frames (cdr (remoteterm-tests--replay-output)))))))))
 
 (rd-daemon-deftest remoteterm-tests-frame-place-quiet-redisplay
-  "A redisplay with no change of a place sends no place-frame (law C10)."
+  "A redisplay with no change of a place sends no place-frame (law C10).
+This is a guard law.  It passed before remoteplace.c existed, and it
+also passed when `remote_send_place' sent each place, also a place
+that the client had."
   (let ((rd-gen-trials 20))
     (rd-gen-for-all
      (lambda () (rd-gen-child-frame-ops 12))
@@ -8261,17 +8266,19 @@ the summaries of the events of a press and a release of button 1.  For
 ;; the parameter `remote-tip'.  `x-show-tip' of lisp/term/remote-tip.el
 ;; makes it, and `x-hide-tip' deletes it.
 
-(declare-function remote-display--tip-position "remote-tip"
+(declare-function remote-display-tip-position "remote-tip"
                   (mouse size root-size offsets parms))
 
-(defvar remote-display--tip-default-offsets)
+(defvar remote-display-tip-default-offsets)
 
 (ert-deftest remoteterm-tests-tip-position ()
   "The place of a tooltip keeps it in the root and off the mouse (law T1).
 On each axis: an integer left or top in the parameters gives that
 exact position.  Else a tooltip that is not larger than the root is in
 the root.  If the tooltip fits in the root before or after the mouse
-at the offset, it does not contain the mouse."
+at the offset, it does not contain the mouse.  If it fits on neither
+side, it starts at the far edge of the root, or at 0 if it is larger
+than the root."
   (skip-unless (featurep 'remote))
   (rd-gen-for-all
    (lambda () (list (rd-gen-tip-axis) (rd-gen-tip-axis)))
@@ -8279,15 +8286,15 @@ at the offset, it does not contain the mouse."
      (pcase-let* ((`(,mouse-x ,width ,root-width ,dx ,left) x-case)
                   (`(,mouse-y ,height ,root-height ,dy ,top) y-case)
                   (`(,x . ,y)
-                   (remote-display--tip-position
+                   (remote-display-tip-position
                     (cons mouse-x mouse-y) (cons width height)
                     (cons root-width root-height) (cons dx dy)
                     (append (and left `((left . ,left)))
                             (and top `((top . ,top)))))))
        (remoteterm-tests--check-tip-axis
-        x-case (car remote-display--tip-default-offsets) x)
+        x-case (car remote-display-tip-default-offsets) x)
        (remoteterm-tests--check-tip-axis
-        y-case (cdr remote-display--tip-default-offsets) y)))))
+        y-case (cdr remote-display-tip-default-offsets) y)))))
 
 (defun remoteterm-tests--check-tip-axis (case default-offset start)
   "Check the law T1 for START, the place of a tooltip on one axis.
@@ -8299,16 +8306,19 @@ of the axis when the offset of CASE is nil."
       (let ((offset (or offset default-offset)))
         (when (<= size limit)
           (should (<= 0 start (- limit size))))
-        (when (or (<= 0 (+ mouse offset) (- limit size))
-                  (<= 0 (- mouse offset size) (- limit size)))
-          (should-not (<= start mouse (+ start size -1))))))))
+        (if (or (<= 0 (+ mouse offset) (- limit size))
+                (<= 0 (- mouse offset size) (- limit size)))
+            (should-not (<= start mouse (+ start size -1)))
+          (should (= start (max 0 (- limit size)))))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-show
   "After `x-show-tip', the root has one visible tooltip with the text (law T2).
 The text area of the tooltip is as wide as the longest line, but not
 wider than `x-max-tooltip-size'.  It is as high as the lines, but not
 higher than `x-max-tooltip-size'.  A line that wraps can make it
-higher, up to `x-max-tooltip-size'."
+higher, up to `x-max-tooltip-size'.  The session has no mouse
+position, so the place of the tooltip is that of law T1 for the mouse
+at the top-left corner of the root."
   (remoteterm-tests--with-place-root root
     (let ((rd-gen-trials 20))
       (rd-gen-for-all
@@ -8321,41 +8331,104 @@ higher, up to `x-max-tooltip-size'."
            (dolist (other before)
              (x-show-tip other root))
            (x-show-tip text root)
-           (remoteterm-tests--check-tip root text)))))))
+           (remoteterm-tests--check-tip-place
+            (remoteterm-tests--check-tip root text) root '(0 . 0))))))))
 
 (rd-daemon-deftest remoteterm-tests-tip-settings
   "A tooltip has no bars and no fullscreen state (law T3).
 The frame defaults and the bar modes do not change this, and the size
 is that of law T2."
-  (remoteterm-tests--for-each-case
-   '("tooltip\nsettings" "x")
-   (lambda (text)
-     (remoteterm-tests--with-place-root root
-       (let ((default-frame-alist '((fullscreen . maximized)
-                                    (menu-bar-lines . 1) (width . 200)
-                                    (vertical-scroll-bars . right))))
-         (menu-bar-mode 1)
-         (tab-bar-mode 1)
-         (x-show-tip text root)
-         (let ((tip (remoteterm-tests--check-tip root text)))
-           (should (equal (mapcar (lambda (parameter)
-                                    (frame-parameter tip parameter))
-                                  '(menu-bar-lines tab-bar-lines
-                                    tool-bar-lines fullscreen
-                                    vertical-scroll-bars
-                                    horizontal-scroll-bars))
-                          '(0 0 0 nil nil nil)))))))))
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-tip-text 4 100) (rd-gen-frame-defaults)
+                      (rd-gen-element '(nil t)) (rd-gen-element '(nil t))))
+     (pcase-lambda (`(,text ,defaults ,menu-bar ,tab-bar))
+       (remoteterm-tests--with-place-root root
+         (remoteterm-tests--with-bar-modes
+          menu-bar tab-bar
+          (lambda ()
+            (let ((default-frame-alist defaults))
+              (x-show-tip text root)
+              (let ((tip (remoteterm-tests--check-tip root text)))
+                (should (equal (mapcar (lambda (parameter)
+                                         (frame-parameter tip parameter))
+                                       '(menu-bar-lines tab-bar-lines
+                                         tool-bar-lines fullscreen
+                                         vertical-scroll-bars
+                                         horizontal-scroll-bars))
+                               '(0 0 0 nil nil nil))))))))))))
+
+(defun remoteterm-tests--with-bar-modes (menu-bar tab-bar function)
+  "Call FUNCTION with `menu-bar-mode' MENU-BAR and `tab-bar-mode' TAB-BAR.
+Then give the two modes their old states again."
+  (let ((old-menu-bar menu-bar-mode)
+        (old-tab-bar tab-bar-mode))
+    (unwind-protect
+        (progn
+          (menu-bar-mode (if menu-bar 1 -1))
+          (tab-bar-mode (if tab-bar 1 -1))
+          (funcall function))
+      (menu-bar-mode (if old-menu-bar 1 -1))
+      (tab-bar-mode (if old-tab-bar 1 -1)))))
 
 (rd-daemon-deftest remoteterm-tests-tip-hide
   "`x-hide-tip' returns t once, and then nil (law T4).
-After it, the session has no tooltip frame."
-  (remoteterm-tests--for-each-case
-   '("hide" "two\nlines")
-   (lambda (text)
-     (remoteterm-tests--with-place-root root
-       (x-show-tip text root)
-       (should (equal (list (x-hide-tip) (x-hide-tip)) '(t nil)))
-       (should-not (remoteterm-tests--tip-frames))))))
+This is true after one or more calls of `x-show-tip'.  After it, the
+session has no tooltip frame."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda () (cons (rd-gen-tip-text 4 40)
+                      (rd-gen-list (lambda () (rd-gen-tip-text 4 40)) 3)))
+     (lambda (texts)
+       (remoteterm-tests--with-place-root root
+         (dolist (text texts)
+           (x-show-tip text root))
+         (should (equal (list (x-hide-tip) (x-hide-tip)) '(t nil)))
+         (should-not (remoteterm-tests--tip-frames)))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-under-child
+  "A tooltip goes to the root of the frame under the mouse (law T9).
+The mouse is at a point of the last frame of a chain of 0 to 3 nested
+child frames of a root.  The tooltip is a child of the root.  Its place
+is that of law T1 for the mouse position in the root: the point plus
+the position of each frame of the chain."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-child-chain 3)
+                      (rd-gen-random 1000) (rd-gen-random 1000)))
+     (pcase-lambda (`(,positions ,x-seed ,y-seed))
+       (remoteterm-tests--with-place-root root
+         (let* ((last (car (last (cons root (remoteterm-tests--child-chain
+                                             root positions)))))
+                (x (mod x-seed (frame-pixel-width last)))
+                (y (mod y-seed (frame-pixel-height last))))
+           (remoteterm-tests--input last 'motion x y 5)
+           (remoteterm-tests--handle-events)
+           (x-show-tip "tip" root)
+           (remoteterm-tests--check-tip-place
+            (remoteterm-tests--check-tip root "tip") root
+            (cons (apply #'+ x (mapcar #'car positions))
+                  (apply #'+ y (mapcar #'cdr positions))))))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-no-mouse
+  "With no mouse position, a tooltip goes to the root of FRAME (law T10).
+FRAME is the last frame of a chain of 0 to 3 nested child frames of a
+root, and the session had no motion.  The tooltip is a child of the
+root.  Its place is that of law T1 for the mouse at the top-left
+corner of the root."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda () (rd-gen-child-chain 3))
+     (lambda (positions)
+       (remoteterm-tests--with-place-root root
+         (let ((frame (car (last (cons root (remoteterm-tests--child-chain
+                                             root positions))))))
+           (x-show-tip "tip" frame)
+           (remoteterm-tests--check-tip-place
+            (remoteterm-tests--check-tip root "tip") root '(0 . 0))))))))
+
+;; Laws T5 and T6 use a few examples and not random inputs, because
+;; they wait on timers and on real time.  Each case takes a long time.
 
 (rd-daemon-deftest remoteterm-tests-tip-timeout
   "A small TIMEOUT hides the tooltip (law T5).
@@ -8426,16 +8499,38 @@ Check the size of law T2."
   (let ((tips (seq-filter (lambda (frame)
                             (and (eq (frame-parent frame) root)
                                  (frame-visible-p frame)))
-                          (frame-list))))
+                          (remoteterm-tests--tip-frames))))
+    (should (equal tips (remoteterm-tests--tip-frames)))
     (should (= (length tips) 1))
     (let ((tip (car tips)))
-      (should (frame-parameter tip 'remote-tip))
       (should (equal (with-current-buffer
                          (window-buffer (frame-root-window tip))
                        (buffer-string))
                      text))
       (remoteterm-tests--check-tip-size tip text)
       tip)))
+
+(defun remoteterm-tests--check-tip-place (tip root mouse)
+  "Check that the tooltip TIP of ROOT has the place of law T1.
+MOUSE is the mouse position (X . Y) in ROOT.  The call of `x-show-tip'
+gave no offsets and no parameters."
+  (should (equal (frame-position tip)
+                 (remote-display-tip-position
+                  mouse
+                  (cons (frame-pixel-width tip) (frame-pixel-height tip))
+                  (cons (frame-native-width root) (frame-native-height root))
+                  nil nil))))
+
+(defun remoteterm-tests--child-chain (root positions)
+  "Make a chain of nested child frames in ROOT, and return it.
+The first frame is a child of ROOT, and each other frame is a child of
+the frame before it.  POSITIONS gives the position (LEFT . TOP) of each
+frame in its parent."
+  (let ((parent root))
+    (mapcar (pcase-lambda (`(,left . ,top))
+              (setq parent (remoteterm-tests--plain-child
+                            parent `((left . ,left) (top . ,top)))))
+            positions)))
 
 (defun remoteterm-tests--check-tip-size (tip text)
   "Check that the text area of the tooltip TIP fits TEXT (law T2)."

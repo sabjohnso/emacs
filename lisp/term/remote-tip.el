@@ -39,7 +39,7 @@ A text that is larger is clipped.")
 (defconst remote-display--tip-default-timeout 5
   "The number of seconds that a tooltip shows when TIMEOUT is nil.")
 
-(defconst remote-display--tip-default-offsets '(5 . 10)
+(defconst remote-display-tip-default-offsets '(5 . 10)
   "The offsets (DX . DY) of a tooltip from the mouse when DX or DY is nil.")
 
 (defvar remote-display--tip-frame nil
@@ -51,15 +51,16 @@ A text that is larger is clipped.")
 (defun x-show-tip (string &optional frame parms timeout dx dy)
   "Show STRING in a tooltip near the mouse, for TIMEOUT seconds.
 The tooltip is a child frame of the root frame under the mouse.  If
-the mouse is not on a frame of the session of FRAME, the tooltip goes
-to the root of FRAME.  FRAME nil means the selected frame.
+the session of FRAME has no mouse position, the tooltip goes to the
+root of FRAME, and the mouse position is the top-left corner of that
+root.  FRAME nil means the selected frame.
 
 PARMS are more frame parameters of the tooltip.  An integer `left' or
 `top' in PARMS gives the position of the tooltip in its root frame.
 Else the tooltip is DX pixels to the right of the mouse and DY pixels
 below it, or on the other side of the mouse if it does not fit there.
 DX and DY must be positive or nil, and nil gives the values of
-`remote-display--tip-default-offsets'.  TIMEOUT nil means 5 seconds.
+`remote-display-tip-default-offsets'.  TIMEOUT nil means 5 seconds.
 
 A text larger than `x-max-tooltip-size' is clipped.  Return nil."
   (remote-display--hide-tip)
@@ -93,9 +94,9 @@ function `x-hide-tip' calls this function."
 
 (defun remote-display--place-tip (tip root mouse offsets parms)
   "Move the tooltip frame TIP to its place in its parent ROOT.
-MOUSE, OFFSETS and PARMS are as for `remote-display--tip-position'."
+MOUSE, OFFSETS and PARMS are as for `remote-display-tip-position'."
   (pcase-let ((`(,x . ,y)
-               (remote-display--tip-position
+               (remote-display-tip-position
                 mouse
                 (cons (frame-pixel-width tip) (frame-pixel-height tip))
                 (cons (frame-native-width root) (frame-native-height root))
@@ -103,21 +104,21 @@ MOUSE, OFFSETS and PARMS are as for `remote-display--tip-position'."
                 parms)))
     (set-frame-position tip x y)))
 
-(defun remote-display--tip-position (mouse size root-size offsets parms)
+(defun remote-display-tip-position (mouse size root-size offsets parms)
   "Return the position (X . Y) of a tooltip in its root frame.
 MOUSE is the position (X . Y) of the mouse in the root frame.  SIZE is
 the pixel size (WIDTH . HEIGHT) of the tooltip, and ROOT-SIZE is that
 of the root frame.  OFFSETS is (DX . DY), the distances of the tooltip
 from the mouse; nil gives the value of
-`remote-display--tip-default-offsets'.  An integer `left' or `top' in
+`remote-display-tip-default-offsets'.  An integer `left' or `top' in
 the alist PARMS gives the position on that axis."
   (cons (remote-display--tip-axis
          (car mouse) (car size) (car root-size)
-         (or (car offsets) (car remote-display--tip-default-offsets))
+         (or (car offsets) (car remote-display-tip-default-offsets))
          (alist-get 'left parms))
         (remote-display--tip-axis
          (cdr mouse) (cdr size) (cdr root-size)
-         (or (cdr offsets) (cdr remote-display--tip-default-offsets))
+         (or (cdr offsets) (cdr remote-display-tip-default-offsets))
          (alist-get 'top parms))))
 
 (defun remote-display--tip-axis (mouse size limit offset explicit)
@@ -136,13 +137,14 @@ it is larger than the root."
 
 (defun remote-display--tip-mouse (frame)
   "Return (ROOT . POSITION): the root frame and the mouse position in it.
-ROOT is the root of the frame under the mouse, if that frame is on the
-terminal of FRAME.  Else ROOT is the root of FRAME, and POSITION is
-\(0 . 0)."
+ROOT is the root of the frame under the mouse.  If the session of FRAME
+has no mouse position, ROOT is the root of FRAME, and POSITION is
+\(0 . 0).  The mouse position of a session is always on a live frame
+of that session, because remoteterm.c forgets the mouse frame when it
+deletes that frame."
   (pcase-let ((`(,under ,x . ,y) (with-selected-frame frame
                                    (mouse-pixel-position))))
-    (if (and (frame-live-p under) x
-             (eq (frame-terminal under) (frame-terminal frame)))
+    (if x
         (cons (frame-root-frame under)
               (remote-display--root-position under x y))
       (cons (frame-root-frame frame) '(0 . 0)))))

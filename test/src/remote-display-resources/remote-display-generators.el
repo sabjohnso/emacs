@@ -235,5 +235,24 @@ position that the parameters of the tooltip give."
           (and (/= (rd-gen-random 4) 0) (rd-gen-integer 1 40))
           (and (= (rd-gen-random 4) 0) (rd-gen-integer -100 2000)))))
 
+(defun rd-gen-frame-defaults ()
+  "Return a random alist of frame defaults for `default-frame-alist'.
+Each entry asks for a bar, a fullscreen state or a large size, which
+a tooltip must not get."
+  (cl-remove-if-not (lambda (_) (= (rd-gen-random 2) 0))
+                    '((fullscreen . maximized) (menu-bar-lines . 1)
+                      (tab-bar-lines . 1) (tool-bar-lines . 1)
+                      (width . 200) (height . 80)
+                      (vertical-scroll-bars . right)
+                      (horizontal-scroll-bars . t))))
+
+(defun rd-gen-child-chain (max-length)
+  "Return the positions of a random chain of up to MAX-LENGTH child frames.
+The value is a list of (LEFT . TOP), one for each frame of the chain,
+from the frame nearest to the root.  Each LEFT and TOP is from 1 to 30
+pixels, so that each frame of the chain moves the origin."
+  (rd-gen-list (lambda () (cons (rd-gen-integer 1 30) (rd-gen-integer 1 30)))
+               max-length))
+
 (provide 'remote-display-generators)
 ;;; remote-display-generators.el ends here
