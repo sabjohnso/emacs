@@ -286,25 +286,39 @@ texts have more than 1024 bytes of UTF-8."
                              (rd-gen-random 12))
                     collect (rd-gen-element characters)))))
 
-(defun rd-gen-menu--keymap (depth prompt)
+(defun rd-gen-large-menu ()
+  "Return a random keymap menu with some hundreds of bindings.
+The bindings are as in `rd-gen-menu', with submenus to one level, and
+each label has some hundreds of bytes of UTF-8 or more."
+  (rd-gen-menu--keymap 1 nil (+ 200 (rd-gen-random 200))
+                       #'rd-gen-menu--long-text))
+
+(defun rd-gen-menu--long-text ()
+  "Return a random menu text with some hundreds of characters or more."
+  (concat (make-string (+ 100 (rd-gen-random 200)) ?a) (rd-gen-menu-text)))
+
+(defun rd-gen-menu--keymap (depth prompt &optional count text)
   "Return a random keymap menu with submenus to DEPTH levels.
-PROMPT is the prompt string of the keymap, or nil."
+PROMPT is the prompt string of the keymap, or nil.  COUNT is the number
+of bindings of the top level, or nil for one to six.  TEXT returns
+the labels, or nil for `rd-gen-menu-text'."
   `(keymap ,@(and prompt (list prompt))
            ,@(cl-loop for index from 0
-                      repeat (1+ (rd-gen-random 6))
+                      repeat (or count (1+ (rd-gen-random 6)))
                       collect (cons (intern (format "item-%d" index))
-                                    (rd-gen-menu--keymap-entry depth)))))
+                                    (rd-gen-menu--keymap-entry
+                                     depth (or text #'rd-gen-menu-text))))))
 
-(defun rd-gen-menu--keymap-entry (depth)
+(defun rd-gen-menu--keymap-entry (depth text)
   "Return a random menu-item binding of a keymap.
 The binding is an item, a separator, or (when DEPTH is above 0) a
-submenu with entries to DEPTH - 1 levels."
+submenu with entries to DEPTH - 1 levels.  TEXT returns the labels."
   (pcase (rd-gen-random (if (> depth 0) 6 5))
     (0 `(menu-item ,(rd-gen-element rd-gen-menu-separators)))
-    (5 `(menu-item ,(rd-gen-menu-text)
-                   ,(rd-gen-menu--keymap (1- depth) nil)
+    (5 `(menu-item ,(funcall text)
+                   ,(rd-gen-menu--keymap (1- depth) nil nil text)
                    ,@(rd-gen-menu--enable)))
-    (_ `(menu-item ,(rd-gen-menu-text) rd-gen-menu-command
+    (_ `(menu-item ,(funcall text) rd-gen-menu-command
                    ,@(rd-gen-menu--enable)
                    ,@(rd-gen-menu--button)
                    ,@(rd-gen-menu--keys)))))

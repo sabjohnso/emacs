@@ -304,6 +304,13 @@
 ;;     `x-popup-menu' returns nil for a click position, and signals
 ;;     `quit' for a list position.  The session sends one hide-menu
 ;;     message with the serial of the menu, after the show-menu message.
+;; M5. Menu pace: while the sink of a session reports 65536 bytes or
+;;     more that it did not send, `x-popup-menu' sends no menu-item
+;;     message and no show-menu message.  When the transport reports an
+;;     empty queue, the session sends the entries in order, as law M3
+;;     gives them, and then the show-menu message.  A quit, a throw, or a
+;;     detach while the entries wait sends no entries, no show-menu
+;;     message, and no hide-menu message.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -7987,6 +7994,110 @@ See `remoteterm-tests--answer-popup'."
    (remote-display--encode
     `(key :frame ,(remoteterm-tests--frame-id (plist-get shown :frame))
           :time 0 :keysym ,character :character ,character :modifiers 0))))
+
+;;;; The pace of a large popup menu
+
+(ert-deftest remoteterm-tests-menu-paced ()
+  "Law M5: the entries of a popup menu go at the pace of the connection.
+A trial pops up a large random menu of `rd-gen-large-menu' while the
+sink of the session reports 65536 bytes.  Then a timer drains the
+queue, or quits, throws, or detaches the client while the entries
+wait.  See `remoteterm-tests--paced-popup'."
+  (skip-unless (featurep 'remote-test))
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-large-menu)
+                      (rd-gen-element '(drain quit throw detach))))
+     (lambda (case)
+       (apply #'remoteterm-tests--check-menu-paced
+              (car case) (cadr case)
+              (list (apply #'remoteterm-tests--paced-popup case)))))))
+
+(defun remoteterm-tests--check-menu-paced (menu exit result)
+  "Check law M5 for MENU, EXIT, and RESULT.
+RESULT is the value of `remoteterm-tests--paced-popup' for MENU and
+EXIT."
+  (pcase-let (((map :full :sent :value :after) result))
+    (should-not (remoteterm-tests--menu-messages full))
+    (if (eq exit 'drain)
+        (let ((menu-messages (remoteterm-tests--menu-messages sent)))
+          (should (equal (mapcar #'car menu-messages)
+                         (append (make-list (1- (length menu-messages))
+                                            'menu-item)
+                                 '(show-menu))))
+          (should (equal (mapcar (lambda (message)
+                                   (remoteterm-tests--menu-item-entry
+                                    (cdr message)))
+                                 (butlast menu-messages))
+                         (remoteterm-tests--menu-entries menu)))
+          (should (eq value nil))
+          (remoteterm-tests--check-hide-menu (append sent after)))
+      (should (eq value (if (eq exit 'detach) nil exit)))
+      (should-not (remoteterm-tests--menu-messages sent))
+      (should-not (remoteterm-tests--menu-messages after)))))
+
+(defun remoteterm-tests--menu-messages (messages)
+  "Return the menu-item, show-menu, and hide-menu messages of MESSAGES."
+  (seq-filter (lambda (message)
+                (memq (car message) '(menu-item show-menu hide-menu)))
+              messages))
+
+(defun remoteterm-tests--paced-popup (menu exit)
+  "Pop up MENU at a click while the sink is full, and end it with EXIT.
+A timer takes the output while the sink reports 65536 bytes.  Then
+EXIT `drain' reports 65535 bytes and an empty queue, takes the output,
+and sends a dismissal.  EXIT `quit' signals `quit', `throw' throws
+`throw' to `remoteterm-tests--catch-menu-exit', and `detach' detaches
+the client.  After `x-popup-menu' returns, the sink reports 65535 bytes
+and an empty queue again.  The value is a plist.  :full and :sent are
+the messages before and after the first empty queue.  :value is the
+value of `x-popup-menu', or the cause of its exit.  :after are the
+messages after `x-popup-menu' returns."
+  (remoteterm-tests--with-display "remote-menu"
+    (remoteterm-tests--with-frame frame "remote-menu" nil
+      (remote-display--record "remote-menu")
+      (remote-display--take-output "remote-menu")
+      (remote-display--set-queued "remote-menu" 65536)
+      (let* ((state nil)
+             (step (run-at-time
+                    0 nil
+                    #'remoteterm-tests--paced-menu-exit
+                    exit (lambda (result) (setq state result))))
+             (guard (remoteterm-tests--menu-guard))
+             (value (unwind-protect
+                        (remoteterm-tests--catch-menu-exit
+                         (funcall (remoteterm-tests--menu-popup menu t) frame))
+                      (cancel-timer step)
+                      (cancel-timer guard))))
+        (append (list :value value
+                      :after (remoteterm-tests--drain-menu-output))
+                state)))))
+
+(defun remoteterm-tests--paced-menu-exit (exit save)
+  "Take the output of the full sink, and then do EXIT.
+See `remoteterm-tests--paced-popup'.  Call SAVE with the plist of :full
+and :sent before EXIT, because a quit or a throw does not return."
+  (let ((full (remoteterm-tests--all-messages
+               (remoteterm-tests--take-menu-output))))
+    (if (not (eq exit 'drain))
+        (funcall save (list :full full :sent nil))
+      (let* ((sent (remoteterm-tests--drain-menu-output))
+             (show (alist-get 'show-menu sent)))
+        (funcall save (list :full full :sent sent))
+        (remoteterm-tests--send-menu-choice (or (plist-get show :serial) 0)
+                                            0 0)))
+    (pcase exit
+      ('quit (signal 'quit nil))
+      ('throw (throw 'remoteterm-tests--menu-exit 'throw))
+      ('detach (remote-display--detach "remote-menu")))))
+
+(defun remoteterm-tests--drain-menu-output ()
+  "Report 65535 bytes and an empty queue, and return the messages after.
+The session is \"remote-menu\".  A session with no client gives no
+messages."
+  (ignore-errors (remote-display--set-queued "remote-menu" 65535))
+  (remote-display--queue-empty "remote-menu")
+  (remoteterm-tests--all-messages (remoteterm-tests--take-menu-output)))
 
 ;;;; Font transfer
 

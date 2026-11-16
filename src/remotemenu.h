@@ -53,6 +53,11 @@ extern Lisp_Object remote_menu_show (struct frame *f, int x, int y,
 extern void remote_menu_choice_input (struct remote_display_info *dpyinfo,
 				      const struct rd_message *message);
 
+/* Send the messages of the menu of DPYINFO that wait for the
+   connection.  The transport calls this through remote_output_drained
+   when it sent all its bytes.  */
+extern void remote_send_menu_messages (struct remote_display_info *dpyinfo);
+
 /* End the wait for the menu of DPYINFO as a dismissal, if the session
    waits for a menu.  Call this before the client of DPYINFO changes,
    and before DPYINFO is freed.  */

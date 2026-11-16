@@ -20,7 +20,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 /* The client shows a popup menu with its toolkit.  menu.c puts the
    menu in menu_items (keyboard.h).  This file walks menu_items into a
    list of entries, and sends one menu-item message for each entry, in
-   order, and then one show-menu message (rdproto.h).  Then it waits
+   order, and then one show-menu message (rdproto.h).  A large menu can
+   have more bytes than the queue limit of the connection, so the
+   session sends these messages at the pace of the connection
+   (remote_send_paced).  Then it waits
    for the menu-choice message of the client.  The wait lets process
    filters and timers run, as sit-for does.  A change of the client
    ends the wait as a dismissal.  Each exit from the wait sends a
@@ -63,8 +66,17 @@ struct remote_menu_wait
   /* The session, or NULL after remote_drop_menu.  */
   struct remote_display_info *dpyinfo;
 
-  /* The entries that the session sent.  */
+  /* The entries of the menu.  */
   struct remote_menu_entries entries;
+
+  /* The index in ENTRIES of the next entry to send.  */
+  ptrdiff_t next;
+
+  /* The show-menu message to send after the entries.  */
+  struct rd_show_menu show;
+
+  /* True if the session sent the show-menu message.  */
+  bool shown;
 
   /* True if the wait ends.  */
   bool answered;
@@ -84,10 +96,13 @@ static void remote_hold_menu_items (void);
 static void remote_answer_menu (struct remote_menu_wait *, bool, uint32_t);
 static bool remote_enabled_item_p (struct remote_menu_entries *, uint32_t);
 static Lisp_Object remote_menu_selection (uint32_t, int);
-static void remote_send_menu_entries (struct remote_display_info *,
-				      uint32_t, struct remote_menu_entries *);
-static void remote_send_show_menu (struct frame *, uint32_t, int, int,
-				   Lisp_Object);
+static bool remote_send_menu_step (struct remote_display_info *);
+static void remote_send_menu_item (struct remote_display_info *,
+				   const struct rd_menu_item *, uint32_t);
+static void remote_send_show_menu (struct remote_display_info *,
+				   const struct rd_show_menu *);
+static void remote_make_show_menu (struct frame *, uint32_t, int, int,
+				   Lisp_Object, struct rd_show_menu *);
 static void remote_send_hide_menu (struct remote_display_info *,
 				   uint32_t);
 static void remote_menu_entries (int, struct remote_menu_entries *);
@@ -136,6 +151,14 @@ remote_menu_choice_input (struct remote_display_info *dpyinfo,
     remote_answer_menu (wait, choice->chosen, choice->id);
 }
 
+/* Send the next messages of the menu of DPYINFO at the pace of the
+   connection (remote_send_paced).  */
+void
+remote_send_menu_messages (struct remote_display_info *dpyinfo)
+{
+  remote_send_paced (dpyinfo, remote_send_menu_step);
+}
+
 void
 remote_drop_menu (struct remote_display_info *dpyinfo)
 {
@@ -148,10 +171,10 @@ remote_drop_menu (struct remote_display_info *dpyinfo)
     }
 }
 
-/* Send the entries of menu_items and the show-menu message for the
-   frame F to its client, at the pixel position X, Y of F, with the
-   title TITLE.  Keep the entries in WAIT, and make WAIT the menu that
-   the session waits for.  MENUFLAGS are as for menu_show_hook.  */
+/* Make WAIT the menu that the session of the frame F waits for, and
+   start to send its messages: the entries of menu_items, and then the
+   show-menu message for F, at the pixel position X, Y of F, with the
+   title TITLE.  MENUFLAGS are as for menu_show_hook.  */
 static void
 remote_show_menu (struct frame *f, struct remote_menu_wait *wait, int x,
 		  int y, int menuflags, Lisp_Object title)
@@ -159,10 +182,9 @@ remote_show_menu (struct frame *f, struct remote_menu_wait *wait, int x,
   struct remote_display_info *dpyinfo = FRAME_DISPLAY_INFO (f);
   uint32_t serial = ++dpyinfo->menu.serial;
   remote_menu_entries (menuflags, &wait->entries);
-  remote_send_menu_entries (dpyinfo, serial, &wait->entries);
-  remote_send_show_menu (f, serial, x, y, title);
-  remote_flush (dpyinfo);
+  remote_make_show_menu (f, serial, x, y, title, &wait->show);
   dpyinfo->menu.wait = wait;
+  remote_send_menu_messages (dpyinfo);
 }
 
 /* Wait until the client answers the menu of WAIT, or the session drops
@@ -203,8 +225,11 @@ remote_end_menu (void *data)
   if (dpyinfo && dpyinfo->menu.wait == wait)
     {
       dpyinfo->menu.wait = NULL;
-      remote_send_hide_menu (dpyinfo, dpyinfo->menu.serial);
-      remote_flush (dpyinfo);
+      if (wait->shown)
+	{
+	  remote_send_hide_menu (dpyinfo, dpyinfo->menu.serial);
+	  remote_flush (dpyinfo);
+	}
     }
   xfree (wait->entries.items);
 }
@@ -298,39 +323,56 @@ remote_menu_selection (uint32_t id, int menuflags)
   return entry;
 }
 
-/* Send a menu-item message with SERIAL for each of ENTRIES to the
-   client of DPYINFO.  */
-static void
-remote_send_menu_entries (struct remote_display_info *dpyinfo,
-			  uint32_t serial, struct remote_menu_entries *entries)
+/* Send the next message of the menu of DPYINFO, and return true.
+   This is the next entry, or the show-menu message after the last
+   entry.  Return false if the session waits for no menu, or if it sent
+   all the messages of the menu.  */
+static bool
+remote_send_menu_step (struct remote_display_info *dpyinfo)
 {
-  for (ptrdiff_t i = 0; i < entries->count; i++)
+  struct remote_menu_wait *wait = dpyinfo->menu.wait;
+  if (!wait || wait->shown)
+    return false;
+  if (wait->next < wait->entries.count)
+    remote_send_menu_item (dpyinfo, &wait->entries.items[wait->next++],
+			   wait->show.serial);
+  else
     {
-      struct rd_message message =
-	{
-	  .type = RD_MENU_ITEM,
-	  .u.menu_item = entries->items[i],
-	};
-      message.u.menu_item.serial = serial;
-      remote_send_message (dpyinfo, &message);
+      remote_send_show_menu (dpyinfo, &wait->show);
+      wait->shown = true;
     }
+  return true;
 }
 
-/* Send the show-menu message SERIAL for the frame F, at the pixel
+/* Send the menu-item message of ITEM with SERIAL to the client of
+   DPYINFO.  */
+static void
+remote_send_menu_item (struct remote_display_info *dpyinfo,
+		       const struct rd_menu_item *item, uint32_t serial)
+{
+  struct rd_message message = { .type = RD_MENU_ITEM, .u.menu_item = *item };
+  message.u.menu_item.serial = serial;
+  remote_send_message (dpyinfo, &message);
+}
+
+/* Send the show-menu message SHOW to the client of DPYINFO.  */
+static void
+remote_send_show_menu (struct remote_display_info *dpyinfo,
+		       const struct rd_show_menu *show)
+{
+  struct rd_message message = { .type = RD_SHOW_MENU, .u.show_menu = *show };
+  remote_send_message (dpyinfo, &message);
+}
+
+/* Make SHOW the show-menu message SERIAL for the frame F, at the pixel
    position X, Y of F, with the title TITLE.  */
 static void
-remote_send_show_menu (struct frame *f, uint32_t serial, int x, int y,
-		       Lisp_Object title)
+remote_make_show_menu (struct frame *f, uint32_t serial, int x, int y,
+		       Lisp_Object title, struct rd_show_menu *show)
 {
-  struct rd_message message =
-    {
-      .type = RD_SHOW_MENU,
-      .u.show_menu = { .frame = FRAME_NATIVE_WINDOW (f), .serial = serial,
-		       .x = x, .y = y },
-    };
-  message.u.show_menu.ntitle
-    = remote_menu_text (title, message.u.show_menu.title, RD_MAX_MENU_TEXT);
-  remote_send_message (FRAME_DISPLAY_INFO (f), &message);
+  *show = (struct rd_show_menu) { .frame = FRAME_NATIVE_WINDOW (f),
+				  .serial = serial, .x = x, .y = y };
+  show->ntitle = remote_menu_text (title, show->title, RD_MAX_MENU_TEXT);
 }
 
 /* Send the hide-menu message SERIAL to the client of DPYINFO.  */

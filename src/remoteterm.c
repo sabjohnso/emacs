@@ -707,6 +707,7 @@ remote_output_drained (struct remote_display_info *dpyinfo)
 {
   remote_send_font_data (dpyinfo);
   remote_send_clipboard_data (dpyinfo);
+  remote_send_menu_messages (dpyinfo);
   remote_send_images (dpyinfo);
 }
 
