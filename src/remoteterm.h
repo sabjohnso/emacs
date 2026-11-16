@@ -142,6 +142,16 @@ struct remote_display_info
 /* The list of all sessions.  The generic code uses this name.  */
 extern struct remote_display_info *x_display_list;
 
+/* The place of a frame on the client: the fields of a place-frame
+   message (rdproto.h).  See remoteplace.c.  */
+struct remote_placement
+{
+  uint32_t parent;
+  int x, y;
+  uint32_t z;
+  bool visible;
+};
+
 /* The data of one frame of the remote backend.  */
 struct remote_output
 {
@@ -181,6 +191,9 @@ struct remote_output
   bool defined;
   int defined_width;
   int defined_height;
+
+  /* The place that the client has for the frame.  */
+  struct remote_placement placed;
 
   Window parent_desc;
 
@@ -245,6 +258,17 @@ extern void remote_clipboard_input (struct remote_display_info *,
 extern void remote_drop_clipboard (struct remote_display_info *);
 extern void remote_send_clipboard_data (struct remote_display_info *);
 extern void syms_of_remoteclip (void);
+
+/* Defined in remoteplace.c.  */
+extern void remote_set_offset (struct frame *, int, int, int);
+extern void remote_raise_lower_frame (struct frame *, bool);
+extern void remote_frame_visible_invisible (struct frame *, bool);
+extern void remote_set_parent_frame (struct frame *, Lisp_Object,
+				     Lisp_Object);
+extern void remote_calc_absolute_position (struct frame *);
+extern void remote_place_frame (struct frame *);
+extern void remote_place_new_frame (struct frame *);
+extern void remote_forget_place (struct frame *);
 
 /* Defined in remotefonts.c.  */
 extern void remote_want_font (struct remote_display_info *,

@@ -95,7 +95,6 @@ static bool remote_session_frame_p (Lisp_Object,
 				    struct remote_display_info *);
 static void remote_set_initial_parent (struct frame *, Lisp_Object);
 static bool remote_initially_visible_p (Lisp_Object);
-static void remote_calc_absolute_position (struct frame *);
 static void remote_assign_frame_id (struct frame *);
 static bool remote_frame_id_used_p (struct remote_display_info *, uint32_t);
 static uint32_t remote_frame_id (struct frame *);
@@ -613,6 +612,8 @@ remote_define_frame (struct frame *f)
   if (output->defined && output->defined_width == width
       && output->defined_height == height)
     return;
+  if (!output->defined)
+    remote_place_new_frame (f);
   struct rd_message message =
     {
       .type = RD_DEFINE_FRAME,
@@ -653,6 +654,7 @@ remote_forget_frames (struct remote_display_info *dpyinfo)
       if (FRAME_REMOTE_P (f) && FRAME_DISPLAY_INFO (f) == dpyinfo)
 	{
 	  FRAME_REMOTE_OUTPUT (f)->defined = false;
+	  remote_forget_place (f);
 	  SET_FRAME_GARBAGED (f);
 	}
     }
@@ -949,7 +951,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     NULL, /* tool bar position */
     NULL, /* inhibit double buffering */
     NULL, /* undecorated */
-    NULL, /* parent frame */
+    remote_set_parent_frame,
     NULL, /* skip taskbar */
     NULL, /* no focus on map */
     NULL, /* no accept focus */
@@ -1039,6 +1041,7 @@ remote_make_frame_on (struct remote_display_info *dpyinfo, Lisp_Object parms)
   f->output_data.remote = xzalloc (sizeof *f->output_data.remote);
   FRAME_DISPLAY_INFO (f) = dpyinfo;
   remote_assign_frame_id (f);
+  remote_forget_place (f);
   FRAME_FONTSET (f) = -1;
   fset_name (f, Vinvocation_name);
   f->explicit_name = false;
@@ -1101,24 +1104,6 @@ remote_set_initial_parent (struct frame *f, Lisp_Object parent)
   store_frame_param (f, Qparent_frame, parent);
   if (!NILP (parent))
     f->z_order = 1 + max_child_z_order (XFRAME (parent));
-}
-
-/* Make a negative position of the child frame F count from the right
-   or the bottom edge of its parent, as x_calc_absolute_position does.
-   After this, left_pos and top_pos give the top-left corner of F in
-   the parent.  A root frame keeps its position, because the client
-   does not place a root frame.  */
-static void
-remote_calc_absolute_position (struct frame *f)
-{
-  struct frame *parent = FRAME_PARENT_FRAME (f);
-  if (!parent)
-    return;
-  if (f->size_hint_flags & XNegative)
-    f->left_pos += FRAME_PIXEL_WIDTH (parent) - FRAME_PIXEL_WIDTH (f);
-  if (f->size_hint_flags & YNegative)
-    f->top_pos += FRAME_PIXEL_HEIGHT (parent) - FRAME_PIXEL_HEIGHT (f);
-  f->size_hint_flags &= ~(XNegative | YNegative);
 }
 
 /* Give F the next frame ID of its session.  The counter wraps at the
@@ -1333,12 +1318,6 @@ remote_set_window_size (struct frame *f, bool change_gravity,
 			int width, int height)
 {
   change_frame_size (f, width, height, false, false, false);
-}
-
-static void
-remote_frame_visible_invisible (struct frame *f, bool visible)
-{
-  SET_FRAME_VISIBLE (f, visible);
 }
 
 /* The delete_frame_hook.  */
@@ -2360,6 +2339,8 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->delete_frame_hook = remote_delete_frame;
   terminal->delete_terminal_hook = remote_delete_terminal;
   terminal->frame_visible_invisible_hook = remote_frame_visible_invisible;
+  terminal->set_frame_offset_hook = remote_set_offset;
+  terminal->frame_raise_lower_hook = remote_raise_lower_frame;
   terminal->set_window_size_hook = remote_set_window_size;
   terminal->set_new_font_hook = remote_new_font;
   return terminal;

@@ -807,6 +807,335 @@ A failure names the case, as in `rd-gen-for-all'."
   "Return non-nil if FRAME has a minibuffer window of its own."
   (eq (window-frame (minibuffer-window frame)) frame))
 
+;;;; The places of the frames
+
+(defconst remoteterm-tests--place-display "remote-place"
+  "The session of the tests of the places of the frames.")
+
+(defmacro remoteterm-tests--with-place-root (root &rest body)
+  "Bind ROOT to a new root frame, and evaluate BODY.
+The frame is on the session `remoteterm-tests--place-display', which
+has a recording client.  Then delete all frames of the session, also
+the frames that BODY made, and close the session."
+  (declare (indent 1))
+  `(remoteterm-tests--with-display remoteterm-tests--place-display
+     (unwind-protect
+         (let ((,root (remoteterm-tests--make-frame
+                       remoteterm-tests--place-display
+                       '((width . 60) (height . 30)))))
+           (remote-display--record remoteterm-tests--place-display)
+           ,@body)
+       (dolist (frame (remoteterm-tests--place-frames))
+         (when (frame-live-p frame)
+           (delete-frame frame t))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-replay
+  "The client gets the place of each frame (law C7).
+After random operations on child frames, a replay of the output gives
+each frame that the client knows the parent, the visibility and the
+position that it has in Emacs.  The z values of the siblings have the
+order of `frame--z-order-lessp'."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     (lambda () (rd-gen-child-frame-ops 12))
+     (lambda (ops)
+       (remoteterm-tests--with-place-root root
+         (remoteterm-tests--run-child-ops root ops)
+         (remoteterm-tests--check-replay))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-distinct-z
+  "No two siblings have the same z order (law C8).
+After each random operation, `frame--z-order-lessp' puts each frame
+below or above each sibling."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     (lambda () (rd-gen-child-frame-ops 12))
+     (lambda (ops)
+       (remoteterm-tests--with-place-root root
+         (remoteterm-tests--run-child-ops
+          root ops #'remoteterm-tests--check-distinct-z))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-place-before-define
+  "A client gets the place of a new frame before its definition (law C9).
+After an attach, the place that a client has for a frame at its first
+define-frame is the place of the frame in Emacs.  The order in which
+the client learns the frames does not matter."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-child-frame-ops 12) (= (rd-gen-random 2) 0)))
+     (lambda (case)
+       (remoteterm-tests--with-place-root root
+         (remoteterm-tests--run-child-ops root (car case))
+         (remoteterm-tests--reattach)
+         (let ((frames (remoteterm-tests--place-frames)))
+           (when (cadr case)
+             (setq frames (reverse frames)))
+           (mapc #'remoteterm-tests--show-frame frames)
+           (remoteterm-tests--check-places
+            frames (cdr (remoteterm-tests--replay-output)))))))))
+
+(rd-daemon-deftest remoteterm-tests-frame-place-quiet-redisplay
+  "A redisplay with no change of a place sends no place-frame (law C10)."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     (lambda () (rd-gen-child-frame-ops 12))
+     (lambda (ops)
+       (remoteterm-tests--with-place-root root
+         (remoteterm-tests--run-child-ops root ops)
+         (mapc #'remoteterm-tests--show-frame (remoteterm-tests--place-frames))
+         (remote-display--take-output remoteterm-tests--place-display)
+         (redisplay t)
+         (mapc #'remoteterm-tests--show-frame (remoteterm-tests--place-frames))
+         (should-not (remoteterm-tests--places-in-output)))))))
+
+(rd-daemon-deftest remoteterm-tests-frame-place-quiet-roots
+  "A session with only visible root frames sends no place-frame (law C10).
+Thus the output of such a session is the same as before child frames."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda () (rd-gen-list (lambda () (list (rd-gen-integer -60 60)
+                                              (rd-gen-integer -60 60)))
+                             3))
+     (lambda (positions)
+       (remoteterm-tests--with-place-root _root
+         (dolist (position positions)
+           (let ((frame (remoteterm-tests--make-frame
+                         remoteterm-tests--place-display nil)))
+             (remoteterm-tests--show-frame frame)
+             (apply #'set-frame-position frame position)
+             (raise-frame frame)
+             (lower-frame frame)
+             (make-frame-visible frame)
+             (remoteterm-tests--show-frame frame)))
+         (redisplay t)
+         (should-not (remoteterm-tests--places-in-output)))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-place-flush
+  "A change of the place of a known child reaches the client (law C11).
+A move, a raise or a hide of a child, with no redisplay, sends a
+place-frame and flushes it."
+  (remoteterm-tests--for-each-case
+   '(move raise hide)
+   (lambda (kind)
+     (remoteterm-tests--with-place-root root
+       (let ((low (remoteterm-tests--place-child root))
+             (high (remoteterm-tests--place-child root)))
+         (mapc #'remoteterm-tests--show-frame (list low high))
+         (remote-display--take-output remoteterm-tests--place-display)
+         (pcase kind
+           ('move (set-frame-position low 7 9))
+           ('raise (raise-frame low))
+           ('hide (make-frame-invisible low t)))
+         (should (= (remote-display--unflushed-bytes
+                     remoteterm-tests--place-display)
+                    0))
+         (should (remoteterm-tests--places-in-output)))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-place-reconnect
+  "A new client gets the same places as the last one (law C12).
+After random operations, a detach and an attach, the replay of the
+new output gives the places of the frames in Emacs."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     (lambda () (rd-gen-child-frame-ops 12))
+     (lambda (ops)
+       (remoteterm-tests--with-place-root root
+         (remoteterm-tests--run-child-ops root ops)
+         (remoteterm-tests--check-replay)
+         (remoteterm-tests--reattach)
+         (remoteterm-tests--check-replay))))))
+
+(rd-daemon-deftest remoteterm-tests-child-frame-set-negative-position
+  "`set-frame-position' with a negative value counts from the far edge.
+With X = -N, the right edge of the child is N pixels from the right
+edge of its parent, and `frame-position' gives a value that is not
+negative.  Y is the same with the bottom edges (law C13)."
+  (let ((rd-gen-trials 20))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-integer -50 50) (rd-gen-integer -50 50)))
+     (lambda (position)
+       (remoteterm-tests--with-place-root root
+         (let ((child (remoteterm-tests--place-child root)))
+           (apply #'set-frame-position child position)
+           (should (equal (frame-position child)
+                          (cons (remoteterm-tests--edge
+                                 (car position) (frame-native-width root)
+                                 (frame-pixel-width child))
+                                (remoteterm-tests--edge
+                                 (cadr position) (frame-native-height root)
+                                 (frame-pixel-height child)))))
+           (should (>= (car (frame-position child)) 0))
+           (should (>= (cdr (frame-position child)) 0))))))))
+
+(defun remoteterm-tests--run-child-ops (root ops &optional check)
+  "Apply OPS to ROOT and the children that OPS make.
+OPS come from `rd-gen-child-frame-ops'.  Call CHECK, if not nil, with
+the live frames of the session after each operation."
+  (let ((frames (list root)))
+    (dolist (op ops)
+      (setq frames (seq-filter #'frame-live-p
+                               (remoteterm-tests--apply-child-op frames op)))
+      (when check
+        (funcall check (remoteterm-tests--place-frames))))))
+
+(defun remoteterm-tests--apply-child-op (frames op)
+  "Apply the operation OP of `rd-gen-child-frame-ops' to FRAMES.
+FRAMES is the list of frames that the indexes of OP name, with the root
+frame first.  Return the new list.  Emacs refuses a parent that makes
+a cycle, and then the operation changes nothing."
+  (cl-flet ((frame (index) (nth (mod index (length frames)) frames)))
+    (pcase op
+      (`(make ,index ,left ,top ,visible)
+       (setq frames
+             (append frames
+                     (list (remoteterm-tests--place-child
+                            (frame index)
+                            `((left . ,left) (top . ,top)
+                              (visibility . ,visible)))))))
+      (`(move ,index ,x ,y) (set-frame-position (frame index) x y))
+      (`(visible ,index ,flag)
+       (if flag
+           (make-frame-visible (frame index))
+         (make-frame-invisible (frame index) t)))
+      (`(raise ,index) (raise-frame (frame index)))
+      (`(lower ,index) (lower-frame (frame index)))
+      (`(reparent ,index ,parent)
+       (ignore-error error
+         (set-frame-parameter (frame index) 'parent-frame
+                              (and parent (frame parent)))))
+      (`(delete ,index)
+       (let ((target (frame index)))
+         (unless (or (eq target (car frames))
+                     (frame-ancestor-p target (car frames)))
+           (delete-frame target t))))
+      (`(show ,index) (remoteterm-tests--show-frame (frame index))))
+    frames))
+
+(defun remoteterm-tests--place-child (parent &optional parameters)
+  "Make a small child frame of PARENT with PARAMETERS, and return it."
+  (remoteterm-tests--make-child-frame
+   remoteterm-tests--place-display
+   (append parameters
+           `((parent-frame . ,parent) (width . 10) (height . 4)))))
+
+(defun remoteterm-tests--place-frames ()
+  "Return the live frames of the session `remoteterm-tests--place-display'."
+  (remoteterm-tests--session-frames remoteterm-tests--place-display))
+
+(defun remoteterm-tests--show-frame (frame)
+  "Make the client know FRAME: send a small draw on it."
+  (remote-display--clear-area frame 0 0 1 1))
+
+(defun remoteterm-tests--reattach ()
+  "Detach the client of the place session, and attach a new one."
+  (remote-display--detach remoteterm-tests--place-display)
+  (remote-display--record remoteterm-tests--place-display))
+
+(defun remoteterm-tests--check-replay ()
+  "Show each frame of the place session, and check the places of its client."
+  (let ((frames (remoteterm-tests--place-frames)))
+    (mapc #'remoteterm-tests--show-frame frames)
+    (remoteterm-tests--check-places
+     frames (car (remoteterm-tests--replay-output)))))
+
+(defun remoteterm-tests--places-in-output ()
+  "Return the place-frame messages that the place session sent."
+  (remoteterm-tests--of-type
+   'place-frame (remote-display--take-output remoteterm-tests--place-display)))
+
+(defun remoteterm-tests--replay-output ()
+  "Take the output of the place session, and replay its places.
+The value is the value of `remoteterm-tests--replay-places'."
+  (remoteterm-tests--replay-places
+   (remoteterm-tests--all-messages
+    (remote-display--take-output remoteterm-tests--place-display))))
+
+(defconst remoteterm-tests--default-place
+  '(:parent 0 :x 0 :y 0 :z 0 :visible 1)
+  "The place of a frame with no place-frame message.")
+
+(defun remoteterm-tests--replay-places (messages)
+  "Return the places of the frames that a client has after MESSAGES.
+The value is (KNOWN . FIRST).  Each one is a hash table from a frame
+ID to the fields of a place-frame message.  KNOWN has the place of each
+frame that the client knows at the end.  FIRST has the place of each
+frame at its first define-frame.  A place-frame for a frame that the
+client does not know applies at the next define-frame of that frame.
+A frame with no place-frame has `remoteterm-tests--default-place'."
+  (let ((known (make-hash-table))
+        (pending (make-hash-table))
+        (first (make-hash-table)))
+    (pcase-dolist (`(,type . ,fields) messages)
+      (let ((id (plist-get fields :frame)))
+        (pcase type
+          ('place-frame
+           (puthash id fields (if (gethash id known) known pending)))
+          ('define-frame
+           (unless (gethash id known)
+             (let ((place (gethash id pending remoteterm-tests--default-place)))
+               (puthash id place known)
+               (unless (gethash id first)
+                 (puthash id place first))
+               (remhash id pending))))
+          ('delete-frame
+           (remhash id known)
+           (remhash id pending)))))
+    (cons known first)))
+
+(defun remoteterm-tests--check-places (frames places)
+  "Check that PLACES have the place of each frame of FRAMES in Emacs.
+PLACES is a table of `remoteterm-tests--replay-places'."
+  (dolist (frame frames)
+    (let ((fields (gethash (remoteterm-tests--frame-id frame) places)))
+      (should fields)
+      (should (equal (remoteterm-tests--client-place fields)
+                     (remoteterm-tests--emacs-place frame)))))
+  (remoteterm-tests--do-siblings
+   frames
+   (lambda (a b)
+     (should (eq (< (remoteterm-tests--place-z a places)
+                    (remoteterm-tests--place-z b places))
+                 (frame--z-order-lessp a b))))))
+
+(defun remoteterm-tests--check-distinct-z (frames)
+  "Check that no two siblings in FRAMES have the same z order."
+  (remoteterm-tests--do-siblings
+   frames
+   (lambda (a b)
+     (should (xor (frame--z-order-lessp a b) (frame--z-order-lessp b a))))))
+
+(defun remoteterm-tests--do-siblings (frames function)
+  "Call FUNCTION with each ordered pair of child frames in FRAMES.
+The two frames of a pair have the same parent."
+  (dolist (a frames)
+    (dolist (b frames)
+      (when (and (not (eq a b))
+                 (frame-parent a)
+                 (eq (frame-parent a) (frame-parent b)))
+        (funcall function a b)))))
+
+(defun remoteterm-tests--place-z (frame places)
+  "Return the z value of FRAME in PLACES."
+  (plist-get (gethash (remoteterm-tests--frame-id frame) places) :z))
+
+(defun remoteterm-tests--client-place (fields)
+  "Return the part of the place FIELDS that a client uses.
+The value is (PARENT VISIBLE X Y).  X and Y are nil for a frame with
+no parent, because a client does not use them."
+  (let ((child (/= (plist-get fields :parent) 0)))
+    (list (plist-get fields :parent)
+          (plist-get fields :visible)
+          (and child (plist-get fields :x))
+          (and child (plist-get fields :y)))))
+
+(defun remoteterm-tests--emacs-place (frame)
+  "Return the place of FRAME in Emacs, as `remoteterm-tests--client-place'."
+  (let ((parent (frame-parent frame)))
+    (list (if parent (remoteterm-tests--frame-id parent) 0)
+          (if (eq (frame-visible-p frame) t) 1 0)
+          (and parent (car (frame-position frame)))
+          (and parent (cdr (frame-position frame))))))
+
 ;;;; Colors
 
 (defun remoteterm-tests--rgb ()

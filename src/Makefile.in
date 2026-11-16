@@ -174,8 +174,8 @@ DBUS_OBJ = @DBUS_OBJ@
 XWIDGETS_OBJ = @XWIDGETS_OBJ@
 
 ## remotefns.o, rdproto.o, remoteterm.o, remoteproc.o, remoteinput.o,
-## remotefonts.o, remoteclip.o, rdchunk.o, rdpng.o, and remoteimage.o
-## if configured --with-remote-display, else empty.
+## remotefonts.o, remoteclip.o, rdchunk.o, rdpng.o, remoteimage.o, and
+## remoteplace.o if configured --with-remote-display, else empty.
 ## remotetest.o too if also configured --enable-remote-display-tests.
 REMOTE_DISPLAY_OBJ = @REMOTE_DISPLAY_OBJ@
 

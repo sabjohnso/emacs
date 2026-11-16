@@ -177,5 +177,37 @@ before it ends, and the last part ends at SIZE."
     (cl-mapcar (lambda (start end) (cons start (- end start)))
                starts (append cuts (list size)))))
 
+(defun rd-gen-child-frame-ops (max-length)
+  "Return a list of up to MAX-LENGTH random operations on child frames.
+An index I names a frame in a list that the test keeps: 0 is a root
+frame, and the children follow in the order that the operations make
+them.  The test takes I modulo the length of its list.  Each operation
+is one of these lists:
+  (make I LEFT TOP VISIBLE)  make a child of frame I at LEFT, TOP.
+  (move I X Y)               call `set-frame-position' on frame I.
+  (visible I FLAG)           show frame I if FLAG, else hide it.
+  (raise I) and (lower I)    raise or lower frame I.
+  (reparent I J)             give frame I the parent J, or no parent
+                             if J is nil.
+  (delete I)                 delete frame I.  I is not 0.
+  (show I)                   make the client know frame I.
+A position can be negative."
+  (rd-gen-list #'rd-gen--child-frame-op max-length))
+
+(defun rd-gen--child-frame-op ()
+  "Return one random operation of `rd-gen-child-frame-ops'."
+  (cl-flet ((index () (rd-gen-integer 0 7))
+            (offset () (rd-gen-integer -60 60))
+            (flag () (= (rd-gen-random 2) 0)))
+    (pcase (rd-gen-random 8)
+      (0 (list 'make (index) (offset) (offset) (flag)))
+      (1 (list 'move (index) (offset) (offset)))
+      (2 (list 'visible (index) (flag)))
+      (3 (list 'raise (index)))
+      (4 (list 'lower (index)))
+      (5 (list 'reparent (index) (and (flag) (index))))
+      (6 (list 'delete (rd-gen-integer 1 7)))
+      (7 (list 'show (index))))))
+
 (provide 'remote-display-generators)
 ;;; remote-display-generators.el ends here
