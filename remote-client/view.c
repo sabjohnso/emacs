@@ -49,13 +49,14 @@ struct rc_view
   struct open_menu *menu;
 };
 
-/* The popup menu SERIAL of VIEW in the window of FRAME, and its GTK
-   menu.  ANSWERED is true after the view sent the choice of the menu.
+/* The popup menu SERIAL of VIEW for FRAME in the window of the root
+   frame ROOT, and its GTK menu.  ANSWERED is true after the view sent the choice of the menu.
    CLOSE_SOURCE is the idle source that closes the menu, or 0.  */
 struct open_menu
 {
   struct rc_view *view;
   uint32_t frame;
+  uint32_t root;
   uint32_t serial;
   GtkWidget *menu;
   bool answered;
@@ -128,9 +129,12 @@ static struct target pointer_target (const struct rc_window *, double,
 static void note_button (struct rc_window *, const GdkEventButton *,
 			 uint32_t);
 static void note_trigger (struct rc_window *, GdkEvent *);
+static bool menu_anchor (const struct rc_view *,
+			 const struct rd_show_menu *, struct rc_window **,
+			 GdkRectangle *);
 static struct open_menu *popup_menu (struct rc_window *,
 				     const struct rd_show_menu *,
-				     const struct rc_menu *);
+				     const struct rc_menu *, GdkRectangle);
 static GdkEvent *menu_trigger (struct rc_window *);
 static void add_entries (struct open_menu *, GtkMenuShell *,
 			 const struct rc_menu_node *, size_t);
@@ -266,9 +270,10 @@ rc_view_show_menu (struct rc_view *view, const struct rd_show_menu *show,
 		   const struct rc_menu *menu)
 {
   close_menu (view);
-  struct rc_window *window = rc_table_get (&view->windows, show->frame);
-  if (menu && window)
-    view->menu = popup_menu (window, show, menu);
+  struct rc_window *window;
+  GdkRectangle position;
+  if (menu && menu_anchor (view, show, &window, &position))
+    view->menu = popup_menu (window, show, menu, position);
   else
     send_choice (view, show->serial, false, 0);
 }
@@ -325,11 +330,13 @@ remove_frame (struct rc_view *view, uint32_t frame)
   remove_window (view, frame);
 }
 
-/* Remove the window of FRAME, if it has one.  */
+/* Remove the window of FRAME, if it has one.  Dismiss the open menu
+   if it is for FRAME, or if it is in the window of FRAME.  */
 static void
 remove_window (struct rc_view *view, uint32_t frame)
 {
-  if (view->menu && view->menu->frame == frame)
+  if (view->menu
+      && (view->menu->frame == frame || view->menu->root == frame))
     dismiss_menu (view);
   struct rc_window *window = rc_table_remove (&view->windows, frame);
   if (window)
@@ -642,17 +649,35 @@ note_trigger (struct rc_window *window, GdkEvent *event)
   window->trigger = gdk_event_copy (event);
 }
 
+/* Find the window that shows the frame of SHOW: the window of its
+   root.  Put the window in WINDOW, and the point of SHOW in the
+   coordinates of the window in POSITION, and return true.  Return
+   false if no window shows the frame.  */
+static bool
+menu_anchor (const struct rc_view *view, const struct rd_show_menu *show,
+	     struct rc_window **window, GdkRectangle *position)
+{
+  uint32_t root = rc_stack_root (view->stack, show->frame);
+  *window = root ? rc_table_get (&view->windows, root) : NULL;
+  int64_t x, y;
+  if (!*window
+      || !rc_stack_origin (view->stack, root, show->frame, &x, &y))
+    return false;
+  *position = (GdkRectangle) { x + show->x, y + show->y, 1, 1 };
+  return true;
+}
+
 /* Make the GTK menu of the tree MENU of the show-menu message SHOW,
-   and pop it up at the position of SHOW in WINDOW.  Return the open
+   and pop it up at POSITION in WINDOW.  Return the open
    menu.  If the window system refuses the menu, GTK does not show the
    menu, or hides it at once.  Then the view sends a dismissal.  */
 static struct open_menu *
 popup_menu (struct rc_window *window, const struct rd_show_menu *show,
-	    const struct rc_menu *menu)
+	    const struct rc_menu *menu, GdkRectangle position)
 {
   struct open_menu *open = g_new0 (struct open_menu, 1);
-  *open = (struct open_menu) { window->view, show->frame, show->serial,
-			       gtk_menu_new (), false, 0 };
+  *open = (struct open_menu) { window->view, show->frame, window->frame,
+			       show->serial, gtk_menu_new (), false, 0 };
   GtkMenuShell *shell = GTK_MENU_SHELL (open->menu);
   if (show->ntitle > 0)
     {
@@ -665,7 +690,6 @@ popup_menu (struct rc_window *window, const struct rd_show_menu *show,
   add_entries (open, shell, menu->children, menu->nchildren);
   g_signal_connect (open->menu, "hide", G_CALLBACK (menu_hidden), open);
   gtk_widget_show_all (open->menu);
-  GdkRectangle position = { show->x, show->y, 1, 1 };
   GdkEvent *trigger = menu_trigger (window);
   gtk_menu_popup_at_rect (GTK_MENU (open->menu),
 			  gtk_widget_get_window (window->area), &position,

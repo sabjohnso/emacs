@@ -95,13 +95,14 @@ extern void rc_view_set_clipboard (struct rc_view *view, const char *text,
 extern void rc_view_request_clipboard (struct rc_view *view);
 
 /* Show the popup menu MENU of the show-menu message SHOW in the window
-   of its frame, with the title of SHOW.  MENU is the tree of the
+   of the root of its frame, at the point of SHOW in the frame, with
+   the title of SHOW.  MENU is the tree of the
    entries of SHOW (rc_menu_show), or NULL if the entries are bad.
    VIEW does not keep MENU.  First close the menu that is open, with
    no choice.  Later, the view sends one menu-choice message for SHOW:
    the item that the user selects, or a dismissal (CHOSEN 0) if the
-   menu closes with no selection.  If MENU is NULL or the frame has no
-   window, the view sends the dismissal at once.  */
+   menu closes with no selection.  If MENU is NULL or no window shows
+   the frame, the view sends the dismissal at once.  */
 extern void rc_view_show_menu (struct rc_view *view,
 			       const struct rd_show_menu *show,
 			       const struct rc_menu *menu);

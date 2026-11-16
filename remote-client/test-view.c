@@ -32,7 +32,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    area of the child goes to the child, in the coordinates of the
    child.  As with the implicit grab of X, the input after a press in
    the child goes to the child until the release of the last button,
-   also outside the child.
+   also outside the child.  A popup menu of the child shows on the
+   window of the root, at the point of the menu in the child.
 
    The menu law holds for each random menu of menugen.h, with a random
    title.  The labels, keys and titles have random bytes, or UTF-8 that
@@ -172,6 +173,9 @@ static bool no_window_example (void);
 static bool bad_entries_example (void);
 static bool remove_menu_frame_example (void);
 static bool refused_grab_example (void);
+static bool child_menu_example (void);
+static bool remove_menu_root_example (void);
+static bool menu_origin (GtkMenuShell *, int *, int *);
 static bool trigger_example (GdkEventType);
 static bool widgets_example (void);
 static bool menu_laws (void);
@@ -263,7 +267,8 @@ main (int argc, char **argv)
 		 && close_menu_example ()
 		 && replace_example () && no_window_example ()
 		 && bad_entries_example () && remove_menu_frame_example ()
-		 && refused_grab_example ()
+		 && refused_grab_example () && child_menu_example ()
+		 && remove_menu_root_example ()
 		 && trigger_example (GDK_BUTTON_PRESS)
 		 && trigger_example (GDK_KEY_PRESS)
 		 && widgets_example () && menu_laws ());
@@ -937,6 +942,68 @@ refused_grab_example (void)
     fprintf (stderr, "test-view: a menu with a refused grab is wrong\n");
   end_example (example);
   return passed;
+}
+
+/* The server shows a menu for the child frame at the point 10, 20 of
+   the child.  The child has no window, so the view must show the menu
+   on the window of the root, at that point plus the position of the
+   child in the root.  */
+static bool
+child_menu_example (void)
+{
+  struct example *example = start_child_example ();
+  show_menu (example, CHILD, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  GtkMenuShell *menu = wait_for_menu ();
+  int x = 0, y = 0;
+  bool passed = (menu && menu_origin (menu, &x, &y)
+		 && x == CHILD_X + 10 && y == CHILD_Y + 20
+		 && choice_count (&example->sent) == 0);
+  if (!passed)
+    fprintf (stderr, "test-view: a menu of a child frame is wrong: "
+	     "open %d at %d, %d, %d choices\n", menu != NULL, x, y,
+	     choice_count (&example->sent));
+  end_example (example);
+  return passed;
+}
+
+/* The server removes the root frame while the menu of its child frame
+   is open.  The window of the menu goes away, so the view must close
+   the menu and send one dismissal.  */
+static bool
+remove_menu_root_example (void)
+{
+  struct example *example = start_child_example ();
+  show_menu (example, CHILD, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  remove_frame (example);
+  passed = passed && wait_for_choice (example, 5, 0, 0);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu of a child of a removed root is "
+	     "wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* Put in X and Y the position of the window of MENU in the drawing
+   area of the window of the example, and return true.  Return false
+   if MENU or the area has no window.  */
+static bool
+menu_origin (GtkMenuShell *menu, int *x, int *y)
+{
+  GdkWindow *popup
+    = gtk_widget_get_window (gtk_widget_get_toplevel (GTK_WIDGET (menu)));
+  GdkWindow *area
+    = gtk_widget_get_window (gtk_bin_get_child (GTK_BIN (frame_window ())));
+  if (!popup || !area)
+    return false;
+  int popup_x, popup_y, area_x, area_y;
+  gdk_window_get_origin (popup, &popup_x, &popup_y);
+  gdk_window_get_origin (area, &area_x, &area_y);
+  *x = popup_x - area_x;
+  *y = popup_y - area_y;
+  return true;
 }
 
 /* The window gets a press of the type TYPE, a key or a button, and
