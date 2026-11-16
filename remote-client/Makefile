@@ -196,7 +196,7 @@ test-tls: test-tls.o tls.o stream.o
 test-link: test-link.o link.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-view: test-view.o view.o input.o sizes.o stack.o compose.o \
+test-view: test-view.o view.o input.o sizes.o stack.o compose.o menu.o \
   $(RENDER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
@@ -236,7 +236,7 @@ hashfonts.o test-fonts.o client.o: hashfonts.h render.h ../src/rdproto.h
 hashfonts.o hashcache.o client.o: hashcache.h ../src/rdproto.h
 fontstore.o test-fontstore.o client.o: fontstore.h fonts.h render.h \
   hashcache.h ../src/rdproto.h
-client.o view.o test-view.o: view.h reader.h fonts.h render.h \
+client.o view.o test-view.o: view.h menu.h reader.h fonts.h render.h \
   ../src/rdproto.h
 view.o client.o: stack.h compose.h
 client.o: ../src/rdchunk.h

@@ -23,7 +23,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
    Each example shows a frame in a view, does to its window what a
    user or a window manager does, and waits for the message that the
-   view must send.
+   view must send.  The menu examples also show a popup menu, and do to
+   it what a user, the server, or the window system does.
 
    The examples of child frames use the root frame 1 of 300 by 200 and
    its child frame 2 of CHILD_WIDTH by CHILD_HEIGHT at CHILD_X,
@@ -42,6 +43,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <gtk/gtk.h>
 
+#include "menu.h"
 #include "view.h"
 
 /* The longest time that an example waits for a message, in
@@ -62,6 +64,36 @@ struct sent
   uint32_t closed[SENT_LIMIT];
   int closed_count;
 };
+
+/* One entry of a menu of an example.  */
+struct menu_entry
+{
+  uint8_t kind;
+  uint8_t flags;
+  uint32_t id;
+  const char *label;
+  const char *key;
+};
+
+/* A menu with each kind of entry.  */
+enum { ITEM = RD_MENU_KIND_ITEM, SEPARATOR = RD_MENU_KIND_SEPARATOR,
+       START = RD_MENU_KIND_SUBMENU_START, END = RD_MENU_KIND_SUBMENU_END,
+       ENABLED = RD_MENU_FLAG_ENABLED, TOGGLE = RD_MENU_FLAG_TOGGLE,
+       RADIO = RD_MENU_FLAG_RADIO, SELECTED = RD_MENU_FLAG_SELECTED };
+static const struct menu_entry file_menu[] =
+  {
+    { ITEM, ENABLED, 1, "Open", "C-x C-f" },
+    { ITEM, ENABLED, 2, "Save", "" },
+    { SEPARATOR, 0, 0, "", "" },
+    { START, ENABLED, 0, "More", "" },
+    { ITEM, ENABLED, 3, "Inner", "" },
+    { END, 0, 0, "", "" },
+    { ITEM, 0, 4, "Disabled", "" },
+    { ITEM, ENABLED | TOGGLE | SELECTED, 5, "Toggle on", "" },
+    { ITEM, ENABLED | TOGGLE, 6, "Toggle off", "" },
+    { ITEM, ENABLED | RADIO | SELECTED, 7, "Radio", "" },
+    { ITEM, ENABLED, 8, "Bad \xff text", "" },
+  };
 
 /* A frame of an example: its view, and the messages of the view.  */
 struct example
@@ -95,6 +127,31 @@ static int toplevel_count (void);
 static void send_pointer (GdkEventType, int, int, guint, GdkModifierType);
 static bool wait_for_pointer (struct example *, enum rd_type, uint32_t,
 			      int, int, bool);
+static bool choose_example (const char *, uint32_t, bool);
+static bool dismiss_example (const char *, void (*) (GtkMenuShell *));
+static bool hide_example (void);
+static bool other_hide_example (void);
+static bool replace_example (void);
+static bool no_window_example (void);
+static bool bad_entries_example (void);
+static bool remove_menu_frame_example (void);
+static bool refused_grab_example (void);
+static bool trigger_example (GdkEventType);
+static bool widgets_example (void);
+static void popdown (GtkMenuShell *);
+static void show_menu (struct example *, uint32_t, uint32_t,
+		       const struct menu_entry *, size_t, const char *);
+static GtkMenuShell *wait_for_menu (void);
+static GtkMenuShell *open_menu (void);
+static GtkWidget *find_item (GtkMenuShell *, const char *);
+static bool has_label_p (GtkWidget *, const char *);
+static const char *first_label (GtkWidget *);
+static bool wait_for_choice (struct example *, uint32_t, uint8_t, uint32_t);
+static int choice_count (const struct sent *);
+static void send_input (GdkEventType, guint32);
+static void release_button (GtkMenuShell *, guint32);
+static GdkWindow *grab_pointer (void);
+static void ungrab_pointer (GdkWindow *);
 static bool title_p (const char *);
 static void remove_frame (struct example *);
 static void run_for (gint64);
@@ -123,6 +180,9 @@ main (int argc, char **argv)
       fprintf (stderr, "test-view: no display; run it in xvfb-run\n");
       return 1;
     }
+  /* A warning of GTK, such as a popup menu with no trigger event, is
+     a failure.  */
+  g_log_set_always_fatal (G_LOG_LEVEL_CRITICAL | G_LOG_LEVEL_WARNING);
   bool passed = (show_example (300, 200) && show_example (640, 480)
 		 && focus_example (true) && focus_example (false)
 		 && resize_example (300, 200, 420, 260)
@@ -133,7 +193,19 @@ main (int argc, char **argv)
 		 && count_example () && close_example ()
 		 && child_window_example () && child_input_example ()
 		 && grab_example () && hide_root_example ()
-		 && forget_child_example ());
+		 && forget_child_example ()
+		 && choose_example ("Save", 2, false)
+		 && choose_example ("Save", 2, true)
+		 && choose_example ("Inner", 3, true)
+		 && dismiss_example ("cancel", gtk_menu_shell_cancel)
+		 && dismiss_example ("popdown", popdown)
+		 && hide_example () && other_hide_example ()
+		 && replace_example () && no_window_example ()
+		 && bad_entries_example () && remove_menu_frame_example ()
+		 && refused_grab_example ()
+		 && trigger_example (GDK_BUTTON_PRESS)
+		 && trigger_example (GDK_KEY_PRESS)
+		 && widgets_example ());
   if (!passed)
     return 1;
   printf ("test-view: the examples passed\n");
@@ -307,8 +379,8 @@ start_example (uint32_t width, uint32_t height)
   return example;
 }
 
-/* Free EXAMPLE.  The view must destroy its window, so that the next
-   example has only its own window.  */
+/* Free EXAMPLE.  The view must destroy its window and its menu, so
+   that the next example has only its own window.  */
 static void
 end_example (struct example *example)
 {
@@ -317,7 +389,9 @@ end_example (struct example *example)
   g_free (example);
   while (g_main_context_iteration (NULL, false))
     ;
-  if (frame_window ())
+  GList *windows = gtk_window_list_toplevels ();
+  g_list_free (windows);
+  if (windows)
     {
       fprintf (stderr, "test-view: a window stays after its view\n");
       abort ();
@@ -596,6 +670,490 @@ wait_for_pointer (struct example *example, enum rd_type type,
   return wait_for_message (example, &expected);
 }
 
+/* The view shows a menu, and the user selects the item LABEL with
+   the id ID.  If SHELL, the selection comes as from a click: the menu
+   shell first closes the menu and then activates the item.  The view
+   must send one choice of ID, and close the menu.  */
+static bool
+choose_example (const char *label, uint32_t id, bool shell)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  GtkMenuShell *menu = wait_for_menu ();
+  GtkWidget *item = menu ? find_item (menu, label) : NULL;
+  if (item && shell)
+    gtk_menu_shell_activate_item (GTK_MENU_SHELL
+				  (gtk_widget_get_parent (item)),
+				  item, true);
+  else if (item)
+    gtk_widget_activate (item);
+  bool passed = item && wait_for_choice (example, 5, 1, id);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a choice of %s (shell %d) is wrong\n",
+	     label, shell);
+  end_example (example);
+  return passed;
+}
+
+/* The view shows a menu, and CLOSE closes it with no selection, as
+   the user or the window system does.  The view must send one
+   dismissal.  */
+static bool
+dismiss_example (const char *name, void (*close) (GtkMenuShell *))
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  GtkMenuShell *menu = wait_for_menu ();
+  if (menu)
+    close (menu);
+  bool passed = menu && wait_for_choice (example, 5, 0, 0);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a %s of a menu is wrong\n", name);
+  end_example (example);
+  return passed;
+}
+
+/* The server hides the menu that the view shows.  The view must close
+   the menu and must send no choice.  */
+static bool
+hide_example (void)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  rc_view_hide_menu (example->view, 5);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 0 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a hide of a menu is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server hides a menu that is not open.  The view must keep the
+   open menu, and send its choice later.  */
+static bool
+other_hide_example (void)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  rc_view_hide_menu (example->view, 4);
+  run_for (WAIT_LIMIT / 10);
+  GtkMenuShell *menu = open_menu ();
+  passed = passed && menu && choice_count (&example->sent) == 0;
+  if (menu)
+    gtk_menu_shell_cancel (menu);
+  passed = passed && wait_for_choice (example, 5, 0, 0);
+  if (!passed)
+    fprintf (stderr, "test-view: a hide of another menu is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server shows a menu while another menu is open.  The view must
+   close the old menu with no choice, and show the new menu.  */
+static bool
+replace_example (void)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  show_menu (example, 1, 6, file_menu, 2, "");
+  GtkMenuShell *menu = wait_for_menu ();
+  passed = passed && menu && !find_item (menu, "Disabled");
+  if (menu)
+    gtk_menu_shell_cancel (menu);
+  passed = passed && wait_for_choice (example, 6, 0, 0);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu after a menu is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server shows a menu for a frame with no window.  The view must
+   send a dismissal at once.  */
+static bool
+no_window_example (void)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 2, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  struct rd_message dismissal =
+    { .type = RD_MENU_CHOICE, .u.menu_choice = { .serial = 5 } };
+  bool passed = (sent_p (&example->sent, &dismissal)
+		 && choice_count (&example->sent) == 1);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu with no window is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server shows a menu whose entries do not nest correctly.  The
+   view must send a dismissal at once.  */
+static bool
+bad_entries_example (void)
+{
+  static const struct menu_entry bad[] = { { END, 0, 0, "", "" } };
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, bad, G_N_ELEMENTS (bad), "");
+  struct rd_message dismissal =
+    { .type = RD_MENU_CHOICE, .u.menu_choice = { .serial = 5 } };
+  bool passed = (sent_p (&example->sent, &dismissal)
+		 && choice_count (&example->sent) == 1);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu with bad entries is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server removes the frame of the open menu.  The view must close
+   the menu and send one dismissal.  */
+static bool
+remove_menu_frame_example (void)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  remove_frame (example);
+  passed = passed && wait_for_choice (example, 5, 0, 0);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu of a removed frame is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* Another program of the desktop has a grab of the pointer, and the
+   server shows a menu.  The window system refuses the grab of the
+   menu, as a compositor can, so GTK does not show the menu.  The view
+   must send one dismissal.  */
+static bool
+refused_grab_example (void)
+{
+  struct example *example = start_example (300, 200);
+  GdkWindow *grab = grab_pointer ();
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = grab && wait_for_choice (example, 5, 0, 0);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (grab)
+    ungrab_pointer (grab);
+  if (!passed)
+    fprintf (stderr, "test-view: a menu with a refused grab is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The window gets a press of the type TYPE, a key or a button, and
+   then the server shows a menu.  The view must give the press to GTK
+   as the trigger of the menu.  GTK then ignores a release of a button
+   in the first 500 milliseconds after the press, so the click that
+   opens a menu does not close it.  With the wrong trigger time, GTK
+   closes the menu and the view sends a dismissal.  */
+static bool
+trigger_example (GdkEventType type)
+{
+  enum { PRESS_TIME = 100000 };
+  struct example *example = start_example (300, 200);
+  send_input (type, PRESS_TIME);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  GtkMenuShell *menu = wait_for_menu ();
+  if (menu)
+    release_button (menu, PRESS_TIME + 100);
+  run_for (WAIT_LIMIT / 10);
+  bool passed = (menu && open_menu () == menu
+		 && choice_count (&example->sent) == 0);
+  if (!passed)
+    fprintf (stderr, "test-view: the trigger %d of a menu is wrong\n", type);
+  end_example (example);
+  return passed;
+}
+
+/* The view shows a menu with a title and each kind of entry.  The
+   widgets of the menu must show the title, the flags, the key
+   equivalents, and the submenus of the entries, and show a bad UTF-8
+   label as valid UTF-8.  */
+static bool
+widgets_example (void)
+{
+  struct example *example = start_example (300, 200);
+  show_menu (example, 1, 5, file_menu, G_N_ELEMENTS (file_menu), "Files");
+  GtkMenuShell *menu = wait_for_menu ();
+  bool passed = menu != NULL;
+  if (menu)
+    {
+      GList *children = gtk_container_get_children (GTK_CONTAINER (menu));
+      GtkWidget *title = children ? children->data : NULL;
+      passed = (title && has_label_p (title, "Files")
+		&& !gtk_widget_get_sensitive (title));
+      g_list_free (children);
+      GtkWidget *open = find_item (menu, "Open");
+      GtkWidget *more = find_item (menu, "More");
+      GtkWidget *on = find_item (menu, "Toggle on");
+      GtkWidget *off = find_item (menu, "Toggle off");
+      GtkWidget *radio = find_item (menu, "Radio");
+      GtkWidget *bad = find_item (menu, "Bad \357\277\275 text");
+      passed = (passed && open && has_label_p (open, "C-x C-f")
+		&& gtk_widget_get_sensitive (open)
+		&& !gtk_widget_get_sensitive (find_item (menu, "Disabled"))
+		&& more && gtk_menu_item_get_submenu (GTK_MENU_ITEM (more))
+		&& find_item (menu, "Inner")
+		&& GTK_IS_CHECK_MENU_ITEM (on)
+		&& gtk_check_menu_item_get_active (GTK_CHECK_MENU_ITEM (on))
+		&& GTK_IS_CHECK_MENU_ITEM (off)
+		&& !gtk_check_menu_item_get_active (GTK_CHECK_MENU_ITEM (off))
+		&& GTK_IS_CHECK_MENU_ITEM (radio)
+		&& gtk_check_menu_item_get_draw_as_radio
+		     (GTK_CHECK_MENU_ITEM (radio))
+		&& !GTK_IS_CHECK_MENU_ITEM (open) && bad);
+    }
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 0;
+  if (!passed)
+    fprintf (stderr, "test-view: the widgets of a menu are wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* Close MENU as the window system does, with no menu-shell signal.  */
+static void
+popdown (GtkMenuShell *menu)
+{
+  gtk_menu_popdown (GTK_MENU (menu));
+}
+
+/* Give the N entries ENTRIES of the menu SERIAL, with the title TITLE,
+   to the view of EXAMPLE at the position 10, 20 of FRAME, as the
+   client does.  */
+static void
+show_menu (struct example *example, uint32_t frame, uint32_t serial,
+	   const struct menu_entry *entries, size_t n, const char *title)
+{
+  struct rc_menu_model model = { 0 };
+  for (size_t i = 0; i < n; i++)
+    {
+      struct rd_menu_item item =
+	{ .serial = serial, .kind = entries[i].kind,
+	  .flags = entries[i].flags, .id = entries[i].id,
+	  .nlabel = strlen (entries[i].label),
+	  .nkey = strlen (entries[i].key) };
+      memcpy (item.label, entries[i].label, item.nlabel);
+      memcpy (item.key, entries[i].key, item.nkey);
+      rc_menu_add (&model, &item);
+    }
+  struct rd_show_menu show =
+    { .frame = frame, .serial = serial, .x = 10, .y = 20,
+      .ntitle = strlen (title) };
+  memcpy (show.title, title, show.ntitle);
+  struct rc_menu *menu = rc_menu_show (&model, serial);
+  rc_view_show_menu (example->view, &show, menu);
+  rc_menu_free (menu);
+  rc_menu_model_free (&model);
+}
+
+/* Run the main loop until a menu is open, or until WAIT_LIMIT.
+   Return the menu, or NULL.  */
+static GtkMenuShell *
+wait_for_menu (void)
+{
+  gint64 end = g_get_monotonic_time () + WAIT_LIMIT;
+  while (!open_menu () && g_get_monotonic_time () < end)
+    if (!g_main_context_iteration (NULL, false))
+      g_usleep (1000);
+  while (g_main_context_iteration (NULL, false))
+    ;
+  return open_menu ();
+}
+
+/* Return the visible popup menu that is not a submenu, or NULL.  */
+static GtkMenuShell *
+open_menu (void)
+{
+  GList *windows = gtk_window_list_toplevels ();
+  GtkMenuShell *menu = NULL;
+  for (GList *w = windows; w && !menu; w = w->next)
+    {
+      GtkWidget *child = gtk_bin_get_child (GTK_BIN (w->data));
+      if (GTK_IS_MENU (child) && gtk_widget_get_visible (child)
+	  && !gtk_menu_get_attach_widget (GTK_MENU (child)))
+	menu = GTK_MENU_SHELL (child);
+    }
+  g_list_free (windows);
+  return menu;
+}
+
+/* Return the item of SHELL or of its submenus whose first label is
+   LABEL, or NULL.  */
+static GtkWidget *
+find_item (GtkMenuShell *shell, const char *label)
+{
+  GList *children = gtk_container_get_children (GTK_CONTAINER (shell));
+  GtkWidget *found = NULL;
+  for (GList *c = children; c && !found; c = c->next)
+    {
+      const char *text = first_label (c->data);
+      GtkWidget *submenu
+	= gtk_menu_item_get_submenu (GTK_MENU_ITEM (c->data));
+      if (text && strcmp (text, label) == 0)
+	found = c->data;
+      else if (submenu)
+	found = find_item (GTK_MENU_SHELL (submenu), label);
+    }
+  g_list_free (children);
+  return found;
+}
+
+/* Return true if WIDGET is a label with the text TEXT, or has one.  */
+static bool
+has_label_p (GtkWidget *widget, const char *text)
+{
+  if (GTK_IS_LABEL (widget))
+    return strcmp (gtk_label_get_text (GTK_LABEL (widget)), text) == 0;
+  if (!GTK_IS_CONTAINER (widget))
+    return false;
+  GList *children = gtk_container_get_children (GTK_CONTAINER (widget));
+  bool found = false;
+  for (GList *c = children; c && !found; c = c->next)
+    found = has_label_p (c->data, text);
+  g_list_free (children);
+  return found;
+}
+
+/* Return the text of the first label of WIDGET, or NULL.  */
+static const char *
+first_label (GtkWidget *widget)
+{
+  if (GTK_IS_LABEL (widget))
+    return gtk_label_get_text (GTK_LABEL (widget));
+  if (!GTK_IS_CONTAINER (widget))
+    return NULL;
+  GList *children = gtk_container_get_children (GTK_CONTAINER (widget));
+  const char *text = NULL;
+  for (GList *c = children; c && !text; c = c->next)
+    text = first_label (c->data);
+  g_list_free (children);
+  return text;
+}
+
+/* Run the main loop until the view of EXAMPLE sent the menu choice
+   SERIAL, CHOSEN, ID, or until WAIT_LIMIT.  Return true if the view
+   sent it.  */
+static bool
+wait_for_choice (struct example *example, uint32_t serial, uint8_t chosen,
+		 uint32_t id)
+{
+  struct rd_message expected =
+    { .type = RD_MENU_CHOICE,
+      .u.menu_choice = { .serial = serial, .chosen = chosen, .id = id } };
+  return wait_for_message (example, &expected);
+}
+
+/* Return the number of menu choices in SENT.  */
+static int
+choice_count (const struct sent *sent)
+{
+  int count = 0;
+  for (int i = 0; i < sent->count; i++)
+    count += sent->messages[i].type == RD_MENU_CHOICE;
+  return count;
+}
+
+/* Give the window of the example a press of the type TYPE, a key or
+   a button, at the time TIME, as the window system does.  */
+static void
+send_input (GdkEventType type, guint32 time)
+{
+  GtkWidget *window = GTK_WIDGET (frame_window ());
+  GtkWidget *target = (type == GDK_KEY_PRESS ? window
+		       : gtk_bin_get_child (GTK_BIN (window)));
+  GdkEvent *event = gdk_event_new (type);
+  GdkSeat *seat = gdk_display_get_default_seat (gdk_display_get_default ());
+  if (type == GDK_KEY_PRESS)
+    {
+      event->key.window = g_object_ref (gtk_widget_get_window (target));
+      event->key.time = time;
+      event->key.keyval = GDK_KEY_F10;
+      gdk_event_set_device (event, gdk_seat_get_keyboard (seat));
+    }
+  else
+    {
+      event->button.window = g_object_ref (gtk_widget_get_window (target));
+      event->button.time = time;
+      event->button.button = 1;
+      gdk_event_set_device (event, gdk_seat_get_pointer (seat));
+    }
+  gtk_widget_event (target, event);
+  gdk_event_free (event);
+}
+
+/* Give MENU a release of the button 1 at the time TIME, outside its
+   items, as the window system does.  */
+static void
+release_button (GtkMenuShell *menu, guint32 time)
+{
+  GdkEvent *event = gdk_event_new (GDK_BUTTON_RELEASE);
+  GdkSeat *seat = gdk_display_get_default_seat (gdk_display_get_default ());
+  event->button.window
+    = g_object_ref (gtk_widget_get_window (GTK_WIDGET (menu)));
+  event->button.time = time;
+  event->button.button = 1;
+  event->button.x = -100;
+  event->button.y = -100;
+  gdk_event_set_device (event, gdk_seat_get_pointer (seat));
+  gtk_widget_event (GTK_WIDGET (menu), event);
+  gdk_event_free (event);
+}
+
+/* Grab the pointer with a window of a new connection to the display,
+   as another program does.  Return the window, or NULL if the grab
+   failed.  */
+static GdkWindow *
+grab_pointer (void)
+{
+  GdkDisplay *display
+    = gdk_display_open (gdk_display_get_name (gdk_display_get_default ()));
+  if (!display)
+    return NULL;
+  GdkWindowAttr attributes = { .width = 10, .height = 10,
+			       .wclass = GDK_INPUT_OUTPUT,
+			       .window_type = GDK_WINDOW_TOPLEVEL };
+  GdkWindow *window
+    = gdk_window_new (gdk_screen_get_root_window
+		      (gdk_display_get_default_screen (display)),
+		      &attributes, 0);
+  gdk_window_show (window);
+  GdkGrabStatus status
+    = gdk_seat_grab (gdk_display_get_default_seat (display), window,
+		     GDK_SEAT_CAPABILITY_POINTER, false, NULL, NULL, NULL,
+		     NULL);
+  gdk_display_flush (display);
+  if (status == GDK_GRAB_SUCCESS)
+    return window;
+  ungrab_pointer (window);
+  return NULL;
+}
+
+/* Remove WINDOW of grab_pointer and its grab, and close its
+   connection.  */
+static void
+ungrab_pointer (GdkWindow *window)
+{
+  GdkDisplay *display = gdk_window_get_display (window);
+  gdk_window_destroy (window);
+  gdk_display_close (display);
+}
+
 /* Return true if the window of the example has the title TITLE.  */
 static bool
 title_p (const char *title)
@@ -613,13 +1171,16 @@ remove_frame (struct example *example)
   rc_view_update (example->view, rc_apply (example->renderer, &message));
 }
 
-/* Return the window of the frame of the example.  The example has only
-   one window.  */
+/* Return the window of the frame of the example, or NULL.  The
+   example has only one window that is not a popup window.  */
 static GtkWindow *
 frame_window (void)
 {
   GList *windows = gtk_window_list_toplevels ();
-  GtkWindow *window = windows ? windows->data : NULL;
+  GtkWindow *window = NULL;
+  for (GList *w = windows; w && !window; w = w->next)
+    if (gtk_window_get_window_type (w->data) == GTK_WINDOW_TOPLEVEL)
+      window = w->data;
   g_list_free (windows);
   return window;
 }
@@ -661,8 +1222,8 @@ sent_p (const struct sent *sent, const struct rd_message *message)
   return false;
 }
 
-/* Return true if A and B are the same focus, resize, button or motion
-   message.  The time and the modifiers of a button or a motion do not
+/* Return true if A and B are the same focus, resize, button, motion,
+   or menu-choice message.  The time and the modifiers of a button or a motion do not
    count.  */
 static bool
 same_message_p (const struct rd_message *a, const struct rd_message *b)
@@ -687,6 +1248,10 @@ same_message_p (const struct rd_message *a, const struct rd_message *b)
       return (a->u.motion.frame == b->u.motion.frame
 	      && a->u.motion.x == b->u.motion.x
 	      && a->u.motion.y == b->u.motion.y);
+    case RD_MENU_CHOICE:
+      return (a->u.menu_choice.serial == b->u.menu_choice.serial
+	      && a->u.menu_choice.chosen == b->u.menu_choice.chosen
+	      && a->u.menu_choice.id == b->u.menu_choice.id);
     default:
       /* An example waits only for these messages.  */
       abort ();

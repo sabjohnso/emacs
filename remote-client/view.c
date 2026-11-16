@@ -45,6 +45,21 @@ struct rc_view
   gulong owner_handler;
   /* The number of texts that the view put on the clipboard.  */
   unsigned clipboard_sets;
+  /* The popup menu that is open, or NULL.  */
+  struct open_menu *menu;
+};
+
+/* The popup menu SERIAL of VIEW in the window of FRAME, and its GTK
+   menu.  ANSWERED is true after the view sent the choice of the menu.
+   CLOSE_SOURCE is the idle source that closes the menu, or 0.  */
+struct open_menu
+{
+  struct rc_view *view;
+  uint32_t frame;
+  uint32_t serial;
+  GtkWidget *menu;
+  bool answered;
+  guint close_source;
 };
 
 /* A request for the text of the clipboard by VIEW, after SETS texts
@@ -59,7 +74,11 @@ struct clipboard_request
 
 /* The window of the root frame FRAME of VIEW, the drawing area in
    it, and the sizes of the area.  If GRABBED, the pointer input goes
-   to the frame GRAB until the release of the last button.  */
+   to the frame GRAB until the release of the last button.  TRIGGER is
+   a copy of the most recent key or button event of the window, or
+   NULL.  A popup menu gives it to the window system as the cause of
+   the menu, because a window system can refuse a menu with no recent
+   input event.  */
 struct rc_window
 {
   struct rc_view *view;
@@ -69,6 +88,7 @@ struct rc_window
   struct rc_sizes sizes;
   bool grabbed;
   uint32_t grab;
+  GdkEvent *trigger;
 };
 
 /* The frame of a pointer event, and the point of the event in the
@@ -107,6 +127,28 @@ static struct target pointer_target (const struct rc_window *, double,
 				     double);
 static void note_button (struct rc_window *, const GdkEventButton *,
 			 uint32_t);
+static void note_trigger (struct rc_window *, GdkEvent *);
+static struct open_menu *popup_menu (struct rc_window *,
+				     const struct rd_show_menu *,
+				     const struct rc_menu *);
+static GdkEvent *menu_trigger (struct rc_window *);
+static void add_entries (struct open_menu *, GtkMenuShell *,
+			 const struct rc_menu_node *, size_t);
+static GtkWidget *entry_item (struct open_menu *,
+			      const struct rc_menu_node *);
+static GtkWidget *choice_item (struct open_menu *,
+			       const struct rc_menu_node *);
+static GtkWidget *labelled (GtkWidget *, const char *, size_t,
+			    const char *, size_t);
+static GtkWidget *valid_label (const char *, size_t);
+static void item_activated (GtkMenuItem *, gpointer);
+static void menu_hidden (GtkWidget *, gpointer);
+static void schedule_close (struct open_menu *);
+static gboolean menu_closed (gpointer);
+static void dismiss_menu (struct rc_view *);
+static void close_menu (struct rc_view *);
+static void answer (struct open_menu *, bool, uint32_t);
+static void send_choice (struct rc_view *, uint32_t, bool, uint32_t);
 
 /* The input signals of the drawing area of a frame, and their
    functions.  */
@@ -147,6 +189,7 @@ rc_view_new (struct rc_renderer *renderer,
 void
 rc_view_free (struct rc_view *view)
 {
+  close_menu (view);
   if (view->owner_handler)
     g_signal_handler_disconnect (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD),
 				 view->owner_handler);
@@ -218,6 +261,25 @@ rc_view_set_connected (struct rc_view *view, bool connected)
   rc_table_each (&view->windows, set_title, NULL);
 }
 
+void
+rc_view_show_menu (struct rc_view *view, const struct rd_show_menu *show,
+		   const struct rc_menu *menu)
+{
+  close_menu (view);
+  struct rc_window *window = rc_table_get (&view->windows, show->frame);
+  if (menu && window)
+    view->menu = popup_menu (window, show, menu);
+  else
+    send_choice (view, show->serial, false, 0);
+}
+
+void
+rc_view_hide_menu (struct rc_view *view, uint32_t serial)
+{
+  if (view->menu && view->menu->serial == serial)
+    close_menu (view);
+}
+
 int
 rc_view_window_count (const struct rc_view *view)
 {
@@ -261,6 +323,8 @@ remove_frame (struct rc_view *view, uint32_t frame)
 static void
 remove_window (struct rc_view *view, uint32_t frame)
 {
+  if (view->menu && view->menu->frame == frame)
+    dismiss_menu (view);
   struct rc_window *window = rc_table_remove (&view->windows, frame);
   if (window)
     destroy_window (window);
@@ -321,7 +385,7 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
   *window = (struct rc_window) { view, frame,
 				 gtk_window_new (GTK_WINDOW_TOPLEVEL),
 				 gtk_drawing_area_new (),
-				 rc_sizes_new (size), false, 0 };
+				 rc_sizes_new (size), false, 0, NULL };
   g_signal_connect (window->area, "draw", G_CALLBACK (draw_frame), window);
   g_signal_connect (window->window, "delete-event",
 		    G_CALLBACK (close_requested), window);
@@ -374,6 +438,8 @@ destroy_window (void *data)
 {
   struct rc_window *window = data;
   gtk_widget_destroy (window->window);
+  if (window->trigger)
+    gdk_event_free (window->trigger);
   g_free (window);
 }
 
@@ -412,6 +478,7 @@ key_pressed (GtkWidget *widget, GdkEventKey *event, gpointer data)
 {
   (void) widget;
   struct rc_window *window = data;
+  note_trigger (window, (GdkEvent *) event);
   if (event->is_modifier)
     return true;
   struct rd_message message = rc_key_message (window->frame, event->keyval,
@@ -432,6 +499,7 @@ button_changed (GtkWidget *widget, GdkEventButton *event, gpointer data)
   if (event->type != GDK_BUTTON_PRESS && event->type != GDK_BUTTON_RELEASE)
     return true;
   struct rc_window *window = data;
+  note_trigger (window, (GdkEvent *) event);
   struct target target = pointer_target (window, event->x, event->y);
   note_button (window, event, target.frame);
   struct rd_message message
@@ -556,6 +624,254 @@ static void
 send (struct rc_window *window, const struct rd_message *message)
 {
   window->view->functions.send (window->view->functions.data, message);
+}
+
+/* Keep a copy of EVENT, a key or a button event of WINDOW, as the
+   trigger of a popup menu.  */
+static void
+note_trigger (struct rc_window *window, GdkEvent *event)
+{
+  if (window->trigger)
+    gdk_event_free (window->trigger);
+  window->trigger = gdk_event_copy (event);
+}
+
+/* Make the GTK menu of the tree MENU of the show-menu message SHOW,
+   and pop it up at the position of SHOW in WINDOW.  Return the open
+   menu.  If the window system refuses the menu, GTK does not show the
+   menu, or hides it at once.  Then the view sends a dismissal.  */
+static struct open_menu *
+popup_menu (struct rc_window *window, const struct rd_show_menu *show,
+	    const struct rc_menu *menu)
+{
+  struct open_menu *open = g_new0 (struct open_menu, 1);
+  *open = (struct open_menu) { window->view, show->frame, show->serial,
+			       gtk_menu_new (), false, 0 };
+  GtkMenuShell *shell = GTK_MENU_SHELL (open->menu);
+  if (show->ntitle > 0)
+    {
+      GtkWidget *title = labelled (gtk_menu_item_new (),
+				   (const char *) show->title, show->ntitle,
+				   "", 0);
+      gtk_widget_set_sensitive (title, false);
+      gtk_menu_shell_append (shell, title);
+    }
+  add_entries (open, shell, menu->children, menu->nchildren);
+  g_signal_connect (open->menu, "hide", G_CALLBACK (menu_hidden), open);
+  gtk_widget_show_all (open->menu);
+  GdkRectangle position = { show->x, show->y, 1, 1 };
+  GdkEvent *trigger = menu_trigger (window);
+  gtk_menu_popup_at_rect (GTK_MENU (open->menu),
+			  gtk_widget_get_window (window->area), &position,
+			  GDK_GRAVITY_NORTH_WEST, GDK_GRAVITY_NORTH_WEST,
+			  trigger);
+  gdk_event_free (trigger);
+  if (!gtk_widget_get_visible (gtk_widget_get_toplevel (open->menu)))
+    schedule_close (open);
+  return open;
+}
+
+/* Return a new event that is the cause of a popup menu in WINDOW: a
+   copy of the most recent key or button event of WINDOW.  If WINDOW
+   has no such event, return a press of the pointer at the current
+   time.  */
+static GdkEvent *
+menu_trigger (struct rc_window *window)
+{
+  if (window->trigger)
+    return gdk_event_copy (window->trigger);
+  GdkEvent *event = gdk_event_new (GDK_BUTTON_PRESS);
+  GdkSeat *seat
+    = gdk_display_get_default_seat (gtk_widget_get_display (window->area));
+  event->button.window = g_object_ref (gtk_widget_get_window (window->area));
+  event->button.time = GDK_CURRENT_TIME;
+  event->button.button = 1;
+  gdk_event_set_device (event, gdk_seat_get_pointer (seat));
+  return event;
+}
+
+/* Append to SHELL the items of the N nodes NODES of the menu OPEN.  */
+static void
+add_entries (struct open_menu *open, GtkMenuShell *shell,
+	     const struct rc_menu_node *nodes, size_t n)
+{
+  for (size_t i = 0; i < n; i++)
+    gtk_menu_shell_append (shell, entry_item (open, &nodes[i]));
+}
+
+/* Return the menu item of NODE of the menu OPEN.  The item is
+   insensitive if NODE is not enabled.  */
+static GtkWidget *
+entry_item (struct open_menu *open, const struct rc_menu_node *node)
+{
+  GtkWidget *item;
+  switch (node->kind)
+    {
+    case RD_MENU_KIND_SEPARATOR:
+      item = gtk_separator_menu_item_new ();
+      break;
+    case RD_MENU_KIND_SUBMENU_START:
+      {
+	GtkWidget *submenu = gtk_menu_new ();
+	add_entries (open, GTK_MENU_SHELL (submenu), node->children,
+		     node->nchildren);
+	item = labelled (gtk_menu_item_new (), node->label, node->nlabel,
+			 node->key, node->nkey);
+	gtk_menu_item_set_submenu (GTK_MENU_ITEM (item), submenu);
+      }
+      break;
+    default:
+      item = choice_item (open, node);
+      break;
+    }
+  gtk_widget_set_sensitive (item, node->flags & RD_MENU_FLAG_ENABLED);
+  return item;
+}
+
+/* Return the menu item of NODE, an item of the menu OPEN that the user
+   can select.  A toggle or a radio item is a check menu item.  */
+static GtkWidget *
+choice_item (struct open_menu *open, const struct rc_menu_node *node)
+{
+  bool check = node->flags & (RD_MENU_FLAG_TOGGLE | RD_MENU_FLAG_RADIO);
+  GtkWidget *item = check ? gtk_check_menu_item_new () : gtk_menu_item_new ();
+  if (check)
+    {
+      GtkCheckMenuItem *c = GTK_CHECK_MENU_ITEM (item);
+      gtk_check_menu_item_set_draw_as_radio (c, (node->flags
+						 & RD_MENU_FLAG_RADIO));
+      gtk_check_menu_item_set_active (c, node->flags & RD_MENU_FLAG_SELECTED);
+    }
+  g_object_set_data (G_OBJECT (item), "rc-menu-id",
+		     GUINT_TO_POINTER (node->id));
+  /* Connect after set_active, because set_active activates the
+     item.  */
+  g_signal_connect (item, "activate", G_CALLBACK (item_activated), open);
+  return labelled (item, node->label, node->nlabel, node->key, node->nkey);
+}
+
+/* Put in ITEM the label of the NLABEL bytes LABEL, and at its right
+   the key equivalent of the NKEY bytes KEY, if NKEY is not 0.  Return
+   ITEM.  */
+static GtkWidget *
+labelled (GtkWidget *item, const char *label, size_t nlabel,
+	  const char *key, size_t nkey)
+{
+  GtkWidget *box = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 12);
+  GtkWidget *text = valid_label (label, nlabel);
+  gtk_widget_set_hexpand (text, true);
+  gtk_box_pack_start (GTK_BOX (box), text, true, true, 0);
+  if (nkey > 0)
+    {
+      GtkWidget *accel = valid_label (key, nkey);
+      gtk_style_context_add_class (gtk_widget_get_style_context (accel),
+				   GTK_STYLE_CLASS_ACCELERATOR);
+      gtk_box_pack_end (GTK_BOX (box), accel, false, false, 0);
+    }
+  gtk_container_add (GTK_CONTAINER (item), box);
+  return item;
+}
+
+/* Return a label, at the left, of the N bytes TEXT.  Replace each
+   byte that is not valid UTF-8 with U+FFFD.  */
+static GtkWidget *
+valid_label (const char *text, size_t n)
+{
+  char *valid = g_utf8_make_valid (text, n);
+  GtkWidget *label = gtk_label_new (valid);
+  g_free (valid);
+  gtk_label_set_xalign (GTK_LABEL (label), 0);
+  return label;
+}
+
+/* The activate signal of a menu item.  DATA is the struct open_menu.
+   Send the choice of the item, and close the menu.  GTK hides the
+   menu before it activates the item, so the choice comes before the
+   idle function of the hide.  */
+static void
+item_activated (GtkMenuItem *item, gpointer data)
+{
+  struct open_menu *open = data;
+  answer (open, true,
+	  GPOINTER_TO_UINT (g_object_get_data (G_OBJECT (item),
+					       "rc-menu-id")));
+  schedule_close (open);
+}
+
+/* The hide signal of a menu.  DATA is the struct open_menu.  Close
+   the menu later, because GTK can activate an item after the hide.  */
+static void
+menu_hidden (GtkWidget *menu, gpointer data)
+{
+  (void) menu;
+  schedule_close (data);
+}
+
+/* Close the menu OPEN in an idle function, unless an idle function
+   already closes it.  */
+static void
+schedule_close (struct open_menu *open)
+{
+  if (!open->close_source)
+    open->close_source = g_idle_add (menu_closed, open);
+}
+
+/* The idle function that closes a menu.  DATA is the struct
+   open_menu.  Send a dismissal if no item was selected, and close the
+   menu.  */
+static gboolean
+menu_closed (gpointer data)
+{
+  struct open_menu *open = data;
+  open->close_source = 0;
+  dismiss_menu (open->view);
+  return G_SOURCE_REMOVE;
+}
+
+/* Send the dismissal of the open menu of VIEW if the view did not
+   send its choice, and close the menu.  */
+static void
+dismiss_menu (struct rc_view *view)
+{
+  answer (view->menu, false, 0);
+  close_menu (view);
+}
+
+/* Close the open menu of VIEW, if it has one, with no choice.  */
+static void
+close_menu (struct rc_view *view)
+{
+  struct open_menu *open = view->menu;
+  if (!open)
+    return;
+  view->menu = NULL;
+  if (open->close_source)
+    g_source_remove (open->close_source);
+  g_signal_handlers_disconnect_by_data (open->menu, open);
+  gtk_widget_destroy (open->menu);
+  g_free (open);
+}
+
+/* Send the choice CHOSEN, ID of the menu OPEN, unless the view sent
+   its choice.  */
+static void
+answer (struct open_menu *open, bool chosen, uint32_t id)
+{
+  if (open->answered)
+    return;
+  open->answered = true;
+  send_choice (open->view, open->serial, chosen, id);
+}
+
+/* Send the menu-choice message SERIAL, CHOSEN, ID of VIEW.  */
+static void
+send_choice (struct rc_view *view, uint32_t serial, bool chosen, uint32_t id)
+{
+  struct rd_message message =
+    { .type = RD_MENU_CHOICE,
+      .u.menu_choice = { .serial = serial, .chosen = chosen,
+			 .id = chosen ? id : 0 } };
+  view->functions.send (view->functions.data, &message);
 }
 
 /* The function of the changes of the owner of the clipboard of the

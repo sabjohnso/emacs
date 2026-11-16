@@ -34,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "menu.h"
 #include "rdproto.h"
 #include "render.h"
 
@@ -92,6 +93,22 @@ extern void rc_view_set_clipboard (struct rc_view *view, const char *text,
 /* Ask for the text of the clipboard of the desktop.  The view gives it
    to the CLIPBOARD function of VIEW later.  */
 extern void rc_view_request_clipboard (struct rc_view *view);
+
+/* Show the popup menu MENU of the show-menu message SHOW in the window
+   of its frame, with the title of SHOW.  MENU is the tree of the
+   entries of SHOW (rc_menu_show), or NULL if the entries are bad.
+   VIEW does not keep MENU.  First close the menu that is open, with
+   no choice.  Later, the view sends one menu-choice message for SHOW:
+   the item that the user selects, or a dismissal (CHOSEN 0) if the
+   menu closes with no selection.  If MENU is NULL or the frame has no
+   window, the view sends the dismissal at once.  */
+extern void rc_view_show_menu (struct rc_view *view,
+			       const struct rd_show_menu *show,
+			       const struct rc_menu *menu);
+
+/* Close the menu SERIAL of VIEW, if it is open.  Then the view sends
+   no choice for SERIAL.  */
+extern void rc_view_hide_menu (struct rc_view *view, uint32_t serial);
 
 /* Return the number of windows of VIEW.  */
 extern int rc_view_window_count (const struct rc_view *view);
