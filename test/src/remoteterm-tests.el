@@ -1523,6 +1523,18 @@ window of another session signals an error."
                          `((parent-frame . ,parent)
                            (minibuffer . ,(minibuffer-window other)))))))))))
 
+(rd-daemon-deftest remoteterm-tests-minibuffer-only-frame
+  "A minibuffer parameter `only' gives a frame with only a minibuffer.
+The root window of the frame is its own minibuffer window."
+  (remoteterm-tests--for-each-case
+   '(only)
+   (lambda (minibuffer)
+     (remoteterm-tests--with-display "remote-minibuffer-only"
+       (remoteterm-tests--with-frame frame "remote-minibuffer-only"
+           `((minibuffer . ,minibuffer))
+         (should (eq (frame-root-window frame) (minibuffer-window frame)))
+         (should (remoteterm-tests--own-minibuffer-p frame)))))))
+
 (rd-daemon-deftest remoteterm-tests-frame-visibility-parameter
   "A new frame is visible unless its visibility parameter is nil (law C3).
 This holds for a root frame and for a child frame.  The client gets a
@@ -6580,26 +6592,32 @@ menu bar, and :char-height is the height of a line of FRAME.
 
 (rd-daemon-deftest remoteterm-tests-menu-bar-mode
   "The menu bar of a remote frame follows the last change to it.
-A trial applies a random list of changes to a remote frame.  A change
-is a call of `menu-bar-mode' or a change of the `menu-bar-lines'
-parameter of the frame.  Some parameter values are not a number of
-lines: nil, a negative number, or a number that is not an integer.
-Law: after each change, the height of the menu bar from
-`frame-geometry' is the number of lines that the last change gives,
-times the height of a line of the frame.  A value that is not a
-number of lines gives no menu bar."
+A trial makes a remote frame of a random kind: normal, child or
+minibuffer-only.  Then it applies a random list of changes to the
+frame.  A change is a call of `menu-bar-mode' or a change of the
+`menu-bar-lines' parameter of the frame.  Some parameter values are
+not a number of lines: nil, a negative number, or a number that is
+not an integer.
+Law: after each change, the height of the menu bar of a normal frame
+from `frame-geometry' is the number of lines that the last change
+gives, times the height of a line of the frame.  A value that is not
+a number of lines gives no menu bar.  A child frame and a
+minibuffer-only frame keep a height of 0."
   (let ((rd-gen-trials 12))
     (rd-gen-for-all
      (lambda ()
-       (rd-gen-list #'remoteterm-tests--menu-bar-change 6))
-     (lambda (changes)
-       (pcase-let ((`(,char-height . ,heights)
-                    (rd-daemon-eval
-                     `(remoteterm-tests--menu-bar-heights ',changes))))
+       (cons (rd-gen-frame-kind)
+             (rd-gen-list #'remoteterm-tests--menu-bar-change 6)))
+     (lambda (trial)
+       (pcase-let* ((`(,kind . ,changes) trial)
+                    (`(,char-height . ,heights)
+                     (rd-daemon-eval
+                      `(remoteterm-tests--menu-bar-heights
+                        ',kind ',changes))))
          (should (equal heights
                         (mapcar (lambda (change)
                                   (* (remoteterm-tests--menu-bar-lines
-                                      change)
+                                      kind change)
                                      char-height))
                                 changes))))))))
 
@@ -6613,16 +6631,34 @@ lines."
       (list 'mode (rd-gen-element '(1 -1)))
     (list 'lines (rd-gen-element (list (rd-gen-random 3) nil -1 1.5)))))
 
-(defun remoteterm-tests--menu-bar-lines (change)
-  "Return the number of menu bar lines that CHANGE gives.
-This is the model of the menu bar.  A value that is not a natural
-number gives 0 lines."
-  (pcase change
-    (`(mode ,arg) (if (> arg 0) 1 0))
-    (`(lines ,n) (if (natnump n) n 0))))
+(defun remoteterm-tests--menu-bar-lines (kind change)
+  "Return the number of menu bar lines that CHANGE gives a KIND frame.
+This is the model of the menu bar.  Only a normal frame has a menu
+bar.  A value that is not a natural number gives 0 lines."
+  (if (eq kind 'normal)
+      (pcase change
+        (`(mode ,arg) (if (> arg 0) 1 0))
+        (`(lines ,n) (if (natnump n) n 0)))
+    0))
 
-(defun remoteterm-tests--menu-bar-heights (changes)
-  "Apply CHANGES to a new remote frame, and return the menu bar heights.
+(defmacro remoteterm-tests--with-frame-of-kind (frame kind display &rest body)
+  "Bind FRAME to a new frame of KIND on DISPLAY, and evaluate BODY.
+KIND is a value of `rd-gen-frame-kind'.  A child frame has a new
+normal frame as its parent.  Then delete the frames."
+  (declare (indent 3))
+  (let ((parent (make-symbol "parent")))
+    `(pcase ,kind
+       ('normal
+        (remoteterm-tests--with-frame ,frame ,display nil ,@body))
+       ('minibuffer-only
+        (remoteterm-tests--with-frame ,frame ,display '((minibuffer . only))
+          ,@body))
+       ('child
+        (remoteterm-tests--with-frame ,parent ,display nil
+          (remoteterm-tests--with-child ,frame ,parent nil ,@body))))))
+
+(defun remoteterm-tests--menu-bar-heights (kind changes)
+  "Apply CHANGES to a new remote frame of KIND, and return the heights.
 The value is (CHAR-HEIGHT . HEIGHTS).  CHAR-HEIGHT is the height of a
 line of the frame.  HEIGHTS has the height of the menu bar from
 `frame-geometry' after each change.  The function restores
@@ -6630,7 +6666,7 @@ line of the frame.  HEIGHTS has the height of the menu bar from
   (let ((mode menu-bar-mode)
         (defaults default-frame-alist))
     (remoteterm-tests--with-display "remote-menu-bar"
-      (remoteterm-tests--with-frame frame "remote-menu-bar" nil
+      (remoteterm-tests--with-frame-of-kind frame kind "remote-menu-bar"
         (unwind-protect
             (cons (frame-char-height frame)
                   (mapcar (lambda (change)

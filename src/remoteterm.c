@@ -929,11 +929,15 @@ remote_set_cursor_type (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
 /* The handler of the `menu-bar-lines' frame parameter.  Set the
    height of the menu bar of F to VALUE lines.  A VALUE that is not a
    natural number gives no menu bar.  Redisplay draws the menu bar into
-   the menu bar window of F.  */
+   the menu bar window of F.  A minibuffer-only frame and a child frame
+   have no menu bar.  */
 static void
 remote_set_menu_bar_lines (struct frame *f, Lisp_Object value,
 			   Lisp_Object oldval)
 {
+  if (FRAME_MINIBUF_ONLY_P (f) || FRAME_PARENT_FRAME (f))
+    return;
+
   int old_lines = FRAME_MENU_BAR_LINES (f);
   int lines = RANGED_FIXNUMP (0, value, INT_MAX) ? XFIXNUM (value) : 0;
 
@@ -1113,11 +1117,12 @@ remote_session_frame_p (Lisp_Object frame, struct remote_display_info *dpyinfo)
 }
 
 /* Return a new frame with the minibuffer window that PARMS ask for.
-   With no minibuffer parameter or a value that is not nil and not a
-   window, the frame has a minibuffer window of its own.  With nil, the
-   frame uses the minibuffer window of the default minibuffer frame of
-   its session.  With a window, the frame uses that window, which must
-   be on the same session.  */
+   With no minibuffer parameter or a value that is not nil, not `only'
+   and not a window, the frame has a minibuffer window of its own.  With
+   nil, the frame uses the minibuffer window of the default minibuffer
+   frame of its session.  With a window, the frame uses that window,
+   which must be on the same session.  With `only', the frame has only a
+   minibuffer window.  */
 static struct frame *
 remote_make_frame_with_minibuffer (struct remote_display_info *dpyinfo,
 				   Lisp_Object parms)
@@ -1128,6 +1133,8 @@ remote_make_frame_with_minibuffer (struct remote_display_info *dpyinfo,
     return make_frame_without_minibuffer (minibuffer,
 					  dpyinfo->terminal->kboard,
 					  XCAR (dpyinfo->name_list_element));
+  if (EQ (minibuffer, Qonly))
+    return make_minibuffer_frame ();
   return make_frame (true);
 }
 

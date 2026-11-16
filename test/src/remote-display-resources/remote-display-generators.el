@@ -246,6 +246,13 @@ a tooltip must not get."
                       (vertical-scroll-bars . right)
                       (horizontal-scroll-bars . t))))
 
+(defun rd-gen-frame-kind ()
+  "Return a random kind of frame: normal, child or minibuffer-only.
+A normal frame is a root frame with a minibuffer and windows.  A child
+frame has a parent frame.  A minibuffer-only frame has only a
+minibuffer window."
+  (rd-gen-element '(normal child minibuffer-only)))
+
 (defun rd-gen-child-chain (max-length)
   "Return the positions of a random chain of up to MAX-LENGTH child frames.
 The value is a list of (LEFT . TOP), one for each frame of the chain,
