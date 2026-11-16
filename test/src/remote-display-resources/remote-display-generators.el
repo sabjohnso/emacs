@@ -33,6 +33,7 @@
 
 (require 'cl-lib)
 (require 'ert)
+(require 'seq)
 
 (defconst rd-gen-trials 500
   "Number of generated values for each property test.")
@@ -162,6 +163,19 @@ The limits of 8, 16, and 32 bits find a field that is too narrow."
   "Return a random unibyte string of up to MAX-LENGTH bytes."
   (apply #'unibyte-string (rd-gen-list (lambda () (rd-gen-random 256))
                                        max-length)))
+
+(defun rd-gen-parts (size max-parts)
+  "Return a random cut of SIZE into from 1 to MAX-PARTS parts.
+SIZE is a positive integer.  The value is a list of (START . LENGTH),
+in order.  The first part starts at 0, each part starts where the one
+before it ends, and the last part ends at SIZE."
+  (let* ((cuts (seq-uniq
+                (sort (cl-loop repeat (rd-gen-random (min max-parts size))
+                               collect (1+ (rd-gen-random (1- size))))
+                      #'<)))
+         (starts (cons 0 cuts)))
+    (cl-mapcar (lambda (start end) (cons start (- end start)))
+               starts (append cuts (list size)))))
 
 (provide 'remote-display-generators)
 ;;; remote-display-generators.el ends here

@@ -117,6 +117,11 @@ static Emacs_Rectangle remote_intersection (Emacs_Rectangle, Emacs_Rectangle);
 static int remote_foreground_x (struct glyph_string *);
 static void remote_draw_chars (struct glyph_string *);
 static void remote_draw_image (struct glyph_string *);
+static Emacs_Rectangle remote_image_slice_area (struct glyph_string *);
+static void remote_send_image (struct glyph_string *, uint32_t,
+			       Emacs_Rectangle);
+static void remote_draw_outline (struct frame *, Emacs_Rectangle,
+				 unsigned long);
 static void remote_draw_composition (struct glyph_string *);
 static void remote_draw_static_composition (struct glyph_string *);
 static void remote_draw_automatic_composition (struct glyph_string *);
@@ -1565,26 +1570,75 @@ remote_draw_glyph_string (struct glyph_string *s)
     remote_draw_image (s);
 }
 
-/* Send a draw-image message for S, a string of one image, after the
-   data of the image.  Send nothing if the protocol cannot send the
-   image.  */
+/* Draw S, a string of one slice of an image, as
+   pgtk_draw_image_foreground does.  Send the data of the image, then a
+   draw-image message for the slice.  If the protocol cannot send the
+   image (it did not load, or it is too large), draw the outline of the
+   slice in the foreground of S.  */
 static void
 remote_draw_image (struct glyph_string *s)
 {
+  Emacs_Rectangle slice = remote_image_slice_area (s);
   uint32_t id = remote_image_prepare (s->f, s->img);
-  if (!id)
+  if (id)
+    remote_send_image (s, id, slice);
+  else
+    remote_draw_outline (s->f, slice,
+			 remote_glyph_string_colors (s).foreground);
+}
+
+/* Return the rectangle of the slice of the image of S in its frame.
+   The left line of a box and the margin of the image come before the
+   first column of slices, and the margin comes above the first row.  */
+static Emacs_Rectangle
+remote_image_slice_area (struct glyph_string *s)
+{
+  int x = s->x;
+  int y = s->ybase - image_ascent (s->img, s->face, &s->slice);
+  if (s->slice.x == 0)
+    x = remote_foreground_x (s) + s->img->hmargin;
+  if (s->slice.y == 0)
+    y += s->img->vmargin;
+  return (Emacs_Rectangle) { x, y, s->slice.width, s->slice.height };
+}
+
+/* Send a draw-image message for the image ID of S, whose slice is at
+   SLICE.  The message has the position of the whole image, and the
+   clip lets it change only the pixels of the slice that S can
+   change.  */
+static void
+remote_send_image (struct glyph_string *s, uint32_t id,
+		   Emacs_Rectangle slice)
+{
+  Emacs_Rectangle clip = remote_intersection (remote_glyph_clip (s), slice);
+  if (remote_empty_area_p (clip.width, clip.height))
     return;
-  Emacs_Rectangle clip = remote_glyph_clip (s);
   struct rd_message message =
     {
       .type = RD_DRAW_IMAGE,
       .u.draw_image = { .frame = remote_frame_id (s->f), .image = id,
-			.x = s->x, .y = s->y,
+			.x = slice.x - s->slice.x,
+			.y = slice.y - s->slice.y,
 			.clip_x = clip.x, .clip_y = clip.y,
 			.clip_width = clip.width,
 			.clip_height = clip.height },
     };
   remote_send_draw (s->f, &message);
+}
+
+/* Draw the outline of AREA of F in COLOR, as pgtk_draw_rectangle does:
+   a line of one pixel at each edge.  The protocol has no message for a
+   line, so each line is a clear-area message.  */
+static void
+remote_draw_outline (struct frame *f, Emacs_Rectangle area,
+		     unsigned long color)
+{
+  int right = area.x + area.width - 1;
+  int bottom = area.y + area.height - 1;
+  remote_fill_area (f, area.x, area.y, area.width, 1, color);
+  remote_fill_area (f, area.x, bottom, area.width, 1, color);
+  remote_fill_area (f, area.x, area.y, 1, area.height, color);
+  remote_fill_area (f, right, area.y, 1, area.height, color);
 }
 
 /* Fill the part of the background of S that is visible in its row.  */

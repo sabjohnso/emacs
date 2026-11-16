@@ -248,6 +248,20 @@
 ;; 54. Image limit: an image with more than 8192 pixels on a side sends
 ;;     no image data and no draw-image message.  An image with 8192
 ;;     pixels on a side sends its data.
+;; 55. Image position: for each slice of an image with a random margin,
+;;     ascent and scale, a clear-area message with the face background
+;;     comes before the draw-image message.  The clip of the draw is
+;;     inside that clear area and inside the image.  The x of the draw
+;;     is the left edge of the text area plus the margin.  The clips of
+;;     the slices cover the image, with no common pixel.
+;; 56. Image in the mode line: the clip of an image in the mode line is
+;;     inside the mode line.
+;; 57. Image load failure: an image that cannot load sends no
+;;     draw-image message.  It sends four clear-area lines of the face
+;;     foreground at the edges of the image.
+;; 58. Image cursor: a box cursor on an image with a mask draws the
+;;     image again after the box, and clears no part of the box.  On
+;;     an image with no mask, the cursor is a hollow box.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -7851,10 +7865,21 @@ Emacs has the decoder of each such TYPE in its own code."
 (defun remoteterm-tests--draw-images (images before after)
   "Draw IMAGES on a new remote frame, and return the value of AFTER.
 IMAGES is a list of image objects.  Insert each image on its own line
-of a new buffer of the frame.  Attach a recording client, call BEFORE
-with the name of the session, and redisplay.  Then call AFTER with
-the name of the session, the frame, and the bytes that the session
-sent for the redisplay."
+of a new buffer of the frame.  BEFORE and AFTER are as for
+`remoteterm-tests--draw-buffer'."
+  (remoteterm-tests--draw-buffer
+   (lambda ()
+     (dolist (image images)
+       (insert-image image)
+       (insert "\n")))
+   before after))
+
+(defun remoteterm-tests--draw-buffer (fill before after)
+  "Draw a new buffer on a new remote frame, and return the value of AFTER.
+Call FILL in the buffer, with the frame selected.  Attach a recording
+client, call BEFORE with the name of the session, and redisplay.  Then
+call AFTER with the name of the session, the frame, and the bytes that
+the session sent for the redisplay."
   (let* ((display "remote-image")
          (frame (progn (x-open-connection display)
                        (x-create-frame-with-faces
@@ -7867,9 +7892,7 @@ sent for the redisplay."
           (select-frame frame)
           (remote-display--focus frame)
           (with-current-buffer buffer
-            (dolist (image images)
-              (insert-image image)
-              (insert "\n")))
+            (funcall fill))
           (remote-display--record display)
           (funcall before display)
           (redisplay t)
@@ -8182,6 +8205,273 @@ after it."
                #'ignore
                (lambda (_display _frame output) output)))
             '(8193 8192))))
+
+;;;; Image draw
+
+(defun remoteterm-tests--image-layout-case ()
+  "Return a random (WIDTH HEIGHT SCALE MARGIN ASCENT COLUMNS ROWS BACKGROUND).
+WIDTH and HEIGHT are the size of a PBM image, and SCALE, MARGIN and
+ASCENT are its properties.  COLUMNS and ROWS cut the scaled image into
+slices, as for `rd-gen-parts'.  BACKGROUND is the background of the
+face of the slices, a list of three 8-bit components."
+  (let ((width (rd-gen-integer 1 40))
+        (height (rd-gen-integer 1 40))
+        (scale (rd-gen-element '(1 2))))
+    (list width height scale (rd-gen-integer 0 5)
+          (rd-gen-element (list 'center (rd-gen-integer 0 100)))
+          (rd-gen-parts (* scale width) 3)
+          (rd-gen-parts (* scale height) 3)
+          (remoteterm-tests--rgb))))
+
+(defun remoteterm-tests--insert-slices (image columns rows face)
+  "Insert the slices of IMAGE, cut by COLUMNS and ROWS, with FACE.
+Each row of slices is on its own line.  COLUMNS and ROWS are as for
+`rd-gen-parts'.  Put the point of the window after the slices."
+  (dolist (row rows)
+    (dolist (column columns)
+      (insert (propertize " " 'face face
+                          'display `((slice ,(car column) ,(car row)
+                                            ,(cdr column) ,(cdr row))
+                                     ,image))))
+    (insert (propertize "\n" 'line-height t)))
+  (set-window-point (selected-window) (point-max)))
+
+(defun remoteterm-tests--image-clip (fields)
+  "Return the clip rectangle of the draw-image FIELDS, as clear-area fields."
+  (list :x (plist-get fields :clip-x) :y (plist-get fields :clip-y)
+        :width (plist-get fields :clip-width)
+        :height (plist-get fields :clip-height)))
+
+(defun remoteterm-tests--rectangle-inside-p (a b)
+  "Return non-nil if each pixel of the rectangle A is inside the rectangle B.
+A and B are fields with :x, :y, :width and :height."
+  (and (<= (plist-get b :x) (plist-get a :x))
+       (<= (plist-get b :y) (plist-get a :y))
+       (<= (+ (plist-get a :x) (plist-get a :width))
+           (+ (plist-get b :x) (plist-get b :width)))
+       (<= (+ (plist-get a :y) (plist-get a :height))
+           (+ (plist-get b :y) (plist-get b :height)))))
+
+(defun remoteterm-tests--area (rectangle)
+  "Return the number of pixels of RECTANGLE.
+RECTANGLE is as for `remoteterm-tests--rectangle-inside-p'."
+  (* (plist-get rectangle :width) (plist-get rectangle :height)))
+
+(defun remoteterm-tests--image-draws (messages)
+  "Return (PREVIOUS . FIELDS) for each draw-image message in MESSAGES.
+FIELDS is the fields of the draw, and PREVIOUS is the message before
+it.  An image-data message is not a draw, so PREVIOUS is not one."
+  (cl-loop for (previous message)
+           on (cons nil (seq-remove (lambda (message)
+                                      (eq (car message) 'image-data))
+                                    messages))
+           when (eq (car message) 'draw-image)
+           collect (cons previous (cdr message))))
+
+(defun remoteterm-tests--image-layout-output (case)
+  "Draw the image of CASE, and return a plist of the result.
+CASE is as for `remoteterm-tests--image-layout-case'.  The plist has
+the drawing messages in :messages, the left edge of the text area in
+:left, and the scaled size of the image in :size, with no margin."
+  (pcase-let* ((`(,width ,height ,scale ,margin ,ascent ,columns ,rows
+                         ,background)
+                case)
+               (image (create-image (remoteterm-tests--pbm width height)
+                                    'pbm t :scale scale :margin margin
+                                    :ascent ascent)))
+    (remoteterm-tests--draw-buffer
+     (lambda ()
+       (remoteterm-tests--insert-slices
+        image columns rows
+        `(:background ,(remoteterm-tests--rgb-string background))))
+     #'ignore
+     (lambda (_display frame output)
+       (list :messages (remoteterm-tests--messages output)
+             :left (car (window-inside-pixel-edges (frame-root-window frame)))
+             :size (let ((size (image-size image t frame)))
+                     (cons (- (car size) (* 2 margin))
+                           (- (cdr size) (* 2 margin)))))))))
+
+(rd-daemon-deftest remoteterm-tests-image-position
+  "Each slice of an image is drawn in its place on its background (law 55)."
+  (let ((rd-gen-trials 15))
+    (rd-gen-for-all
+     #'remoteterm-tests--image-layout-case
+     (lambda (case)
+       (pcase-let* (((map :messages :left :size)
+                     (remoteterm-tests--image-layout-output case))
+                    (margin (nth 3 case))
+                    (background (remoteterm-tests--rgb-pixel (nth 7 case)))
+                    (draws (remoteterm-tests--image-draws messages))
+                    (clips (seq-uniq (mapcar (lambda (draw)
+                                               (remoteterm-tests--image-clip
+                                                (cdr draw)))
+                                             draws))))
+         (should draws)
+         (pcase-dolist (`(,previous . ,fields) draws)
+           (let ((clip (remoteterm-tests--image-clip fields)))
+             (should (eq (car previous) 'clear-area))
+             (should (= (plist-get (cdr previous) :color) background))
+             (should (remoteterm-tests--rectangle-inside-p clip
+                                                           (cdr previous)))
+             (should (remoteterm-tests--rectangle-inside-p
+                      clip (list :x (plist-get fields :x)
+                                 :y (plist-get fields :y)
+                                 :width (car size) :height (cdr size))))
+             (should (= (plist-get fields :x) (+ left margin)))))
+         (should (= (apply #'+ (mapcar #'remoteterm-tests--area clips))
+                    (* (car size) (cdr size))))
+         (should-not (cl-loop for (clip . others) on clips
+                              thereis (seq-some
+                                       (lambda (other)
+                                         (remoteterm-tests--overlap-p
+                                          clip other))
+                                       others))))))))
+
+(ert-deftest remoteterm-tests-image-mode-line ()
+  "The clip of an image in the mode line is inside the mode line (law 56)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let ((`(,draws ,mode-line)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--image-mode-line-case)))
+      (should draws)
+      (dolist (draw draws)
+        (should (remoteterm-tests--rectangle-inside-p
+                 (remoteterm-tests--image-clip (cdr draw)) mode-line))))))
+
+(defun remoteterm-tests--image-mode-line-case ()
+  "Draw an image with a margin in the mode line, and return (DRAWS MODE-LINE).
+DRAWS is as for `remoteterm-tests--image-draws', and MODE-LINE is the
+rectangle of the mode line, as clear-area fields."
+  (let ((image (create-image (remoteterm-tests--pbm 10 10) 'pbm t
+                             :scale 1 :margin 3)))
+    (remoteterm-tests--draw-buffer
+     (lambda ()
+       (setq mode-line-format (list (propertize "x" 'display image))))
+     #'ignore
+     (lambda (_display frame output)
+       (let* ((window (frame-root-window frame))
+              (edges (window-pixel-edges window))
+              (height (window-mode-line-height window)))
+         (list (remoteterm-tests--image-draws
+                (remoteterm-tests--messages output))
+               (list :x (nth 0 edges) :y (- (nth 3 edges) height)
+                     :width (- (nth 2 edges) (nth 0 edges))
+                     :height height)))))))
+
+(defun remoteterm-tests--image-outline (x y width height)
+  "Return the four lines at the edges of a rectangle, as clear-area fields.
+The rectangle is at X, Y, and has the size WIDTH x HEIGHT."
+  (mapcar (lambda (line)
+            (cl-mapcan #'list '(:x :y :width :height) line))
+          (list (list x y width 1)
+                (list x (+ y height -1) width 1)
+                (list x y 1 height)
+                (list (+ x width -1) y 1 height))))
+
+(defun remoteterm-tests--rectangle< (a b)
+  "Return non-nil if the rectangle A comes before the rectangle B.
+Compare :x, then :y, then :width, then :height."
+  (let ((keys '(:x :y :width :height)))
+    (version-list-< (mapcar (lambda (key) (plist-get a key)) keys)
+                    (mapcar (lambda (key) (plist-get b key)) keys))))
+
+(defun remoteterm-tests--load-failure-output (foreground)
+  "Draw an image that cannot load with FOREGROUND, and return a plist.
+FOREGROUND is a list of three 8-bit components.  The plist has the
+drawing messages in :messages, and the left edge of the text area in
+:left."
+  (remoteterm-tests--draw-buffer
+   (lambda ()
+     (remoteterm-tests--insert-slices
+      (create-image "not an image" 'pbm t) '((0 . 30)) '((0 . 30))
+      `(:foreground ,(remoteterm-tests--rgb-string foreground)
+        :background "#ffffff")))
+   #'ignore
+   (lambda (_display frame output)
+     (list :messages (remoteterm-tests--messages output)
+           :left (car (window-inside-pixel-edges
+                       (frame-root-window frame)))))))
+
+(rd-daemon-deftest remoteterm-tests-image-load-failure
+  "An image that cannot load is drawn as an outline (law 57)."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     ;; Not black or white: the frame has these colors.
+     (lambda () (list (rd-gen-integer 1 254) (rd-gen-integer 0 255)
+                      (rd-gen-integer 0 255)))
+     (lambda (foreground)
+       (pcase-let* ((color (remoteterm-tests--rgb-pixel foreground))
+                    ((map :messages :left)
+                     (remoteterm-tests--load-failure-output foreground))
+                    (lines (seq-uniq
+                            (mapcar (lambda (fields)
+                                      (map-delete (copy-sequence fields)
+                                                  :frame))
+                                    (seq-filter
+                                     (lambda (fields)
+                                       (= (plist-get fields :color) color))
+                                     (remoteterm-tests--of-messages
+                                      'clear-area messages)))))
+                    ;; A failed image is 30 x 30 pixels (image.c).
+                    (top (if lines
+                             (apply #'min (mapcar (lambda (fields)
+                                                    (plist-get fields :y))
+                                                  lines))
+                           0)))
+         (should-not (assq 'draw-image messages))
+         (should (equal (sort (mapcar (lambda (fields)
+                                        (map-delete fields :color))
+                                      lines)
+                              #'remoteterm-tests--rectangle<)
+                        (sort (remoteterm-tests--image-outline left top 30 30)
+                              #'remoteterm-tests--rectangle<))))))))
+
+(defun remoteterm-tests--of-messages (type messages)
+  "Return the fields of the messages of TYPE in the list MESSAGES."
+  (mapcar #'cdr (seq-filter (lambda (message) (eq (car message) type))
+                            messages)))
+
+(defun remoteterm-tests--image-cursor-output (mask)
+  "Draw a box cursor on an image, and return the drawing messages.
+The image has a mask if MASK is non-nil."
+  (let ((image (create-image "P1\n4 4\n1000\n0100\n0010\n0001\n"
+                             'pbm t :scale 1 :mask (and mask 'heuristic))))
+    (remoteterm-tests--draw-buffer
+     (lambda ()
+       (insert-image image)
+       (setq cursor-type 'box)
+       (set-window-point (selected-window) 1))
+     #'ignore
+     (lambda (_display _frame output)
+       (remoteterm-tests--messages output)))))
+
+(ert-deftest remoteterm-tests-image-cursor ()
+  "A box cursor on an image keeps the box (law 58)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let* ((`(,masked ,opaque)
+                  (remoteterm-tests--daemon-call
+                   'remoteterm-tests--image-cursor-case))
+                 (cursor (cdr (assq 'draw-cursor (reverse masked))))
+                 (after (cdr (memq (assq 'draw-cursor (reverse masked))
+                                   masked))))
+      (should (= (plist-get cursor :kind) 0))
+      (should (assq 'draw-image after))
+      (should-not (seq-some (lambda (message)
+                              (and (eq (car message) 'clear-area)
+                                   (remoteterm-tests--overlap-p (cdr message)
+                                                                cursor)))
+                            after))
+      (should (= (plist-get (cdr (assq 'draw-cursor (reverse opaque))) :kind)
+                 1)))))
+
+(defun remoteterm-tests--image-cursor-case ()
+  "Return the drawing messages of a box cursor on two images.
+The first image has a mask, and the second one has none."
+  (list (remoteterm-tests--image-cursor-output t)
+        (remoteterm-tests--image-cursor-output nil)))
 
 ;;;; The loop of the trials
 
