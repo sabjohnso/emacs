@@ -207,7 +207,8 @@
   "The message types of the image block, each with its generator.
 The block is for the feature Images (PLAN.org feature-images).")
 
-(defconst remotefns-tests--child-frame-generators nil
+(defconst remotefns-tests--child-frame-generators
+  '((place-frame . remotefns-tests--place-frame))
   "The message types of the child frame block, each with its generator.
 The block is for the feature Tooltips and child frames (PLAN.org
 feature-child-frames).")
@@ -412,6 +413,12 @@ src/rdproto.h.")
 (defun remotefns-tests--forget-image ()
   "Return a random `forget-image' message."
   (list 'forget-image :image (rd-gen-uint32)))
+
+(defun remotefns-tests--place-frame ()
+  "Return a random `place-frame' message."
+  (list 'place-frame :frame (rd-gen-uint32) :parent (rd-gen-uint32)
+        :x (rd-gen-int32) :y (rd-gen-int32) :z (rd-gen-uint32)
+        :visible (rd-gen-integer 0 255)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."

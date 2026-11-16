@@ -388,8 +388,30 @@ enum { RD_MAX_IMAGE_SIDE = 8192 };
 
 /* Tooltips and child frames (PLAN.org feature-child-frames).  */
 
-/* The messages of child frames.  The block has no rows now.  */
-#define RD_CHILD_FRAME_MESSAGES(MESSAGE)
+/* The messages of child frames.  */
+#define RD_CHILD_FRAME_MESSAGES(MESSAGE)				\
+  MESSAGE (PLACE_FRAME, place_frame, RD_PLACE_FRAME_FIELDS)
+
+/* The place of the frame FRAME, which the server sends.  PARENT is
+   the frame that contains FRAME, or 0 if FRAME has a window of its
+   own.  X and Y are the position of the top-left corner of FRAME in
+   the surface of PARENT, from the origin of PARENT.  A client ignores
+   X and Y when PARENT is 0.  Z is the stack value among the frames
+   with the same parent: a frame with a larger Z is above.  The server
+   does not send equal Z values for two such frames.  If a client gets
+   equal values, the frame with the larger number is above.  VISIBLE
+   is 0 if the frame is hidden.  A frame with no place-frame message
+   is a visible frame with a window of its own.  The server sends
+   place-frame for a new frame before its first define-frame.  A
+   client does not show a frame whose parent it does not know, or
+   whose parent or other ancestor is hidden.  */
+#define RD_PLACE_FRAME_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, parent)						\
+  FIELD (M, int32, x)							\
+  FIELD (M, int32, y)							\
+  FIELD (M, uint32, z)							\
+  FIELD (M, uint8, visible)
 
 /* Menus drawn by Emacs (PLAN.org feature-menus).  */
 
