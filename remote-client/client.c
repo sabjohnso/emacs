@@ -211,6 +211,7 @@ static int show_frames (struct rc_renderer *, struct rc_font_store *,
 			struct rc_stream *, struct rc_connector, int64_t);
 static struct rc_stream *connect_socket (void *);
 static void open_connection (struct window_mode *, struct rc_stream *);
+static void reset_connection_state (struct window_mode *);
 static void lose_connection (struct window_mode *, bool);
 static void close_connection (struct window_mode *);
 static void schedule_retry (struct window_mode *);
@@ -549,17 +550,12 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
   return mode.failed ? 1 : 0;
 }
 
-/* Make STREAM the connection of MODE.  The server sends a font file
-   only on the connection of its request, so forget the requests.  Send
-   the clipboard text to the new connection, and drop a clipboard text
-   that did not come complete.  */
+/* Make STREAM the connection of MODE, with no state of the connection
+   before it.  Send the clipboard text to the new connection.  */
 static void
 open_connection (struct window_mode *mode, struct rc_stream *stream)
 {
-  rc_font_store_reset (mode->store);
-  rd_chunks_free (&mode->clipboard);
-  g_free (mode->clipboard_text);
-  mode->clipboard_text = NULL;
+  reset_connection_state (mode);
   int fd = rc_stream_fd (stream);
   struct connection *connection = g_new (struct connection, 1);
   *connection = (struct connection)
@@ -570,6 +566,22 @@ open_connection (struct window_mode *mode, struct rc_stream *stream)
 				     read_input, mode);
   mode->connection = connection;
   rc_view_request_clipboard (mode->view);
+}
+
+/* Forget the state of MODE that belongs to one connection.  The
+   function runs before the first message of each connection.  The
+   server sends a font file only on the connection of its request, so
+   forget the requests.  Drop a clipboard text that did not come
+   complete, and forget the last clipboard text, so the new connection
+   gets the clipboard text again.  A feature with state for one
+   connection resets it here.  */
+static void
+reset_connection_state (struct window_mode *mode)
+{
+  rc_font_store_reset (mode->store);
+  rd_chunks_free (&mode->clipboard);
+  g_free (mode->clipboard_text);
+  mode->clipboard_text = NULL;
 }
 
 /* Close the connection of MODE, which ended or is lost.  FAILED is
