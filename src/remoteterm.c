@@ -1494,14 +1494,6 @@ remote_get_string_resource (void *rdb, const char *name, const char *class)
   return NULL;
 }
 
-static Lisp_Object
-remote_menu_show (struct frame *f, int x, int y, int menuflags,
-		  Lisp_Object title, const char **error_name)
-{
-  *error_name = "Menus are not available on remote frames";
-  return Qnil;
-}
-
 /* Copy the pixels of RUN in W from their current position to their
    desired position.  A copy-area message has no clip, so send only the
    rows that stay in the text area of W.  */

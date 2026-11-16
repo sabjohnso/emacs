@@ -129,6 +129,7 @@ static void (*const remote_input_functions[RD_TYPE_LIMIT])
     [RD_CLOSE_FRAME] = remote_close_input,
     [RD_WANT_FONT] = remote_want_font,
     [RD_CLIPBOARD_DATA] = remote_clipboard_input,
+    [RD_MENU_CHOICE] = remote_menu_choice_input,
   };
 
 void

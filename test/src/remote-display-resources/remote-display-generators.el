@@ -254,5 +254,99 @@ pixels, so that each frame of the chain moves the origin."
   (rd-gen-list (lambda () (cons (rd-gen-integer 1 30) (rd-gen-integer 1 30)))
                max-length))
 
+;;;; Menus
+
+(defconst rd-gen-menu-separators '("--" "--single-line")
+  "The labels that the menu generators use for a separator.")
+
+(defun rd-gen-menu ()
+  "Return a random menu for `x-popup-menu'.
+The menu is a keymap menu or a list of panes.  A keymap menu has
+symbols as keys, and nested keymaps as submenus.  Its items can be
+disabled, toggles, or radios, and can have `:keys'.  A list of panes
+is (TITLE (PANE-NAME ITEM...)...), and an item is (LABEL . VALUE), a
+string, or nil.  A keymap menu has at least one binding, and a pane
+has at least one item.  Some labels have characters that are not
+ASCII, and some have more than 1024 bytes of UTF-8."
+  (if (zerop (rd-gen-random 3))
+      (rd-gen-menu--panes)
+    (rd-gen-menu--keymap 2 (and (zerop (rd-gen-random 2))
+                                (rd-gen-menu-text)))))
+
+(defun rd-gen-menu-text ()
+  "Return a random text for a menu label or title.
+The text is not empty, and it does not start with \"-\" or \"@\",
+because these characters make a separator or a pane of a keymap.  Some
+texts have more than 1024 bytes of UTF-8."
+  (let ((characters '(?a ?Z ?0 ?\s ?é ?€ ?日 ?😀)))
+    (apply #'string
+           (rd-gen-element characters)
+           (cl-loop repeat (if (zerop (rd-gen-random 5))
+                               (+ 500 (rd-gen-random 300))
+                             (rd-gen-random 12))
+                    collect (rd-gen-element characters)))))
+
+(defun rd-gen-menu--keymap (depth prompt)
+  "Return a random keymap menu with submenus to DEPTH levels.
+PROMPT is the prompt string of the keymap, or nil."
+  `(keymap ,@(and prompt (list prompt))
+           ,@(cl-loop for index from 0
+                      repeat (1+ (rd-gen-random 6))
+                      collect (cons (intern (format "item-%d" index))
+                                    (rd-gen-menu--keymap-entry depth)))))
+
+(defun rd-gen-menu--keymap-entry (depth)
+  "Return a random menu-item binding of a keymap.
+The binding is an item, a separator, or (when DEPTH is above 0) a
+submenu with entries to DEPTH - 1 levels."
+  (pcase (rd-gen-random (if (> depth 0) 6 5))
+    (0 `(menu-item ,(rd-gen-element rd-gen-menu-separators)))
+    (5 `(menu-item ,(rd-gen-menu-text)
+                   ,(rd-gen-menu--keymap (1- depth) nil)
+                   ,@(rd-gen-menu--enable)))
+    (_ `(menu-item ,(rd-gen-menu-text) rd-gen-menu-command
+                   ,@(rd-gen-menu--enable)
+                   ,@(rd-gen-menu--button)
+                   ,@(rd-gen-menu--keys)))))
+
+(defun rd-gen-menu--enable ()
+  "Return random `:enable' properties: none, or `:enable nil'."
+  (and (zerop (rd-gen-random 4)) (list :enable nil)))
+
+(defun rd-gen-menu--button ()
+  "Return random `:button' properties: none, a toggle, or a radio."
+  (pcase (rd-gen-random 3)
+    (0 nil)
+    (1 (list :button (cons :toggle (rd-gen-element '(nil t)))))
+    (_ (list :button (cons :radio (rd-gen-element '(nil t)))))))
+
+(defun rd-gen-menu--keys ()
+  "Return random `:keys' properties.
+A key text has only letters and spaces, so `substitute-command-keys'
+does not change it.  Some key texts have more than 128 bytes of
+UTF-8."
+  (pcase (rd-gen-random 4)
+    (0 (list :keys (rd-gen-element '("C-c a" "M-x b" "x"))))
+    (1 (list :keys (make-string (+ 40 (rd-gen-random 30)) ?é)))
+    (_ nil)))
+
+(defun rd-gen-menu--panes ()
+  "Return a random menu as a list of panes, with one to three panes."
+  (cons (rd-gen-element (list "" (rd-gen-menu-text)))
+        (cl-loop repeat (1+ (rd-gen-random 3))
+                 collect (cons (rd-gen-element (list "" (rd-gen-menu-text)))
+                               (cl-loop repeat (1+ (rd-gen-random 5))
+                                        collect (rd-gen-menu--pane-item))))))
+
+(defun rd-gen-menu--pane-item ()
+  "Return a random item of a pane.
+The item is (LABEL . VALUE), a string (a disabled item), a separator
+string, or nil (a boundary of a dialog, which a menu ignores)."
+  (pcase (rd-gen-random 6)
+    (0 (rd-gen-menu-text))
+    (1 (rd-gen-element rd-gen-menu-separators))
+    (2 nil)
+    (_ (cons (rd-gen-menu-text) (rd-gen-random 1000)))))
+
 (provide 'remote-display-generators)
 ;;; remote-display-generators.el ends here

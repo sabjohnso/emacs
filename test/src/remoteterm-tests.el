@@ -284,6 +284,18 @@
 ;; M2. Menu bar click: a press of button 1 on a menu bar item gives the
 ;;     prefix event `menu-bar' and then the event of the item, with a
 ;;     position in the area `menu-bar'.  The release gives no event.
+;; M3. Menu entries: `x-popup-menu' on a remote frame sends one
+;;     menu-item message for each entry of the menu, in order, and then
+;;     one show-menu message.  The entries nest correctly, and have the
+;;     serial of the show-menu message.  They have the labels of the
+;;     items, the separators, the submenus, the disabled items, the
+;;     toggles, the radios, the selected items, and the key texts of
+;;     the menu.  The ids of the items are all different.  A label, a
+;;     title, or a key text that is too long is cut at the start of a
+;;     character.  The show-menu message has the title of the menu, and
+;;     the pixel position in the frame that the position argument
+;;     gives.  The session flushes these messages, and `x-popup-menu'
+;;     returns only after the client answers.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -7328,6 +7340,265 @@ Return the CLIPBOARD selection, which was \"before\" before the text."
                             text))
                 (< (float-time) end))
       (accept-process-output nil 0.05))))
+
+;;;; Popup menus
+
+(defvar remote-display--max-menu-text)
+(defvar remote-display--max-menu-key)
+
+(ert-deftest remoteterm-tests-menu-entries ()
+  "Law M3: the messages of a popup menu have the entries of the menu.
+A trial pops up a random menu of `rd-gen-menu' at a random position,
+relative to a frame or to its window.  A timer takes the output of the
+session while `x-popup-menu' waits, and answers with a dismissal.  The
+model of the entries is `remoteterm-tests--menu-entries'."
+  (skip-unless (featurep 'remote-test))
+  (let ((rd-gen-trials 40))
+    (rd-gen-for-all
+     (lambda () (list (rd-gen-menu) (rd-gen-element '(frame window))
+                      (rd-gen-random 300) (rd-gen-random 300)))
+     (lambda (case)
+       (remoteterm-tests--check-menu-entries
+        (car case) (apply #'remoteterm-tests--popup-menu case))))))
+
+(ert-deftest remoteterm-tests-menu-empty ()
+  "A popup menu with no entries signals \"Empty menu\"."
+  (skip-unless (featurep 'remote-test))
+  (remoteterm-tests--with-display "remote-menu"
+    (remoteterm-tests--with-frame frame "remote-menu" nil
+      (remote-display--record "remote-menu")
+      (should (equal (should-error (x-popup-menu (list '(0 0) frame)
+                                                 '(keymap)))
+                     '(error "Empty menu")))
+      (should (equal (remote-display--take-output "remote-menu") "")))))
+
+(defun remoteterm-tests--check-menu-entries (menu result)
+  "Check law M3 for MENU and RESULT, a value of `remoteterm-tests--popup-menu'."
+  (pcase-let* (((map :answered :unflushed :messages :frame :position) result)
+               (menu-messages (seq-filter
+                               (lambda (message)
+                                 (memq (car message) '(menu-item show-menu)))
+                               messages))
+               (show (cdr (car (last menu-messages))))
+               (items (mapcar #'cdr (butlast menu-messages))))
+    (should answered)
+    (should (eql unflushed 0))
+    (should (equal (mapcar #'car menu-messages)
+                   (append (make-list (length items) 'menu-item)
+                           '(show-menu))))
+    (should (equal (list (plist-get show :frame) (plist-get show :x)
+                         (plist-get show :y))
+                   (cons frame position)))
+    (should (equal (remoteterm-tests--menu-bytes-text (plist-get show :title))
+                   (remoteterm-tests--cut-text
+                    (remoteterm-tests--menu-title menu)
+                    remote-display--max-menu-text)))
+    (should (cl-every (lambda (item)
+                        (eql (plist-get item :serial) (plist-get show :serial)))
+                      items))
+    (should (remoteterm-tests--well-nested-p
+             (mapcar (lambda (item) (plist-get item :kind)) items)))
+    (should (equal (mapcar #'remoteterm-tests--menu-item-entry items)
+                   (remoteterm-tests--menu-entries menu)))
+    (remoteterm-tests--check-menu-ids items)))
+
+(defun remoteterm-tests--check-menu-ids (items)
+  "Check that the ids of ITEMS of the item kind are all different.
+The other kinds have the id 0."
+  (let ((ids (mapcar (lambda (item) (plist-get item :id))
+                     (seq-filter (lambda (item) (eql (plist-get item :kind) 0))
+                                 items))))
+    (should (equal (seq-uniq ids) ids))
+    (should (cl-every (lambda (item) (eql (plist-get item :id) 0))
+                      (seq-remove (lambda (item)
+                                    (eql (plist-get item :kind) 0))
+                                  items)))))
+
+(defun remoteterm-tests--popup-menu (menu where x y)
+  "Pop up MENU at X, Y on a remote frame, and return what the client got.
+WHERE is `frame' or `window': X and Y are relative to the frame or to
+its root window.  The frame has a menu bar, so the window is below the
+top of the frame.  A timer takes the output of the session while
+`x-popup-menu' waits, and answers with a dismissal for the serial of
+the show-menu message.  Another timer answers after 5 seconds, so a
+failure does not stop the test.  The value is a plist.  :answered is
+non-nil if the first timer ran before `x-popup-menu' returned.
+:messages are the decoded messages before the answer, and :unflushed
+is the number of bytes that the session did not flush then.  :frame is
+the ID of the frame, and :position is the list (X Y) of the expected
+pixel position in the frame."
+  (remoteterm-tests--with-display "remote-menu"
+    (remoteterm-tests--with-frame frame "remote-menu" '((menu-bar-lines . 1))
+      (remote-display--record "remote-menu")
+      (let* ((window (frame-root-window frame))
+             (state (list :frame (remoteterm-tests--frame-id frame)
+                          :position (remoteterm-tests--menu-position
+                                     where window x y)))
+             (answer (run-at-time 0 nil
+                                  (lambda ()
+                                    (setq state (remoteterm-tests--answer-menu
+                                                 "remote-menu" state)))))
+             (guard (run-at-time 5 nil #'remote-display--input "remote-menu"
+                                 (remote-display--encode
+                                  '(menu-choice :serial 0 :chosen 0 :id 0)))))
+        (unwind-protect
+            (x-popup-menu (list (list x y) (if (eq where 'frame) frame window))
+                          menu)
+          (cancel-timer answer)
+          (cancel-timer guard))
+        state))))
+
+(defun remoteterm-tests--menu-position (where window x y)
+  "Return the pixel position (X Y) in the frame of WINDOW.
+WHERE is `frame' if X and Y are relative to the frame, and `window'
+if they are relative to WINDOW."
+  (if (eq where 'frame)
+      (list x y)
+    (pcase-let ((`(,left ,top . ,_) (window-pixel-edges window)))
+      (list (+ left x) (+ top y)))))
+
+(defun remoteterm-tests--answer-menu (display state)
+  "Take the output of DISPLAY, and answer its menu with a dismissal.
+Return STATE with :answered, :unflushed, and :messages (see
+`remoteterm-tests--popup-menu')."
+  (let* ((unflushed (remote-display--unflushed-bytes display))
+         (messages (remoteterm-tests--all-messages
+                    (remote-display--take-output display)))
+         (show (alist-get 'show-menu messages)))
+    (remote-display--input display
+                           (remote-display--encode
+                            `(menu-choice :serial ,(or (plist-get show :serial)
+                                                       0)
+                                          :chosen 0 :id 0)))
+    (append (list :answered t :unflushed unflushed :messages messages)
+            state)))
+
+(defun remoteterm-tests--menu-item-entry (item)
+  "Return the entry (KIND FLAGS LABEL KEY) of the menu-item fields ITEM."
+  (list (plist-get item :kind) (plist-get item :flags)
+        (remoteterm-tests--menu-bytes-text (plist-get item :label))
+        (remoteterm-tests--menu-bytes-text (plist-get item :key))))
+
+(defun remoteterm-tests--menu-bytes-text (bytes)
+  "Return the text of the UTF-8 BYTES, a vector."
+  (decode-coding-string (apply #'unibyte-string (append bytes nil))
+                        'utf-8-unix))
+
+(defun remoteterm-tests--cut-text (text limit)
+  "Return the longest start of TEXT with at most LIMIT bytes of UTF-8."
+  (let ((bytes 0)
+        (end 0))
+    (while (and (< end (length text))
+                (<= (+ bytes (remoteterm-tests--utf-8-size (aref text end)))
+                    limit))
+      (setq bytes (+ bytes (remoteterm-tests--utf-8-size (aref text end))))
+      (setq end (1+ end)))
+    (substring text 0 end)))
+
+(defun remoteterm-tests--utf-8-size (character)
+  "Return the number of bytes of CHARACTER in UTF-8."
+  (length (encode-coding-string (string character) 'utf-8-unix)))
+
+(defun remoteterm-tests--well-nested-p (kinds)
+  "Return non-nil if the submenu kinds in KINDS nest correctly.
+Kind 2 starts a submenu, and kind 3 ends it."
+  (let ((depth 0))
+    (and (cl-every (lambda (kind)
+                     (pcase kind
+                       (2 (setq depth (1+ depth)))
+                       (3 (>= (setq depth (1- depth)) 0))
+                       (_ t)))
+                   kinds)
+         (zerop depth))))
+
+(defun remoteterm-tests--menu-title (menu)
+  "Return the title of MENU, a value of `rd-gen-menu'.
+The title of a keymap menu is its prompt, and the title of a list of
+panes is its first element.  No title is the empty string."
+  (or (if (keymapp menu) (keymap-prompt menu) (car menu)) ""))
+
+(defun remoteterm-tests--menu-entries (menu)
+  "Return the entries of MENU, a value of `rd-gen-menu', in order.
+Each entry is (KIND FLAGS LABEL KEY), as in a menu-item message, with
+the label and the key text cut to their limits.  This is the model of
+law M3."
+  (if (keymapp menu)
+      (remoteterm-tests--keymap-entries menu)
+    (remoteterm-tests--pane-entries (cdr menu))))
+
+(defun remoteterm-tests--menu-entry (kind flags label key)
+  "Return the entry (KIND FLAGS LABEL KEY), with LABEL and KEY cut.
+LABEL and KEY are strings or nil."
+  (list kind flags
+        (remoteterm-tests--cut-text (or label "")
+                                    remote-display--max-menu-text)
+        (remoteterm-tests--cut-text (or key "") remote-display--max-menu-key)))
+
+(defconst remoteterm-tests--menu-separator '(1 0 "" "")
+  "The entry of a separator.")
+
+(defconst remoteterm-tests--menu-end '(3 0 "" "")
+  "The entry of the end of a submenu.")
+
+(defun remoteterm-tests--keymap-entries (keymap)
+  "Return the entries of the bindings of KEYMAP, in order."
+  (seq-mapcat (lambda (binding)
+                (remoteterm-tests--binding-entries (cdr binding)))
+              (seq-filter #'consp (cdr keymap))))
+
+(defun remoteterm-tests--binding-entries (binding)
+  "Return the entries of BINDING, (menu-item LABEL DEF . PROPERTIES).
+An enabled submenu gives its start, its entries, and its end.  A
+disabled submenu is a disabled item."
+  (pcase-let* ((`(menu-item ,label ,def . ,properties) binding)
+               (enabled (or (not (plist-member properties :enable))
+                            (plist-get properties :enable)))
+               (keys (plist-get properties :keys)))
+    (cond ((member label rd-gen-menu-separators)
+           (list remoteterm-tests--menu-separator))
+          ((and (keymapp def) enabled)
+           `(,(remoteterm-tests--menu-entry 2 1 label nil)
+             ,@(remoteterm-tests--keymap-entries def)
+             ,remoteterm-tests--menu-end))
+          (t (list (remoteterm-tests--menu-entry
+                    0 (remoteterm-tests--menu-flags
+                       enabled (plist-get properties :button))
+                    label
+                    (and keys (concat "  " (substitute-command-keys
+                                            keys)))))))))
+
+(defun remoteterm-tests--menu-flags (enabled button)
+  "Return the flags of an item with ENABLED and the `:button' BUTTON."
+  (logior (if enabled 1 0)
+          (pcase (car button) (:toggle 2) (:radio 4) (_ 0))
+          (if (cdr button) 8 0)))
+
+(defun remoteterm-tests--pane-entries (panes)
+  "Return the entries of PANES, each (NAME ITEM...), in order.
+If there are several panes, a pane with a name is a submenu with that
+label.  The items of one pane, or of a pane with no name, are at the
+top of the menu."
+  (if (cdr panes)
+      (seq-mapcat (lambda (pane)
+                    (let ((items (seq-mapcat
+                                  #'remoteterm-tests--pane-item-entries
+                                  (cdr pane))))
+                      (if (equal (car pane) "")
+                          items
+                        `(,(remoteterm-tests--menu-entry 2 1 (car pane) nil)
+                          ,@items ,remoteterm-tests--menu-end))))
+                  panes)
+    (seq-mapcat #'remoteterm-tests--pane-item-entries (cdar panes))))
+
+(defun remoteterm-tests--pane-item-entries (item)
+  "Return the entries of ITEM of a pane.
+A string that is not a separator is a disabled item, and nil gives no
+entry."
+  (cond ((null item) nil)
+        ((member item rd-gen-menu-separators)
+         (list remoteterm-tests--menu-separator))
+        ((stringp item) (list (remoteterm-tests--menu-entry 0 0 item nil)))
+        (t (list (remoteterm-tests--menu-entry 0 1 (car item) nil)))))
 
 ;;;; Font transfer
 
