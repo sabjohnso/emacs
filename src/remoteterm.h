@@ -226,6 +226,10 @@ extern void remote_forget_fonts (struct remote_display_info *,
 				 const unsigned char *);
 extern void remote_redraw_frames (struct remote_display_info *);
 extern void remote_output_drained (struct remote_display_info *);
+/* Fill the rectangle at X, Y with the size WIDTH, HEIGHT of the frame F
+   with COLOR.  An empty rectangle sends nothing.  */
+extern void remote_fill_area (struct frame *f, int x, int y, int width,
+			      int height, unsigned long color);
 extern void syms_of_remoteterm (void);
 
 /* Defined in remoteproc.c.  */

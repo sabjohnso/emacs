@@ -130,8 +130,6 @@ static void remote_ensure_font_defined (struct remote_display_info *,
 					Lisp_Object);
 static bool remote_font_defined_p (struct remote_display_info *, uint32_t);
 static void remote_define_font (struct remote_display_info *, Lisp_Object);
-static void remote_fill_area (struct frame *, int, int, int, int,
-			      unsigned long);
 static struct remote_colors remote_glyph_string_colors (struct glyph_string *);
 static struct remote_colors remote_cursor_colors (struct frame *,
 						  struct face *);
@@ -1926,7 +1924,7 @@ remote_clear_frame_area (struct frame *f, int x, int y, int width, int height)
 
 /* Fill the rectangle at X, Y with the size WIDTH, HEIGHT of F with
    COLOR.  */
-static void
+void
 remote_fill_area (struct frame *f, int x, int y, int width, int height,
 		  unsigned long color)
 {
