@@ -262,6 +262,20 @@
 ;; 58. Image cursor: a box cursor on an image with a mask draws the
 ;;     image again after the box, and clears no part of the box.  On
 ;;     an image with no mask, the cursor is a hollow box.
+;; 59. Image forget: after `clear-image-cache' and a redisplay, the
+;;     session sends a forget-image message for each ID that the client
+;;     has.  No later draw-image message uses one of these IDs.
+;; 60. Image ID not used again: over a random sequence of
+;;     `insert-image', `image-flush', `clear-image-cache' and
+;;     `redisplay', no image-data or draw-image message comes after a
+;;     forget-image message with its ID.
+;; 61. Canvas refresh: after each refresh of a canvas and a redisplay,
+;;     the draw of the canvas uses a new ID, the client gets the data
+;;     of that ID, and the client has no other ID of the canvas.
+;; 62. Image forget with no client: an image that goes while no client
+;;     is attached sends no forget-image message to the next client.
+;;     An image that goes after the deletion of its session does not
+;;     crash Emacs.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -8472,6 +8486,206 @@ The image has a mask if MASK is non-nil."
 The first image has a mask, and the second one has none."
   (list (remoteterm-tests--image-cursor-output t)
         (remoteterm-tests--image-cursor-output nil)))
+
+;;;; Image forget
+
+(defun remoteterm-tests--image-ids (types messages)
+  "Return the image IDs of the messages of TYPES in MESSAGES, with no copy."
+  (seq-uniq (mapcar (lambda (message) (plist-get (cdr message) :image))
+                    (seq-filter (lambda (message) (memq (car message) types))
+                                messages))))
+
+(defun remoteterm-tests--image-sizes-case ()
+  "Return a list of from 1 to 4 random (WIDTH HEIGHT) of small images."
+  (cl-loop repeat (rd-gen-integer 1 4)
+           collect (remoteterm-tests--image-size-case)))
+
+(rd-daemon-deftest remoteterm-tests-image-forget
+  "The session forgets each image of a cleared cache (law 59)."
+  (let ((rd-gen-trials 5))
+    (rd-gen-for-all
+     #'remoteterm-tests--image-sizes-case
+     (lambda (sizes)
+       (pcase-let* ((`(,first ,cleared ,later)
+                     (remoteterm-tests--draw-images
+                      (mapcar (lambda (size)
+                                (apply #'remoteterm-tests--pbm-image size))
+                              sizes)
+                      #'ignore
+                      (lambda (display frame output)
+                        (list output
+                              (progn (clear-image-cache t)
+                                     (remoteterm-tests--redisplay-output
+                                      display))
+                              (progn (redraw-frame frame)
+                                     (remoteterm-tests--redisplay-output
+                                      display))))))
+                    (had (mapcar #'car (remoteterm-tests--image-files first)))
+                    (after (remoteterm-tests--all-messages
+                            (concat cleared later))))
+         (should had)
+         (should (cl-subsetp had (remoteterm-tests--image-ids
+                                  '(forget-image) after)))
+         (should-not (cl-intersection
+                      had (remoteterm-tests--image-ids '(draw-image)
+                                                       after))))))))
+
+(defun remoteterm-tests--image-op ()
+  "Return a random step for the law of image IDs that go.
+The step is (insert WIDTH HEIGHT), (flush INDEX), (clear) or
+\(redisplay)."
+  (pcase (rd-gen-element '(insert flush clear redisplay))
+    ('insert (cons 'insert (remoteterm-tests--image-size-case)))
+    ('flush (list 'flush (rd-gen-random 8)))
+    (op (list op))))
+
+(defun remoteterm-tests--image-ops-case ()
+  "Return a list of from 1 to 12 random steps of `remoteterm-tests--image-op'."
+  (cl-loop repeat (rd-gen-integer 1 12)
+           collect (remoteterm-tests--image-op)))
+
+(defun remoteterm-tests--image-ops-output (ops)
+  "Draw an image, do OPS, and return all the bytes that the session sent.
+OPS is as for `remoteterm-tests--image-ops-case'.  A redisplay comes
+after the last step."
+  (let ((images (list (remoteterm-tests--pbm-image 10 10))))
+    (remoteterm-tests--draw-images
+     images #'ignore
+     (lambda (display frame output)
+       (with-current-buffer (window-buffer (frame-root-window frame))
+         (dolist (op ops)
+           (pcase op
+             (`(insert ,width ,height)
+              (let ((image (remoteterm-tests--pbm-image width height)))
+                (push image images)
+                (goto-char (point-max))
+                (insert-image image)))
+             (`(flush ,index)
+              (image-flush (nth (% index (length images)) images) frame))
+             ('(clear) (clear-image-cache t))
+             ('(redisplay) (redisplay t)))
+           (setq output (concat output
+                                (remote-display--take-output display)))))
+       (concat output (remoteterm-tests--redisplay-output display))))))
+
+(defun remoteterm-tests--used-after-forget-p (messages)
+  "Return non-nil if an image message in MESSAGES uses a forgotten ID.
+That is an image-data or draw-image message that comes after a
+forget-image message with its ID."
+  (let ((forgotten nil))
+    (seq-some (lambda (message)
+                (let ((id (plist-get (cdr message) :image)))
+                  (pcase (car message)
+                    ('forget-image (push id forgotten) nil)
+                    ((or 'image-data 'draw-image) (memq id forgotten)))))
+              messages)))
+
+(rd-daemon-deftest remoteterm-tests-image-id-not-used-again
+  "No image message uses an ID after its forget-image message (law 60)."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     #'remoteterm-tests--image-ops-case
+     (lambda (ops)
+       (should-not (remoteterm-tests--used-after-forget-p
+                    (remoteterm-tests--all-messages
+                     (remoteterm-tests--image-ops-output ops))))))))
+
+(defun remoteterm-tests--canvas-steps (refreshes)
+  "Draw a canvas, refresh it REFRESHES times, and return the bytes of each step.
+The first step is the first draw.  Each other step is a refresh of
+the canvas with new pixels, and a redisplay."
+  (let* ((pixels (make-vector (* 8 8) #xff000000))
+         (canvas (create-image pixels 'canvas t
+                               :data-width 8 :data-height 8)))
+    (remoteterm-tests--draw-buffer
+     (lambda () (insert (propertize "#" 'display canvas)))
+     #'ignore
+     (lambda (display _frame output)
+       (cons output
+             (cl-loop for color from 1 to refreshes
+                      collect (progn
+                                (fillarray pixels (logior #xff000000 color))
+                                (canvas-refresh canvas 'reload-data)
+                                (remoteterm-tests--redisplay-output
+                                 display))))))))
+
+(defun remoteterm-tests--live-image-ids (messages)
+  "Return the IDs that the client has after MESSAGES.
+That is each ID of an image-data message with no forget-image message."
+  (cl-set-difference
+   (remoteterm-tests--image-ids '(image-data) messages)
+   (remoteterm-tests--image-ids '(forget-image) messages)))
+
+(defun remoteterm-tests--last-drawn-id (messages)
+  "Return the image ID of the last draw-image message in MESSAGES."
+  (car (last (remoteterm-tests--image-ids '(draw-image) messages))))
+
+(rd-daemon-deftest remoteterm-tests-canvas-refresh
+  "A refresh of a canvas gives it a new ID and forgets the old one (law 61)."
+  (let ((rd-gen-trials 5))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 1 20))
+     (lambda (refreshes)
+       (let* ((steps (remoteterm-tests--canvas-steps refreshes))
+              (sent (car steps))
+              (drawn (remoteterm-tests--last-drawn-id
+                      (remoteterm-tests--all-messages sent))))
+         (dolist (step (cdr steps))
+           (setq sent (concat sent step))
+           (let* ((messages (remoteterm-tests--all-messages sent))
+                  (id (remoteterm-tests--last-drawn-id
+                       (remoteterm-tests--all-messages step))))
+             (should id)
+             (should-not (eql id drawn))
+             (should (stringp (cdr (assq id (remoteterm-tests--image-files
+                                             sent)))))
+             (should (equal (remoteterm-tests--live-image-ids messages)
+                            (list id)))
+             (setq drawn id))))))))
+
+(ert-deftest remoteterm-tests-image-forget-no-client ()
+  "An image that goes with no client sends no forget-image (law 62)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let ((`(,output ,state)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--image-forget-no-client-case)))
+      (should (remoteterm-tests--image-files output))
+      (should-not (assq 'forget-image
+                        (remoteterm-tests--all-messages output)))
+      (should (eq state 'alive)))))
+
+(defun remoteterm-tests--image-forget-no-client-case ()
+  "Free images with no client, and return (OUTPUT STATE).
+OUTPUT is the bytes of the redisplay for a new client after a free of
+the images while no client was attached.  STATE is `alive' after a
+free of the images of a deleted session."
+  (list (remoteterm-tests--draw-images
+         (list (remoteterm-tests--pbm-image 20 10))
+         #'ignore
+         (lambda (display _frame _output)
+           (remote-display--detach display)
+           (clear-image-cache t)
+           (remote-display--record display)
+           (remoteterm-tests--redisplay-output display)))
+        (remoteterm-tests--free-after-delete)))
+
+(defun remoteterm-tests--free-after-delete ()
+  "Draw an image, delete its session, free the images, and return `alive'."
+  (let* ((display "remote-image-gone")
+         (frame (progn (x-open-connection display)
+                       (x-create-frame-with-faces
+                        '((display . "remote-image-gone"))))))
+    (with-selected-frame frame
+      (with-temp-buffer
+        (set-window-buffer (frame-root-window frame) (current-buffer))
+        (insert-image (remoteterm-tests--pbm-image 20 10))
+        (remote-display--record display)
+        (redisplay t)
+        (delete-terminal (get-device-terminal display))))
+    (garbage-collect)
+    (clear-image-cache t)
+    'alive))
 
 ;;;; The loop of the trials
 

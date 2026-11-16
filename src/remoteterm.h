@@ -36,6 +36,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 struct rd_message;
 struct remote_font_transfer;
+struct remote_image_memo;
 struct remote_image_transfer;
 
 /* A session sends font data, clipboard data and image data only while
@@ -131,10 +132,12 @@ struct remote_display_info
 
   /* The number of the attach of the client, unique for the life of the
      process; the PNG files that the client did not get complete, in
-     order; and true if a draw-image message went out before the data
-     of its image.  See remoteimage.c.  */
+     order; the IDs that the client must forget; and true if a
+     draw-image message went out before the data of its image.  See
+     remoteimage.c.  */
   uintmax_t image_attach;
   struct remote_image_transfer *image_transfers;
+  struct remote_image_memo *image_forgets;
   bool image_drawn_early;
 
   /* The sink of the client that receives the messages of this
@@ -260,6 +263,7 @@ extern void remote_drop_font_transfers (struct remote_display_info *);
 /* Defined in remoteimage.c.  */
 extern uint32_t remote_image_prepare (struct frame *, struct image *);
 extern void remote_send_image_data (struct remote_display_info *);
+extern void remote_send_image_forgets (struct remote_display_info *);
 extern void remote_reset_images (struct remote_display_info *);
 
 /* In remoteterm.c.  */

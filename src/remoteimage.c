@@ -39,7 +39,17 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    rest at the pace of the connection.  The files go out in order, one
    file after the other.  If a draw-image message went out before the
    data of its image was complete, the client did not paint the image.
-   Thus, when no file is left, the session draws its frames again.  */
+   Thus, when no file is left, the session draws its frames again.
+
+   When the pixels of an image go, Cairo calls remote_image_gone with
+   the memo.  If the client of a session has the ID, the memo goes on
+   the list of IDs to forget of that session.  The session sends a
+   forget-image message for each of them at the end of the next update,
+   or when the transport sent all its bytes.  The callback does not
+   send, because it runs inside a free of Cairo, and a send can
+   allocate and exit.  A canvas changes its pixels and keeps its
+   surface, so a refresh of a canvas gives it a new ID and puts the old
+   ID on the list.  */
 
 #include <config.h>
 
@@ -64,15 +74,29 @@ struct remote_image_transfer
 };
 
 /* The memo of an image, in the Cairo user data of its source surface:
-   the ID of the image, and the attach whose client has its pixels, or
-   0.  */
+   the ID of the image, the refresh of the image (see
+   canvas_prepare_for_display) that has the pixels of the ID, and the
+   attach whose client has the pixels, or 0.  On the list of IDs to
+   forget of a session, NEXT is the next memo of the list.  */
 struct remote_image_memo
 {
+  struct remote_image_memo *next;
   uint32_t id;
+  uint32_t refresh;
   uintmax_t attach;
 };
 
 static struct remote_image_memo *remote_image_memo (struct image *);
+static void remote_renew_image_id (struct remote_display_info *,
+				   struct remote_image_memo *, uint32_t);
+static void remote_image_gone (void *);
+static struct remote_display_info *remote_attach_session (uintmax_t);
+static void remote_forget_image_id (struct remote_display_info *,
+				    struct remote_image_memo *);
+static void remote_drop_image_transfer (struct remote_display_info *,
+					uint32_t);
+static uint32_t remote_pop_forget (struct remote_display_info *);
+static void remote_free_transfer_at (struct remote_image_transfer **);
 static bool remote_image_fits_p (struct image *);
 static bool remote_queue_image (struct remote_display_info *,
 				struct image *, struct remote_image_memo *);
@@ -108,6 +132,8 @@ remote_image_prepare (struct frame *f, struct image *img)
   struct remote_image_memo *memo = remote_image_memo (img);
   if (!memo)
     return 0;
+  if (memo->refresh != img->refresh)
+    remote_renew_image_id (dpyinfo, memo, img->refresh);
   if (memo->attach != dpyinfo->image_attach
       && !remote_queue_image (dpyinfo, img, memo))
     return 0;
@@ -126,13 +152,31 @@ remote_send_image_data (struct remote_display_info *dpyinfo)
   remote_send_paced (dpyinfo, remote_send_image_step);
 }
 
-/* Forget the images that the client of DPYINFO has, and the transfers
-   to it.  A new client of DPYINFO, or none, comes after this call.  */
+/* Send a forget-image message for each ID on the list of IDs to
+   forget of DPYINFO, and empty the list.  The messages are small, so
+   they do not wait for the pace of the connection.  */
+void
+remote_send_image_forgets (struct remote_display_info *dpyinfo)
+{
+  while (dpyinfo->image_forgets)
+    {
+      struct rd_message message
+	= { .type = RD_FORGET_IMAGE,
+	    .u.forget_image = { .image = remote_pop_forget (dpyinfo) } };
+      remote_send_message (dpyinfo, &message);
+    }
+}
+
+/* Forget the images that the client of DPYINFO has, the transfers to
+   it, and the IDs that it must forget.  A new client of DPYINFO, or
+   none, comes after this call.  */
 void
 remote_reset_images (struct remote_display_info *dpyinfo)
 {
   while (dpyinfo->image_transfers)
     remote_pop_image_transfer (dpyinfo);
+  while (dpyinfo->image_forgets)
+    remote_pop_forget (dpyinfo);
   dpyinfo->image_drawn_early = false;
   dpyinfo->image_attach = ++remote_last_attach;
 }
@@ -153,14 +197,76 @@ remote_image_memo (struct image *img)
   if (memo)
     return memo;
   memo = xmalloc (sizeof *memo);
-  *memo = (struct remote_image_memo) { .id = ++remote_last_image_id };
-  if (cairo_surface_set_user_data (surface, &remote_image_key, memo, xfree)
+  *memo = (struct remote_image_memo) { .id = ++remote_last_image_id,
+				       .refresh = img->refresh };
+  if (cairo_surface_set_user_data (surface, &remote_image_key, memo,
+				   remote_image_gone)
       != CAIRO_STATUS_SUCCESS)
     {
       xfree (memo);
       return NULL;
     }
   return memo;
+}
+
+/* Give MEMO a new ID for the pixels of the refresh REFRESH of its
+   image, a canvas that changed its pixels in place.  If the client of
+   DPYINFO has the old ID, put the old ID on the list of IDs to forget
+   of DPYINFO.  */
+static void
+remote_renew_image_id (struct remote_display_info *dpyinfo,
+		       struct remote_image_memo *memo, uint32_t refresh)
+{
+  if (memo->attach == dpyinfo->image_attach)
+    {
+      struct remote_image_memo *old = xmalloc (sizeof *old);
+      *old = (struct remote_image_memo) { .id = memo->id };
+      remote_forget_image_id (dpyinfo, old);
+    }
+  memo->id = ++remote_last_image_id;
+  memo->refresh = refresh;
+  memo->attach = 0;
+}
+
+/* The destroy function of the memo DATA: Cairo calls it when the
+   source surface of the image of DATA goes.  If the client of a
+   session has the ID of DATA, put DATA on the list of IDs to forget of
+   that session.  Else free DATA.  This runs inside a free of Cairo:
+   it must not run Lisp, allocate, or send.  */
+static void
+remote_image_gone (void *data)
+{
+  struct remote_image_memo *memo = data;
+  struct remote_display_info *dpyinfo = remote_attach_session (memo->attach);
+  if (dpyinfo)
+    remote_forget_image_id (dpyinfo, memo);
+  else
+    xfree (memo);
+}
+
+/* Return the session whose client has the attach ATTACH, or NULL if
+   no session has it.  A deleted session is not in x_display_list, so
+   this does not return it.  */
+static struct remote_display_info *
+remote_attach_session (uintmax_t attach)
+{
+  if (!attach)
+    return NULL;
+  for (struct remote_display_info *d = x_display_list; d; d = d->next)
+    if (d->image_attach == attach)
+      return d;
+  return NULL;
+}
+
+/* Put MEMO on the list of IDs to forget of DPYINFO, and stop the
+   transfer of its ID.  DPYINFO then owns MEMO.  */
+static void
+remote_forget_image_id (struct remote_display_info *dpyinfo,
+			struct remote_image_memo *memo)
+{
+  remote_drop_image_transfer (dpyinfo, memo->id);
+  memo->next = dpyinfo->image_forgets;
+  dpyinfo->image_forgets = memo;
 }
 
 /* Return true if each side of the image IMG has from 1 to
@@ -278,8 +384,40 @@ remote_transfer_pending_p (struct remote_display_info *dpyinfo, uint32_t id)
 static void
 remote_pop_image_transfer (struct remote_display_info *dpyinfo)
 {
-  struct remote_image_transfer *transfer = dpyinfo->image_transfers;
-  dpyinfo->image_transfers = transfer->next;
+  remote_free_transfer_at (&dpyinfo->image_transfers);
+}
+
+/* Remove the transfer of the image ID from the transfers of DPYINFO, if
+   it is there, and free its file.  */
+static void
+remote_drop_image_transfer (struct remote_display_info *dpyinfo, uint32_t id)
+{
+  struct remote_image_transfer **link = &dpyinfo->image_transfers;
+  while (*link && (*link)->id != id)
+    link = &(*link)->next;
+  if (*link)
+    remote_free_transfer_at (link);
+}
+
+/* Remove the transfer at LINK from its list, and free it and its
+   file.  */
+static void
+remote_free_transfer_at (struct remote_image_transfer **link)
+{
+  struct remote_image_transfer *transfer = *link;
+  *link = transfer->next;
   free (transfer->bytes);
   xfree (transfer);
+}
+
+/* Remove the first memo of the list of IDs to forget of DPYINFO, free
+   it, and return its ID.  */
+static uint32_t
+remote_pop_forget (struct remote_display_info *dpyinfo)
+{
+  struct remote_image_memo *memo = dpyinfo->image_forgets;
+  uint32_t id = memo->id;
+  dpyinfo->image_forgets = memo->next;
+  xfree (memo);
+  return id;
 }

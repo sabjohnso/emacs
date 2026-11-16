@@ -650,22 +650,25 @@ remote_forget_frames (struct remote_display_info *dpyinfo)
    go to the client.  This is the update_end_hook, and the flush_display
    hook of the redisplay interface.  Both are necessary: redisplay calls
    the second one only for the selected frame, and it calls it for
-   messages outside an update.  */
+   messages outside an update.  First send the image IDs that the
+   client must forget.  */
 static void
 remote_flush_frame (struct frame *f)
 {
+  remote_send_image_forgets (FRAME_DISPLAY_INFO (f));
   struct remote_sink *sink = FRAME_DISPLAY_INFO (f)->sink;
   if (sink)
     sink->ops->flush (sink->data);
 }
 
 /* The frame_up_to_date_hook.  The update of F ended, so send the image
-   data that the update did not send.  If the flush at the end of the
-   update sent all the bytes, the transport does not call
+   messages that the update did not send.  If the flush at the end of
+   the update sent all the bytes, the transport does not call
    remote_output_drained, so continue here.  */
 static void
 remote_frame_up_to_date (struct frame *f)
 {
+  remote_send_image_forgets (FRAME_DISPLAY_INFO (f));
   remote_send_image_data (FRAME_DISPLAY_INFO (f));
 }
 
@@ -676,6 +679,7 @@ remote_output_drained (struct remote_display_info *dpyinfo)
 {
   remote_send_font_data (dpyinfo);
   remote_send_clipboard_data (dpyinfo);
+  remote_send_image_forgets (dpyinfo);
   remote_send_image_data (dpyinfo);
 }
 
