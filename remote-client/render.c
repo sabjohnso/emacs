@@ -34,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdbool.h>
 #include <stdlib.h>
 
+#include "images.h"
 #include "render.h"
 #include "table.h"
 
@@ -44,6 +45,8 @@ struct rc_renderer
   struct rc_table frames;
   /* The Cairo scaled font of each font that the server defined.  */
   struct rc_table fonts;
+  /* The pixels of each image that the server sent.  */
+  struct rc_images *images;
 };
 
 /* A rectangle with 64-bit fields.  */
@@ -75,6 +78,10 @@ static void fill_fringe_bits (cairo_surface_t *,
 			      const struct rd_draw_fringe *,
 			      struct rc_rect, bool);
 static bool fringe_bit (uint16_t, int, int);
+static struct rc_change draw_image (struct rc_renderer *,
+				    const struct rd_draw_image *);
+static void paint_image (cairo_surface_t *, cairo_surface_t *,
+			 const struct rd_draw_image *);
 static cairo_surface_t *snapshot (cairo_surface_t *, struct rc_rect);
 static cairo_surface_t *resized_copy (cairo_surface_t *, uint32_t,
 				      uint32_t);
@@ -95,6 +102,7 @@ rc_renderer_new (struct rc_font_source fonts)
   if (!renderer)
     abort ();
   renderer->source = fonts;
+  renderer->images = rc_images_new ();
   return renderer;
 }
 
@@ -103,6 +111,7 @@ rc_renderer_free (struct rc_renderer *renderer)
 {
   rc_table_free (&renderer->frames, destroy_surface);
   rc_table_free (&renderer->fonts, destroy_font);
+  rc_images_free (renderer->images);
   free (renderer);
 }
 
@@ -148,9 +157,23 @@ rc_apply (struct rc_renderer *renderer, const struct rd_message *message)
       draw_glyphs (surface, rc_table_get (&renderer->fonts, glyphs->font),
 		   glyphs);
       return drawn (surface, glyphs->frame);
+    case RD_DRAW_IMAGE:
+      return draw_image (renderer, &message->u.draw_image);
+    case RD_IMAGE_DATA:
+      rc_images_add (renderer->images, message);
+      return (struct rc_change) { .kind = RC_NO_CHANGE };
+    case RD_FORGET_IMAGE:
+      rc_images_forget (renderer->images, message->u.forget_image.image);
+      return (struct rc_change) { .kind = RC_NO_CHANGE };
     default:
       return (struct rc_change) { .kind = RC_NO_CHANGE };
     }
+}
+
+void
+rc_renderer_forget_images (struct rc_renderer *renderer)
+{
+  rc_images_clear (renderer->images);
 }
 
 void
@@ -431,6 +454,43 @@ fringe_bit (uint16_t bits, int width, int column)
 {
   int bit = width - 1 - column;
   return bit < 16 && (bits >> bit) & 1;
+}
+
+/* Apply the draw-image message DRAW to the frames of RENDERER, and
+   return its change.  If the frame or the image does not exist, the
+   message changes nothing.  */
+static struct rc_change
+draw_image (struct rc_renderer *renderer, const struct rd_draw_image *draw)
+{
+  cairo_surface_t *surface = rc_frame_surface (renderer, draw->frame);
+  cairo_surface_t *image = rc_images_find (renderer->images, draw->image);
+  if (!surface || !image)
+    return (struct rc_change) { .kind = RC_NO_CHANGE };
+  paint_image (surface, image, draw);
+  return drawn (surface, draw->frame);
+}
+
+/* Paint IMAGE over SURFACE at the position of DRAW, inside the clip
+   of DRAW.  The rectangle of the paint is inside SURFACE and inside
+   IMAGE, so Cairo gets only small positions.  */
+static void
+paint_image (cairo_surface_t *surface, cairo_surface_t *image,
+	     const struct rd_draw_image *draw)
+{
+  struct rc_rect area = { draw->x, draw->y,
+			  cairo_image_surface_get_width (image),
+			  cairo_image_surface_get_height (image) };
+  struct rc_rect clip = { draw->clip_x, draw->clip_y, draw->clip_width,
+			  draw->clip_height };
+  struct rc_rect rect = intersection (clip_rect (clip, surface), area);
+  if (rect.width == 0 || rect.height == 0)
+    return;
+  cairo_t *cr = cairo_create (surface);
+  cairo_rectangle (cr, rect.x, rect.y, rect.width, rect.height);
+  cairo_clip (cr);
+  cairo_set_source_surface (cr, image, area.x, area.y);
+  cairo_paint (cr);
+  cairo_destroy (cr);
 }
 
 /* Return a new surface with the pixels of RECT of SURFACE.  RECT must

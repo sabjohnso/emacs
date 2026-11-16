@@ -42,20 +42,22 @@ GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 # window manager does.
 X11_LIBS = $(shell $(PKG_CONFIG) --libs x11)
 
-RENDER_OBJS = render.o table.o rdproto.o
+RENDER_OBJS = render.o images.o table.o rdproto.o rdchunk.o rdpng.o
 READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o fontstore.o
 CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   fonts.o hashfonts.o hashcache.o fontstore.o rdproto.o link.o backoff.o \
   unixsocket.o relay.o relayline.o token.o flow.o pending.o stream.o tls.o \
   listenspec.o rdchunk.o \
+  images.o rdpng.o \
   sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
   test-backoff test-reconnect test-relayline \
   test-relay test-flow test-pending test-unixsocket \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
-  test-fontstore test-rdchunk test-rdpng
+  test-fontstore test-rdchunk test-rdpng \
+  test-images
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -75,6 +77,7 @@ check: remote-client $(TESTS)
 	./test-fontstore
 	./test-rdchunk
 	./test-rdpng
+	./test-images
 	./test-input
 	./test-client
 	./test-sizes
@@ -123,6 +126,9 @@ test-rdchunk: test-rdchunk.o rdchunk.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-rdpng: test-rdpng.o rdpng.o
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+test-images: test-images.o images.o table.o rdchunk.o rdpng.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 test-input: test-input.o input.o rdproto.o
@@ -202,7 +208,12 @@ test-rdpng.o: ../src/rdpng.h ../src/rdproto.h
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
 render.o test-render.o: render.h table.h ../src/rdproto.h
+render.o: images.h
+test-render.o: ../src/rdchunk.h ../src/rdpng.h
 table.o test-table.o: table.h
+images.o test-images.o: images.h ../src/rdproto.h
+images.o: table.h ../src/rdchunk.h ../src/rdpng.h
+test-images.o: ../src/rdpng.h
 reader.o test-reader.o: reader.h ../src/rdproto.h
 fonts.o test-glyphs.o test-client.o test-fonts.o: fonts.h render.h \
   ../src/rdproto.h

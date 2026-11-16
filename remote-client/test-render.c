@@ -52,6 +52,19 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    One more law does not use the model: a second apply of a message
    that is not copy-area changes nothing.
 
+   The image laws do not use the model either.  A trial of them sends
+   the PNG file of a random image (opaque, or with alpha) in
+   image-data messages, and then a draw-image message with a random
+   position and a random clip:
+
+   - draw-image sets each pixel inside the clip and inside the image
+     to OVER (the old pixel, the image pixel), and changes no other
+     pixel.  For an opaque image pixel, OVER gives the image pixel.
+   - draw-image of an ID that the renderer does not have changes no
+     pixel, and reports no change.
+   - After forget-image of the ID, or after rc_renderer_forget_images,
+     draw-image of the ID changes no pixel.
+
    The model and the renderer can have the same wrong idea of a law.
    The examples give pixels that a person calculated, so they do not
    use the model.
@@ -74,10 +87,15 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <cairo.h>
 
+#include "rdchunk.h"
+#include "rdpng.h"
 #include "rdproto.h"
 #include "render.h"
 
 enum { TRIALS = 300, STEPS = 40 };
+
+/* The largest side of a random image of the image laws.  */
+enum { MAX_IMAGE_SIDE = 16 };
 
 /* The frame IDs of a trial.  The set is small, so many messages are
    for a frame that exists, and some are for a frame that does not.
@@ -130,7 +148,22 @@ static const struct rc_font_source no_fonts = { find_no_font, NULL, NULL };
 
 static bool run_examples (void);
 static bool run_example (const struct example *);
+static bool run_seed (uint64_t);
 static bool run_trial (uint64_t);
+static bool run_image_trial (uint64_t);
+static bool check_image_draw (struct rc_renderer *,
+			      const struct rd_draw_image *,
+			      cairo_surface_t *, uint64_t);
+static bool check_no_change (struct rc_renderer *,
+			     const struct rd_draw_image *, uint64_t,
+			     const char *);
+static uint32_t *frame_pixels (cairo_surface_t *);
+static uint32_t over (uint32_t, uint32_t);
+static uint32_t surface_pixel (cairo_surface_t *, int64_t, int64_t);
+static void send_image (struct rc_renderer *, uint32_t,
+			cairo_surface_t *);
+static cairo_surface_t *random_image (uint64_t *);
+static uint32_t random_image_pixel (uint64_t *, bool);
 static bool idempotent_p (const struct rd_message *);
 static bool check_change (struct rc_change, struct model *,
 			  const struct rd_message *, uint64_t, int);
@@ -179,12 +212,12 @@ int
 main (int argc, char **argv)
 {
   if (argc == 2)
-    return run_trial (strtoull (argv[1], NULL, 10)) ? 0 : 1;
+    return run_seed (strtoull (argv[1], NULL, 10)) ? 0 : 1;
   if (!run_examples ())
     return 1;
   uint64_t base = ((uint64_t) time (NULL) << 20 ^ getpid ()) * TRIALS;
   for (int trial = 0; trial < TRIALS; trial++)
-    if (!run_trial (base + trial))
+    if (!run_seed (base + trial))
       return 1;
   printf ("test-render: the examples and %d trials passed\n", TRIALS);
   return 0;
@@ -335,6 +368,14 @@ find_no_font (void *data, const struct rc_font_key *key)
 {
   (void) data, (void) key;
   return NULL;
+}
+
+/* Run the trial and the image trial of SEED.  Return true if both
+   pass.  */
+static bool
+run_seed (uint64_t seed)
+{
+  return run_trial (seed) && run_image_trial (seed);
 }
 
 /* The property.  */
@@ -505,6 +546,237 @@ pixel_problem (const uint32_t *expected, cairo_surface_t *surface,
 	  }
       }
   return NULL;
+}
+
+/* The image laws.  */
+
+/* Run the image trial of SEED.  Return true if it passes.  */
+static bool
+run_image_trial (uint64_t seed)
+{
+  uint64_t state = seed;
+  struct rc_renderer *renderer = rc_renderer_new (no_fonts);
+  struct rd_message define = { .type = RD_DEFINE_FRAME };
+  define.u.define_frame = (struct rd_define_frame)
+    { 1, random_below (&state, TYPICAL_SIZE) + 1,
+      random_below (&state, TYPICAL_SIZE) + 1 };
+  rc_apply (renderer, &define);
+  for (int i = 0; i < 4; i++)
+    {
+      struct rd_message clear = { .type = RD_CLEAR_AREA };
+      clear.u.clear_area = (struct rd_clear_area)
+	{ 1, random_position (&state), random_position (&state),
+	  random_size (&state), random_size (&state), random_next (&state) };
+      rc_apply (renderer, &clear);
+    }
+  uint32_t id = random_next (&state) | 1;
+  cairo_surface_t *image = random_image (&state);
+  send_image (renderer, id, image);
+  struct rd_draw_image draw =
+    { 1, id, random_position (&state), random_position (&state),
+      random_position (&state), random_position (&state),
+      random_size (&state), random_size (&state) };
+  if (random_below (&state, 2))
+    {
+      draw.x = random_below (&state, TYPICAL_SIZE + 2 * MAX_IMAGE_SIDE)
+	       - MAX_IMAGE_SIDE;
+      draw.y = random_below (&state, TYPICAL_SIZE + 2 * MAX_IMAGE_SIDE)
+	       - MAX_IMAGE_SIDE;
+    }
+  struct rd_draw_image unknown = draw;
+  unknown.image = id ^ 1;
+  bool passed = (check_image_draw (renderer, &draw, image, seed)
+		 && check_no_change (renderer, &unknown, seed,
+				     "an unknown ID"));
+  if (random_below (&state, 2))
+    {
+      struct rd_message forget = { .type = RD_FORGET_IMAGE };
+      forget.u.forget_image.image = id;
+      rc_apply (renderer, &forget);
+    }
+  else
+    rc_renderer_forget_images (renderer);
+  passed = passed && check_no_change (renderer, &draw, seed,
+				      "a forgotten ID");
+  cairo_surface_destroy (image);
+  rc_renderer_free (renderer);
+  return passed;
+}
+
+/* Apply DRAW to RENDERER, which has the pixels IMAGE for its image.
+   Return true if each pixel of the frame inside the clip and the image
+   is OVER (old pixel, image pixel), each other pixel does not change,
+   and the change is a draw of the frame.  Else report the problem of
+   the trial SEED.  */
+static bool
+check_image_draw (struct rc_renderer *renderer,
+		  const struct rd_draw_image *draw, cairo_surface_t *image,
+		  uint64_t seed)
+{
+  cairo_surface_t *frame = rc_frame_surface (renderer, draw->frame);
+  int width = cairo_image_surface_get_width (frame);
+  int height = cairo_image_surface_get_height (frame);
+  struct rect clip = { draw->clip_x, draw->clip_y, draw->clip_width,
+		       draw->clip_height };
+  struct rect area = { draw->x, draw->y,
+		       cairo_image_surface_get_width (image),
+		       cairo_image_surface_get_height (image) };
+  uint32_t *expected = frame_pixels (frame);
+  for (int y = 0; y < height; y++)
+    for (int x = 0; x < width; x++)
+      if (inside_rect (clip, x, y) && inside_rect (area, x, y))
+	expected[y * width + x]
+	  = over (expected[y * width + x],
+		  surface_pixel (image, x - area.x, y - area.y));
+  struct rd_message message = { .type = RD_DRAW_IMAGE,
+				.u.draw_image = *draw };
+  struct rc_change change = rc_apply (renderer, &message);
+  char text[100];
+  const char *problem
+    = (change.kind != RC_FRAME_DRAWN || change.frame != draw->frame
+       ? "the change is not a draw of the frame"
+       : pixel_problem (expected, rc_frame_surface (renderer, draw->frame),
+			text, sizeof text));
+  if (problem)
+    {
+      fprintf (stderr, "test-render: image seed %llu: %s\nafter ",
+	       (unsigned long long) seed, problem);
+      write_message (&message);
+    }
+  free (expected);
+  return !problem;
+}
+
+/* Apply DRAW to RENDERER, which has no image for it.  Return true if
+   no pixel changes, and the change is RC_NO_CHANGE.  Else report the
+   problem of the trial SEED for the draw of WHAT.  */
+static bool
+check_no_change (struct rc_renderer *renderer,
+		 const struct rd_draw_image *draw, uint64_t seed,
+		 const char *what)
+{
+  cairo_surface_t *frame = rc_frame_surface (renderer, draw->frame);
+  uint32_t *expected = frame_pixels (frame);
+  struct rd_message message = { .type = RD_DRAW_IMAGE,
+				.u.draw_image = *draw };
+  struct rc_change change = rc_apply (renderer, &message);
+  char text[100];
+  const char *problem
+    = (change.kind != RC_NO_CHANGE ? "the change is not RC_NO_CHANGE"
+       : pixel_problem (expected, frame, text, sizeof text));
+  if (problem)
+    fprintf (stderr, "test-render: image seed %llu, draw of %s: %s\n",
+	     (unsigned long long) seed, what, problem);
+  free (expected);
+  return !problem;
+}
+
+/* Return a new array with the colors of the pixels of the RGB24
+   surface FRAME, row by row.  */
+static uint32_t *
+frame_pixels (cairo_surface_t *frame)
+{
+  int width = cairo_image_surface_get_width (frame);
+  int height = cairo_image_surface_get_height (frame);
+  uint32_t *pixels = calloc ((size_t) width * height + 1, sizeof *pixels);
+  if (!pixels)
+    abort ();
+  for (int y = 0; y < height; y++)
+    for (int x = 0; x < width; x++)
+      pixels[y * width + x] = surface_pixel (frame, x, y) & 0xffffff;
+  return pixels;
+}
+
+/* Return the color of the premultiplied ARGB32 pixel SOURCE OVER the
+   opaque color DESTINATION, 0xRRGGBB.  Each channel is SOURCE +
+   DESTINATION * (255 - alpha) / 255, rounded to the nearest
+   integer.  */
+static uint32_t
+over (uint32_t destination, uint32_t source)
+{
+  uint32_t alpha = source >> 24;
+  uint32_t color = 0;
+  for (int shift = 0; shift < 24; shift += 8)
+    {
+      uint32_t s = source >> shift & 0xff;
+      uint32_t d = destination >> shift & 0xff;
+      color |= (s + (d * (255 - alpha) + 127) / 255) << shift;
+    }
+  return color;
+}
+
+/* Return the pixel at X, Y of the image surface SURFACE.  A pixel of
+   an RGB24 surface is opaque.  */
+static uint32_t
+surface_pixel (cairo_surface_t *surface, int64_t x, int64_t y)
+{
+  cairo_surface_flush (surface);
+  const unsigned char *data = cairo_image_surface_get_data (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  uint32_t pixel;
+  memcpy (&pixel, data + y * stride + x * 4, sizeof pixel);
+  if (cairo_image_surface_get_format (surface) == CAIRO_FORMAT_RGB24)
+    pixel |= 0xff000000;
+  return pixel;
+}
+
+/* Send the pixels IMAGE to RENDERER as the image ID, in the
+   image-data messages of its PNG file.  */
+static void
+send_image (struct rc_renderer *renderer, uint32_t id,
+	    cairo_surface_t *image)
+{
+  size_t size;
+  unsigned char *png = rd_png_encode (image, &size);
+  if (!png)
+    abort ();
+  for (uint32_t i = 0; i < rd_chunk_count (size); i++)
+    {
+      struct rd_message message;
+      rd_chunk_message (RD_IMAGE_DATA, id, png, size, i, &message);
+      rc_apply (renderer, &message);
+    }
+  free (png);
+}
+
+/* Return an image with a random size and random pixels.  Half the
+   images are opaque.  The pixels of the other images are valid
+   premultiplied pixels with a random alpha.  */
+static cairo_surface_t *
+random_image (uint64_t *state)
+{
+  bool opaque = random_below (state, 2);
+  int width = random_below (state, MAX_IMAGE_SIDE) + 1;
+  int height = random_below (state, MAX_IMAGE_SIDE) + 1;
+  cairo_surface_t *image
+    = cairo_image_surface_create (opaque ? CAIRO_FORMAT_RGB24
+				  : CAIRO_FORMAT_ARGB32, width, height);
+  cairo_surface_flush (image);
+  unsigned char *data = cairo_image_surface_get_data (image);
+  int stride = cairo_image_surface_get_stride (image);
+  for (int y = 0; y < height; y++)
+    for (int x = 0; x < width; x++)
+      {
+	uint32_t pixel = random_image_pixel (state, opaque);
+	memcpy (data + y * stride + x * 4, &pixel, sizeof pixel);
+      }
+  cairo_surface_mark_dirty (image);
+  return image;
+}
+
+/* Return a random premultiplied ARGB32 pixel.  The pixel is OPAQUE,
+   or it has a random alpha, and then some pixels are transparent.  */
+static uint32_t
+random_image_pixel (uint64_t *state, bool opaque)
+{
+  uint64_t bits = random_next (state);
+  uint32_t alpha = (opaque || random_below (state, 4) == 0 ? 255
+		    : random_below (state, 4) == 0 ? 0
+		    : bits >> 24 & 0xff);
+  uint32_t pixel = alpha << 24;
+  for (int shift = 0; shift < 24; shift += 8)
+    pixel |= ((bits >> shift & 0xff) * alpha + 127) / 255 << shift;
+  return pixel;
 }
 
 /* The model.  */

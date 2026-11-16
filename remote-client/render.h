@@ -76,6 +76,11 @@ struct rc_renderer;
 extern struct rc_renderer *rc_renderer_new (struct rc_font_source fonts);
 extern void rc_renderer_free (struct rc_renderer *renderer);
 
+/* Free the images of RENDERER.  The image IDs of the server are valid
+   for one connection only, so the client calls this function for each
+   new connection.  */
+extern void rc_renderer_forget_images (struct rc_renderer *renderer);
+
 /* Return true if the last define-font message for the font ID FONT
    gave RENDERER a face to draw with.  */
 extern bool rc_renderer_has_font (const struct rc_renderer *renderer,
@@ -108,7 +113,8 @@ struct rc_change
 /* Apply MESSAGE to the frames of RENDERER, and return its change.  A
    message for a frame that the server did not define changes nothing.
    A draw-glyphs message for a font that the server did not define, or
-   that the font source did not find, changes no pixel.  */
+   that the font source did not find, changes no pixel.  A draw-image
+   message for an image that RENDERER does not have changes nothing.  */
 extern struct rc_change rc_apply (struct rc_renderer *renderer,
 				  const struct rd_message *message);
 

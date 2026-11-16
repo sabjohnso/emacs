@@ -573,12 +573,15 @@ open_connection (struct window_mode *mode, struct rc_stream *stream)
    server sends a font file only on the connection of its request, so
    forget the requests.  Drop a clipboard text that did not come
    complete, and forget the last clipboard text, so the new connection
-   gets the clipboard text again.  A feature with state for one
-   connection resets it here.  */
+   gets the clipboard text again.  The image IDs of the server are
+   valid for one connection, and the server sends each image again, so
+   forget the images.  A feature with state for one connection resets
+   it here.  */
 static void
 reset_connection_state (struct window_mode *mode)
 {
   rc_font_store_reset (mode->store);
+  rc_renderer_forget_images (mode->renderer);
   rd_chunks_free (&mode->clipboard);
   g_free (mode->clipboard_text);
   mode->clipboard_text = NULL;
