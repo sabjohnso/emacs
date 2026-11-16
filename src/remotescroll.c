@@ -69,7 +69,6 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* The input of a later step gives a part of rdscrollbar.h to Emacs as
    an enum scroll_bar_part.  */
-verify ((int) RD_SCROLL_BAR_NOWHERE == scroll_bar_nowhere);
 verify ((int) RD_SCROLL_BAR_ABOVE_HANDLE == scroll_bar_above_handle);
 verify ((int) RD_SCROLL_BAR_HANDLE == scroll_bar_handle);
 verify ((int) RD_SCROLL_BAR_BELOW_HANDLE == scroll_bar_below_handle);
@@ -92,6 +91,10 @@ static void draw_bar (struct frame *, int, int, int,
 static void keep_layout (struct window *, const int[LAYOUT_SIZE]);
 static bool kept_layout (struct window *, struct rd_scroll_bar_layout *);
 static struct rd_scroll_bar_layout layout_of (const int[LAYOUT_SIZE]);
+static bool grab_release (struct remote_scroll_bar_grab *,
+			  const struct remote_scroll_bar_button *);
+static bool press (struct remote_scroll_bar_grab *,
+		   const struct remote_scroll_bar_button *);
 static struct window *grab_window (const struct remote_scroll_bar_grab *);
 static struct window *bar_window_at (struct frame *, int, int);
 static void store_click (struct window *,
@@ -115,37 +118,16 @@ remote_set_vertical_scroll_bar (struct window *w, int portion, int whole,
 }
 
 bool
-remote_scroll_bar_grab_release (struct remote_scroll_bar_grab *grab,
-				const struct remote_scroll_bar_button *button)
+remote_scroll_bar_button_input (struct remote_scroll_bar_grab *grab,
+				const struct remote_scroll_bar_button *button,
+				bool wheel)
 {
-  if (!grab->held || button->code != grab->code)
-    return false;
-  grab->held = false;
-  if (button->press)
-    return false;
-  struct window *w = grab_window (grab);
-  struct rd_scroll_bar_layout layout;
-  if (w && kept_layout (w, &layout))
-    store_click (w, &layout, button);
-  return true;
-}
-
-bool
-remote_scroll_bar_press (struct remote_scroll_bar_grab *grab,
-			 const struct remote_scroll_bar_button *button)
-{
-  struct window *w = bar_window_at (button->frame, button->x, button->y);
-  if (!w || !button->press)
-    return false;
-  struct rd_scroll_bar_layout layout;
-  if (kept_layout (w, &layout))
-    {
-      *grab = (struct remote_scroll_bar_grab)
-	{ .held = true, .frame = button->frame, .x = button->x,
-	  .y = button->y, .code = button->code };
-      store_click (w, &layout, button);
-    }
-  return true;
+  /* The release of the grab comes first, because it ends the grab.  A
+     press of the button of the grab ends the grab too, and then it
+     can start a new grab.  A wheel button does not press a bar.  */
+  if (grab_release (grab, button))
+    return true;
+  return !wheel && press (grab, button);
 }
 
 bool
@@ -174,6 +156,50 @@ remote_scroll_bar_forget_frame (struct remote_scroll_bar_grab *grab,
 {
   if (grab->frame == f)
     grab->frame = NULL;
+}
+
+/* If GRAB holds and BUTTON is a release of its button, end GRAB,
+   store the scroll-bar event of the release for the window of the
+   press, and return true.  The release can be in any frame.  A press
+   of the button of GRAB ends GRAB too, as a release that the client
+   lost, but it returns false, because the press is a new press.
+   Return false for each other button.  */
+static bool
+grab_release (struct remote_scroll_bar_grab *grab,
+	      const struct remote_scroll_bar_button *button)
+{
+  if (!grab->held || button->code != grab->code)
+    return false;
+  grab->held = false;
+  if (button->press)
+    return false;
+  struct window *w = grab_window (grab);
+  struct rd_scroll_bar_layout layout;
+  if (w && kept_layout (w, &layout))
+    store_click (w, &layout, button);
+  return true;
+}
+
+/* If BUTTON is a press on a vertical scroll bar, start GRAB, store the
+   scroll-bar event of the press, and return true.  A press on a bar
+   that redisplay did not draw yet has no event, but the function
+   returns true for it.  Return false for each other button.  */
+static bool
+press (struct remote_scroll_bar_grab *grab,
+       const struct remote_scroll_bar_button *button)
+{
+  struct window *w = bar_window_at (button->frame, button->x, button->y);
+  if (!w || !button->press)
+    return false;
+  struct rd_scroll_bar_layout layout;
+  if (kept_layout (w, &layout))
+    {
+      *grab = (struct remote_scroll_bar_grab)
+	{ .held = true, .frame = button->frame, .x = button->x,
+	  .y = button->y, .code = button->code };
+      store_click (w, &layout, button);
+    }
+  return true;
 }
 
 /* Draw the bar LAYOUT at LEFT on F, with the size WIDTH, HEIGHT: the
@@ -251,10 +277,10 @@ bar_window_at (struct frame *f, int x, int y)
 	  ? XWINDOW (window) : NULL);
 }
 
-/* Store the scroll-bar click event of BUTTON on the bar LAYOUT of W,
-   as x_scroll_bar_handle_click of xterm.c does.  The x of the event is
-   the offset of BUTTON in the bar, and the y is the range of the
-   bar.  */
+/* Store the scroll-bar click event of BUTTON on the bar LAYOUT of W.
+   The event is modelled on x_scroll_bar_handle_click of xterm.c.  The
+   x of the event is the offset of BUTTON in the bar, and the y is the
+   range of the bar.  */
 static void
 store_click (struct window *w, const struct rd_scroll_bar_layout *layout,
 	     const struct remote_scroll_bar_button *button)

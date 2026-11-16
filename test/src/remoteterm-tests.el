@@ -1136,9 +1136,10 @@ Return the mouse events."
                    nil))))
 
 (defun remoteterm-tests--bar-deleted-frame-case ()
-  "Press on a bar, delete its frame, and release on another frame.
-Return the mouse events of each step: the press, the release, and
-then a click in the text area of the other frame."
+  "Press on a bar, delete its frame, move and release on another frame.
+Return the mouse events of each step: the press, the motion, the
+release, and then a click in the text area of the other frame.  The
+event of the motion is the symbol of its movement event."
   (x-open-connection "remote-draw")
   (let ((frame (remoteterm-tests--make-frame
                 "remote-draw" '((vertical-scroll-bars . right))))
@@ -1155,6 +1156,9 @@ then a click in the text area of the other frame."
              (mapcar #'car (remoteterm-tests--mouse-events-now)))
            (progn
              (delete-frame frame)
+             (remoteterm-tests--bar-motion other 3 3)
+             (car (remoteterm-tests--movement-now)))
+           (progn
              (remoteterm-tests--bar-click other 3 3 1 0)
              (mapcar #'car (remoteterm-tests--mouse-events-now)))
            (pcase-let ((`(,x . ,y) (remoteterm-tests--text-pixel
@@ -1168,12 +1172,81 @@ then a click in the text area of the other frame."
 
 (ert-deftest remoteterm-tests-scroll-bar-deleted-frame ()
   "A delete of the frame of a press on a bar ends the grab.
-The release after it gives no event, and a later click is plain."
+A motion after it is a plain motion, the release gives no event, and
+a later click is plain."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
     (should (equal (remoteterm-tests--daemon-call
                     'remoteterm-tests--bar-deleted-frame-case)
-                   '((down-mouse-1) nil (down-mouse-1 mouse-1))))))
+                   '((down-mouse-1) mouse-movement nil
+                     (down-mouse-1 mouse-1))))))
+
+(defun remoteterm-tests--bar-gone-case (change)
+  "Press on a bar, call CHANGE, then move, release and click.
+The frame has a bar on the right.  CHANGE is a function of the frame
+and its window.  It changes the windows so that the bar at the press
+position is gone or has no layout.  CHANGE and the input after it run
+with no redisplay.  Return a list: the symbol of the movement event
+of the motion, the mouse events of the release, and the mouse events
+of a later click in the text area."
+  (remoteterm-tests--bar-input-session
+   '((width . 40) (height . 20) (vertical-scroll-bars . right))
+   (lambda (frame window _other)
+     (pcase-let ((`(,x . ,y) (remoteterm-tests--bar-pixel window)))
+       (remoteterm-tests--bar-click frame x y 1 1)
+       (remoteterm-tests--mouse-events-now)
+       (let ((inhibit-redisplay t))
+         (funcall change frame window)
+         (list
+          (progn
+            (remoteterm-tests--bar-motion frame x y)
+            (car (remoteterm-tests--movement-now)))
+          (progn
+            (remoteterm-tests--bar-click frame x y 1 0)
+            (mapcar #'car (remoteterm-tests--mouse-events-now)))
+          (pcase-let ((`(,x . ,y) (remoteterm-tests--text-pixel
+                                   (frame-first-window frame))))
+            (remoteterm-tests--bar-click frame x y 1 1)
+            (remoteterm-tests--bar-click frame x y 1 0)
+            (mapcar #'car (remoteterm-tests--mouse-events-now)))))))))
+
+(defun remoteterm-tests--bar-off-case ()
+  "Press on a bar, and turn the bars of its frame off.
+Return the value of `remoteterm-tests--bar-gone-case'."
+  (remoteterm-tests--bar-gone-case
+   (lambda (frame _window)
+     (set-frame-parameter frame 'vertical-scroll-bars nil))))
+
+(ert-deftest remoteterm-tests-scroll-bar-gone ()
+  "A grab whose bar is gone gives no scroll-bar event.
+After a press on a bar, the bars of the frame go off.  A motion is a
+plain motion, the release gives no event, and the grab ends, so a
+later click is plain."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--bar-off-case)
+                   '(mouse-movement nil (down-mouse-1 mouse-1))))))
+
+(defun remoteterm-tests--bar-split-case ()
+  "Press on a bar, and split its window into a left and a right window.
+The bar at the press position is then the bar of the new right window,
+which redisplay did not draw yet.  Return the value of
+`remoteterm-tests--bar-gone-case'."
+  (remoteterm-tests--bar-gone-case
+   (lambda (_frame window)
+     (split-window window nil 'right))))
+
+(ert-deftest remoteterm-tests-scroll-bar-grab-no-layout ()
+  "A grab whose bar has no layout gives no scroll-bar event.
+After a press on a bar, a new window that redisplay did not draw has
+the bar at the press position.  A motion is a plain motion, the
+release gives no event, and the grab ends, so a later click is plain."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--bar-split-case)
+                   '(mouse-movement nil (down-mouse-1 mouse-1))))))
 
 (defun remoteterm-tests--bar-press-again-case ()
   "Press on a bar, then press the same button in the text area and

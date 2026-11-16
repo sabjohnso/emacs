@@ -27,15 +27,15 @@ static int scale (double, int, int);
 static struct rd_scroll_bar_rect rows_of (const struct rd_scroll_bar_rect *,
 					  int, int);
 static int clamp (int, int, int);
-static int max (int, int);
-static int min (int, int);
+static int max_int (int, int);
+static int min_int (int, int);
 
 struct rd_scroll_bar_layout
 rd_scroll_bar_layout (int top, int height, int width, int portion, int whole,
 		      int position)
 {
   struct rd_scroll_bar_rect inside = inside_of (top, height, width);
-  int range = max (0, inside.height - RD_SCROLL_BAR_MIN_HANDLE);
+  int range = max_int (0, inside.height - RD_SCROLL_BAR_MIN_HANDLE);
   int start, end;
   handle_rows (range, portion, whole, position, &start, &end);
   return (struct rd_scroll_bar_layout)
@@ -68,13 +68,13 @@ inside_of (int top, int height, int width)
   return (struct rd_scroll_bar_rect)
     { .x = RD_SCROLL_BAR_BORDER,
       .y = top + RD_SCROLL_BAR_BORDER,
-      .width = max (0, width - 2 * RD_SCROLL_BAR_BORDER),
-      .height = max (0, height - 2 * RD_SCROLL_BAR_BORDER) };
+      .width = max_int (0, width - 2 * RD_SCROLL_BAR_BORDER),
+      .height = max_int (0, height - 2 * RD_SCROLL_BAR_BORDER) };
 }
 
 /* Set *START and *END to the first row of the handle and the row after
-   it, relative to the inside top, for a bar with RANGE.  These are the
-   rules of xterm.c (x_scroll_bar_set_handle): the start stays in
+   it, relative to the inside top, for a bar with RANGE.  The rules are
+   modelled on x_scroll_bar_set_handle of xterm.c: the start stays in
    [0, RANGE], the end stays in [start, RANGE], and the handle goes
    RD_SCROLL_BAR_MIN_HANDLE rows past the end.  The inside height is
    at least RANGE + RD_SCROLL_BAR_MIN_HANDLE if RANGE is not 0, so only
@@ -92,7 +92,7 @@ handle_rows (int range, int portion, int whole, int position, int *start,
   else
     {
       *start = scale (position, range, whole);
-      *end = max (*start, scale ((double) position + portion, range, whole));
+      *end = max_int (*start, scale ((double) position + portion, range, whole));
     }
   *end += RD_SCROLL_BAR_MIN_HANDLE;
 }
@@ -111,8 +111,8 @@ scale (double amount, int range, int whole)
 static struct rd_scroll_bar_rect
 rows_of (const struct rd_scroll_bar_rect *inside, int first, int last)
 {
-  int low = min (first, inside->height);
-  int high = min (last, inside->height);
+  int low = min_int (first, inside->height);
+  int high = min_int (last, inside->height);
   return (struct rd_scroll_bar_rect)
     { .x = inside->x,
       .y = inside->y + low,
@@ -127,14 +127,16 @@ clamp (int value, int low, int high)
   return value < low ? low : value > high ? high : value;
 }
 
+/* Return the larger of A and B.  */
 static int
-max (int a, int b)
+max_int (int a, int b)
 {
   return a > b ? a : b;
 }
 
+/* Return the smaller of A and B.  */
 static int
-min (int a, int b)
+min_int (int a, int b)
 {
   return a < b ? a : b;
 }

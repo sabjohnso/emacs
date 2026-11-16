@@ -102,6 +102,8 @@ static uint32_t remote_frame_id (struct frame *);
 static void remote_init_frame_font (struct frame *, Lisp_Object);
 static void remote_default_frame_parameters (struct frame *, Lisp_Object);
 static void remote_finish_frame (struct frame *, Lisp_Object);
+static void remote_update_scroll_bar_width (struct frame *);
+static void remote_set_scroll_bar_default_width (struct frame *);
 static void remote_forget_mouse_frame (struct remote_display_info *,
 				       struct frame *);
 static void remote_free_frame_resources (struct frame *);
@@ -1315,14 +1317,34 @@ remote_default_font_parameter (struct frame *f, Lisp_Object parms)
 			 RES_TYPE_STRING);
 }
 
-/* The set_scroll_bar_default_width_hook.  The default width of a
-   scroll bar is that of an X scroll bar with no toolkit: the smallest
-   number of whole columns that is at least 14 pixels.  */
+/* The smallest default width of a scroll bar, in pixels.  This is the
+   width of an X scroll bar with no toolkit.  */
+enum { REMOTE_SCROLL_BAR_MIN_DEFAULT_WIDTH = 14 };
+
+/* Set the scroll-bar width of F for the column width of F.  A scroll
+   bar of the default width gets the default width.  A scroll bar of a
+   given width (the scroll-bar-width parameter) keeps that width, in
+   whole columns.  */
+static void
+remote_update_scroll_bar_width (struct frame *f)
+{
+  int unit = FRAME_COLUMN_WIDTH (f);
+  if (RANGED_FIXNUMP (1, get_frame_param (f, Qscroll_bar_width), INT_MAX))
+    FRAME_CONFIG_SCROLL_BAR_COLS (f)
+      = (FRAME_CONFIG_SCROLL_BAR_WIDTH (f) + unit - 1) / unit;
+  else
+    remote_set_scroll_bar_default_width (f);
+}
+
+/* The set_scroll_bar_default_width_hook.  The default width is the
+   smallest number of whole columns that is at least
+   REMOTE_SCROLL_BAR_MIN_DEFAULT_WIDTH pixels.  */
 static void
 remote_set_scroll_bar_default_width (struct frame *f)
 {
   int unit = FRAME_COLUMN_WIDTH (f);
-  FRAME_CONFIG_SCROLL_BAR_COLS (f) = (14 + unit - 1) / unit;
+  FRAME_CONFIG_SCROLL_BAR_COLS (f)
+    = (REMOTE_SCROLL_BAR_MIN_DEFAULT_WIDTH + unit - 1) / unit;
   FRAME_CONFIG_SCROLL_BAR_WIDTH (f) = FRAME_CONFIG_SCROLL_BAR_COLS (f) * unit;
 }
 
@@ -1345,14 +1367,7 @@ remote_new_font (struct frame *f, Lisp_Object font_object, int fontset)
   FRAME_LINE_HEIGHT (f) = ascent + descent;
   FRAME_TAB_BAR_HEIGHT (f) = FRAME_TAB_BAR_LINES (f) * FRAME_LINE_HEIGHT (f);
 
-  /* A scroll bar of the default width gets the default width of the
-     new font.  A scroll bar of a given width keeps that width.  */
-  int unit = FRAME_COLUMN_WIDTH (f);
-  if (RANGED_FIXNUMP (1, get_frame_param (f, Qscroll_bar_width), INT_MAX))
-    FRAME_CONFIG_SCROLL_BAR_COLS (f)
-      = (FRAME_CONFIG_SCROLL_BAR_WIDTH (f) + unit - 1) / unit;
-  else
-    remote_set_scroll_bar_default_width (f);
+  remote_update_scroll_bar_width (f);
 
   if (f->can_set_window_size)
     adjust_frame_size (f, FRAME_COLS (f) * FRAME_COLUMN_WIDTH (f),

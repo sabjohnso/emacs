@@ -19,8 +19,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* The remote display draws a vertical scroll bar as filled rectangles.
    This file calculates the rectangles of a bar, and finds the part of
-   the bar at a y position.  The rules are those of the scroll bar of X
-   with no toolkit (xterm.c): a border of RD_SCROLL_BAR_BORDER pixels
+   the bar at a y position.  The rules are modelled on the scroll bar
+   of X with no toolkit (xterm.c): a border of RD_SCROLL_BAR_BORDER pixels
    on each side, and a handle of at least RD_SCROLL_BAR_MIN_HANDLE
    pixels.  The file uses no Lisp objects and no other header of Emacs,
    so the tests of the client can compile it, as they compile
@@ -60,13 +60,11 @@ struct rd_scroll_bar_layout
   struct rd_scroll_bar_rect below;
 };
 
-/* The parts of a bar.  The order is that of the first values of enum
-   scroll_bar_part in termhooks.h.  rd_scroll_bar_hit does not give
-   RD_SCROLL_BAR_NOWHERE.  */
+/* The parts of a bar.  The values are those of the same parts in enum
+   scroll_bar_part of termhooks.h.  */
 enum rd_scroll_bar_part
   {
-    RD_SCROLL_BAR_NOWHERE,
-    RD_SCROLL_BAR_ABOVE_HANDLE,
+    RD_SCROLL_BAR_ABOVE_HANDLE = 1,
     RD_SCROLL_BAR_HANDLE,
     RD_SCROLL_BAR_BELOW_HANDLE,
   };

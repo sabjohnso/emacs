@@ -30,8 +30,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - Monotone position: a larger POSITION, with the same PORTION and
      WHOLE, does not move the handle top up.
    - Whole zero: a WHOLE of 0 gives a handle that fills the inside.
-   - Hit agrees: a y in ABOVE, HANDLE or BELOW gives the part of that
-     rectangle.
+   - Handle proportion: if WHOLE is not 0, the handle has the rows of
+     an oracle with 64-bit integers.  The handle starts at
+     clamp (POSITION * range / WHOLE, 0, range) and stops at
+     max (start, clamp ((POSITION + PORTION) * range / WHOLE, 0, range))
+     + RD_SCROLL_BAR_MIN_HANDLE, and the inside clips the two rows.
+   - Monotone portion: a larger PORTION, with the same POSITION and
+     WHOLE, does not make the handle smaller.
+   - Full view: if WHOLE is not 0, POSITION is 0 and PORTION is at least
+     WHOLE, the handle fills the inside.
+   - Hit agrees: the first row, the last row and a random row of ABOVE,
+     HANDLE and BELOW give the part of that rectangle.  The row above a
+     handle gives ABOVE, and the row below it gives BELOW.
    - Hit monotone: a larger y does not give a part or an offset that is
      smaller.
    - Offset: for each y, also above and below the bar, the offset is
@@ -75,14 +85,19 @@ static bool tiling_law (uint64_t *);
 static bool visible_handle_law (uint64_t *);
 static bool monotone_position_law (uint64_t *);
 static bool whole_zero_law (uint64_t *);
+static bool handle_proportion_law (uint64_t *);
+static bool monotone_portion_law (uint64_t *);
+static bool full_view_law (uint64_t *);
 static bool hit_agrees_law (uint64_t *);
 static bool hit_monotone_law (uint64_t *);
 static bool offset_law (uint64_t *);
 static bool small_bar_example (uint64_t *);
+static int oracle_row (int64_t, int, int);
 static bool tiles_p (const struct rd_scroll_bar_layout *, const struct bar *);
 static bool hit_in_p (const struct rd_scroll_bar_layout *,
 		      const struct rd_scroll_bar_rect *,
 		      enum rd_scroll_bar_part, uint64_t *);
+static bool hit_beside_handle_p (const struct rd_scroll_bar_layout *);
 static struct rd_scroll_bar_layout layout_of (const struct bar *);
 static enum rd_scroll_bar_part hit (const struct rd_scroll_bar_layout *, int,
 				    int *);
@@ -91,8 +106,8 @@ static int random_size (uint64_t *);
 static int random_amount (uint64_t *);
 static int random_y (uint64_t *, const struct bar *);
 static int clamp (int, int, int);
-static int max (int, int);
-static int min (int, int);
+static int max_int (int, int);
+static int min_int (int, int);
 static int random_between (uint64_t *, int, int);
 static uint64_t random_below (uint64_t *, uint64_t);
 static uint64_t random_next (uint64_t *);
@@ -108,6 +123,9 @@ static const struct
     { "visible handle", visible_handle_law },
     { "monotone position", monotone_position_law },
     { "whole zero", whole_zero_law },
+    { "handle proportion", handle_proportion_law },
+    { "monotone portion", monotone_portion_law },
+    { "full view", full_view_law },
     { "hit agrees", hit_agrees_law },
     { "hit monotone", hit_monotone_law },
     { "offset", offset_law },
@@ -163,7 +181,7 @@ visible_handle_law (uint64_t *state)
   struct bar bar = random_bar (state);
   struct rd_scroll_bar_layout layout = layout_of (&bar);
   return (layout.handle.height
-	  >= min (RD_SCROLL_BAR_MIN_HANDLE, layout.inside.height));
+	  >= min_int (RD_SCROLL_BAR_MIN_HANDLE, layout.inside.height));
 }
 
 static bool
@@ -190,6 +208,50 @@ whole_zero_law (uint64_t *state)
 }
 
 static bool
+handle_proportion_law (uint64_t *state)
+{
+  struct bar bar = random_bar (state);
+  if (bar.whole == 0)
+    bar.whole = 1;
+  struct rd_scroll_bar_layout layout = layout_of (&bar);
+  int range = layout.range, height = layout.inside.height;
+  int start = oracle_row (bar.position, range, bar.whole);
+  int end = max_int (start, oracle_row ((int64_t) bar.position + bar.portion,
+					range, bar.whole));
+  int top = min_int (start, height);
+  return (layout.handle.y - layout.inside.y == top
+	  && (layout.handle.height
+	      == min_int (end + RD_SCROLL_BAR_MIN_HANDLE, height) - top));
+}
+
+static bool
+monotone_portion_law (uint64_t *state)
+{
+  struct bar bar = random_bar (state);
+  struct bar larger = bar;
+  larger.portion = (bar.portion
+		    + random_below (state, (uint64_t) INT_MAX - bar.portion
+				    + 1));
+  struct rd_scroll_bar_layout first = layout_of (&bar);
+  struct rd_scroll_bar_layout second = layout_of (&larger);
+  return second.handle.height >= first.handle.height;
+}
+
+static bool
+full_view_law (uint64_t *state)
+{
+  struct bar bar = random_bar (state);
+  if (bar.whole == 0)
+    bar.whole = 1;
+  bar.position = 0;
+  bar.portion = (bar.whole
+		 + random_below (state, (uint64_t) INT_MAX - bar.whole + 1));
+  struct rd_scroll_bar_layout layout = layout_of (&bar);
+  return (layout.handle.y == layout.inside.y
+	  && layout.handle.height == layout.inside.height);
+}
+
+static bool
 hit_agrees_law (uint64_t *state)
 {
   struct bar bar = random_bar (state);
@@ -197,7 +259,8 @@ hit_agrees_law (uint64_t *state)
   return (hit_in_p (&layout, &layout.above, RD_SCROLL_BAR_ABOVE_HANDLE, state)
 	  && hit_in_p (&layout, &layout.handle, RD_SCROLL_BAR_HANDLE, state)
 	  && hit_in_p (&layout, &layout.below, RD_SCROLL_BAR_BELOW_HANDLE,
-		       state));
+		       state)
+	  && hit_beside_handle_p (&layout));
 }
 
 static bool
@@ -207,7 +270,7 @@ hit_monotone_law (uint64_t *state)
   struct rd_scroll_bar_layout layout = layout_of (&bar);
   int y1 = random_y (state, &bar);
   int y2 = random_y (state, &bar);
-  int low = min (y1, y2), high = max (y1, y2);
+  int low = min_int (y1, y2), high = max_int (y1, y2);
   int low_offset, high_offset;
   enum rd_scroll_bar_part low_part = hit (&layout, low, &low_offset);
   enum rd_scroll_bar_part high_part = hit (&layout, high, &high_offset);
@@ -220,7 +283,7 @@ offset_law (uint64_t *state)
   struct bar bar = random_bar (state);
   struct rd_scroll_bar_layout layout = layout_of (&bar);
   int y = random_y (state, &bar);
-  int range = max (0, layout.inside.height - RD_SCROLL_BAR_MIN_HANDLE);
+  int range = max_int (0, layout.inside.height - RD_SCROLL_BAR_MIN_HANDLE);
   int offset, given_range;
   rd_scroll_bar_hit (&layout, y, &offset, &given_range);
   return (layout.range == range && given_range == range
@@ -244,8 +307,8 @@ small_bar_example (uint64_t *state)
 	bar.height = height;
 	bar.width = width;
 	struct rd_scroll_bar_layout layout = layout_of (&bar);
-	int inside_height = max (0, height - 2 * RD_SCROLL_BAR_BORDER);
-	int inside_width = max (0, width - 2 * RD_SCROLL_BAR_BORDER);
+	int inside_height = max_int (0, height - 2 * RD_SCROLL_BAR_BORDER);
+	int inside_width = max_int (0, width - 2 * RD_SCROLL_BAR_BORDER);
 	int offset;
 	hit (&layout, random_y (state, &bar), &offset);
 	passed = (tiles_p (&layout, &bar)
@@ -268,8 +331,10 @@ tiles_p (const struct rd_scroll_bar_layout *layout, const struct bar *bar)
     = (layout->top == bar->top
        && inside->x == RD_SCROLL_BAR_BORDER
        && inside->y == bar->top + RD_SCROLL_BAR_BORDER
-       && inside->width == max (0, bar->width - 2 * RD_SCROLL_BAR_BORDER)
-       && inside->height == max (0, bar->height - 2 * RD_SCROLL_BAR_BORDER));
+       && (inside->width
+	   == max_int (0, bar->width - 2 * RD_SCROLL_BAR_BORDER))
+       && (inside->height
+	   == max_int (0, bar->height - 2 * RD_SCROLL_BAR_BORDER)));
   int next = inside->y;
   for (int i = 0; passed && i < 3; i++)
     {
@@ -280,8 +345,20 @@ tiles_p (const struct rd_scroll_bar_layout *layout, const struct bar *bar)
   return passed && next == inside->y + inside->height;
 }
 
-/* Return true if a random y in RECT gives PART in LAYOUT.  A RECT with
-   no pixels has no y, so it gives true.  */
+/* Return the row that the oracle of the handle proportion law gives
+   for AMOUNT in a bar with RANGE and WHOLE: AMOUNT * RANGE / WHOLE,
+   rounded down and clamped to [0, RANGE].  The product of two values
+   of int fits in 64 bits.  */
+static int
+oracle_row (int64_t amount, int range, int whole)
+{
+  int64_t row = amount * range / whole;
+  return row > range ? range : (int) row;
+}
+
+/* Return true if the first row, the last row and a random row of RECT
+   give PART in LAYOUT.  A RECT with no pixels has no rows, so it gives
+   true.  */
 static bool
 hit_in_p (const struct rd_scroll_bar_layout *layout,
 	  const struct rd_scroll_bar_rect *rect, enum rd_scroll_bar_part part,
@@ -289,9 +366,28 @@ hit_in_p (const struct rd_scroll_bar_layout *layout,
 {
   if (rect->height == 0)
     return true;
-  int y = rect->y + random_below (state, rect->height);
+  int rows[] = { rect->y, rect->y + rect->height - 1,
+		 rect->y + (int) random_below (state, rect->height) };
   int offset;
-  return hit (layout, y, &offset) == part;
+  for (size_t i = 0; i < sizeof rows / sizeof *rows; i++)
+    if (hit (layout, rows[i], &offset) != part)
+      return false;
+  return true;
+}
+
+/* Return true if the row above the handle of LAYOUT gives
+   RD_SCROLL_BAR_ABOVE_HANDLE, and the row below it gives
+   RD_SCROLL_BAR_BELOW_HANDLE.  A handle with no pixels gives true.  */
+static bool
+hit_beside_handle_p (const struct rd_scroll_bar_layout *layout)
+{
+  const struct rd_scroll_bar_rect *handle = &layout->handle;
+  int offset;
+  return (handle->height == 0
+	  || (hit (layout, handle->y - 1, &offset)
+	      == RD_SCROLL_BAR_ABOVE_HANDLE
+	      && (hit (layout, handle->y + handle->height, &offset)
+		  == RD_SCROLL_BAR_BELOW_HANDLE)));
 }
 
 /* Return the layout of BAR.  */
@@ -369,13 +465,13 @@ clamp (int value, int low, int high)
 }
 
 static int
-max (int a, int b)
+max_int (int a, int b)
 {
   return a > b ? a : b;
 }
 
 static int
-min (int a, int b)
+min_int (int a, int b)
 {
   return a < b ? a : b;
 }
