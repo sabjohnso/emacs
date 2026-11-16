@@ -58,7 +58,8 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-relay test-flow test-pending test-unixsocket \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
   test-fontstore test-rdchunk test-rdpng \
-  test-images test-stack test-compose
+  test-images test-stack test-compose \
+  test-menu
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -81,6 +82,7 @@ check: remote-client $(TESTS)
 	./test-images
 	./test-stack
 	./test-compose
+	./test-menu
 	./test-input
 	./test-client
 	./test-sizes
@@ -139,6 +141,9 @@ test-stack: test-stack.o stack.o
 
 test-compose: test-compose.o compose.o stack.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+test-menu: test-menu.o menu.o
+	$(CC) $(LDFLAGS) -o $@ $^
 
 test-input: test-input.o input.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
@@ -260,6 +265,7 @@ tls.o test-tls.o test-relay.o test-ssh.o relay.o direct.o: tls.h pin.h stream.h
 test-ssh.o: relayline.h token.h ../src/rdproto.h
 listenspec.o test-listenspec.o relay.o client.o test-relay.o: listenspec.h
 sshconfig.o test-sshconfig.o bootstrap.o client.o: sshconfig.h
+menu.o test-menu.o: menu.h ../src/rdproto.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)
