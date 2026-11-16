@@ -49,6 +49,13 @@
 ;;    generator here, and a generator gives the fields of its type.
 ;;    So a new type or a new field fails until these tests know it.
 ;;
+;; The message types come in blocks, in the order of the blocks of
+;; RD_MESSAGES in src/rdproto.h.  A new type of a block changes the
+;; type bytes of all later blocks.  Thus no test uses a literal type
+;; byte for a message after the base block.  A wire-format example
+;; computes the type byte from the position of the type in
+;; `remote-display--message-formats'.
+;;
 ;; The message types:
 ;;
 ;; (hello :version V)
@@ -153,7 +160,7 @@
 (declare-function remote-display--decode "remotefns.c" (bytes &optional start))
 (declare-function remote-display--encode "remotefns.c" (message))
 
-(defconst remotefns-tests--generators
+(defconst remotefns-tests--base-generators
   '((hello . remotefns-tests--hello)
     (draw-glyphs . remotefns-tests--draw-glyphs)
     (clear-area . remotefns-tests--clear-area)
@@ -174,7 +181,30 @@
     (want-font . remotefns-tests--want-font)
     (font-data . remotefns-tests--font-data)
     (clipboard-data . remotefns-tests--clipboard-data))
-  "The message types, each with the function that generates a message.")
+  "The message types of the base block, each with its generator.")
+
+(defconst remotefns-tests--image-generators nil
+  "The message types of the image block, each with its generator.
+The block is for the feature Images (PLAN.org feature-images).")
+
+(defconst remotefns-tests--child-frame-generators nil
+  "The message types of the child frame block, each with its generator.
+The block is for the feature Tooltips and child frames (PLAN.org
+feature-child-frames).")
+
+(defconst remotefns-tests--menu-generators nil
+  "The message types of the menu block, each with its generator.
+The block is for the feature Menus drawn by Emacs (PLAN.org
+feature-menus).")
+
+(defconst remotefns-tests--generators
+  (append remotefns-tests--base-generators
+          remotefns-tests--image-generators
+          remotefns-tests--child-frame-generators
+          remotefns-tests--menu-generators)
+  "The message types, each with the function that generates a message.
+The blocks come in the order of the blocks of RD_MESSAGES in
+src/rdproto.h.")
 
 (defconst remotefns-tests--clip-and-color
   '(:clip-x 0 :clip-y 0 :clip-width 0 :clip-height 0 :color 0 :font 0)
