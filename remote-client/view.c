@@ -49,8 +49,10 @@ struct rc_view
   struct open_menu *menu;
 };
 
-/* The popup menu SERIAL of VIEW for FRAME in the window of the root
-   frame ROOT, and its GTK menu.  ANSWERED is true after the view sent the choice of the menu.
+/* The popup menu SERIAL of VIEW for FRAME, and its GTK menu.  The
+   menu is in the window of ROOT, the root of FRAME when the menu
+   opened.  The menu stays in that window if FRAME gets a new root.
+   ANSWERED is true after the view sent the choice of the menu.
    CLOSE_SOURCE is the idle source that closes the menu, or 0.  */
 struct open_menu
 {
@@ -321,22 +323,24 @@ show_frame (struct rc_view *view, uint32_t frame)
 }
 
 /* Forget FRAME, which the renderer removed.  Draw its root again, so
-   that a child frame goes away from the window of its root.  */
+   that a child frame goes away from the window of its root.  Dismiss
+   the open menu if it is for FRAME.  */
 static void
 remove_frame (struct rc_view *view, uint32_t frame)
 {
+  if (view->menu && view->menu->frame == frame)
+    dismiss_menu (view);
   redraw_frame (view, frame);
   rc_stack_forget (view->stack, frame);
   remove_window (view, frame);
 }
 
 /* Remove the window of FRAME, if it has one.  Dismiss the open menu
-   if it is for FRAME, or if it is in the window of FRAME.  */
+   if it is in the window of FRAME.  */
 static void
 remove_window (struct rc_view *view, uint32_t frame)
 {
-  if (view->menu
-      && (view->menu->frame == frame || view->menu->root == frame))
+  if (view->menu && view->menu->root == frame)
     dismiss_menu (view);
   struct rc_window *window = rc_table_remove (&view->windows, frame);
   if (window)
@@ -668,9 +672,9 @@ menu_anchor (const struct rc_view *view, const struct rd_show_menu *show,
 }
 
 /* Make the GTK menu of the tree MENU of the show-menu message SHOW,
-   and pop it up at POSITION in WINDOW.  Return the open
-   menu.  If the window system refuses the menu, GTK does not show the
-   menu, or hides it at once.  Then the view sends a dismissal.  */
+   and pop it up at POSITION in WINDOW.  Return the open menu.  If the
+   window system refuses the menu, GTK does not show the menu, or
+   hides it at once.  Then the view sends a dismissal.  */
 static struct open_menu *
 popup_menu (struct rc_window *window, const struct rd_show_menu *show,
 	    const struct rc_menu *menu, GdkRectangle position)

@@ -276,6 +276,88 @@
 ;;     is attached sends no forget-image message to the next client.
 ;;     An image that goes after the deletion of its session does not
 ;;     crash Emacs.
+;; 63. Image size limit: an image with a PNG file above the size
+;;     limit is an outline.  The session remembers the refusal until
+;;     the pixels of the image change.
+;; 64. Image ID wrap: an image ID is not 0 after the counter of IDs
+;;     wraps.
+;; 65. Image pixels: the PNG file of an image has the pixels of the
+;;     image at its scale.
+;; 66. Image alpha: the PNG file of an image keeps the pixels with no
+;;     color clear.
+;; 67. Child frame parent: a frame made with a parent-frame parameter
+;;     has that parent.  A parent that is not a live frame of the same
+;;     session signals an error, and the session then has no new
+;;     frame.
+;; 68. Child frame minibuffer: a minibuffer parameter nil or a window
+;;     gives no minibuffer of its own.  With a window, the frame uses
+;;     that window.  A minibuffer window of another session signals an
+;;     error.
+;; 69. Frame visibility: a new frame is visible unless its visibility
+;;     parameter is nil.  This holds for a root frame and for a child
+;;     frame.  The client gets a draw of the frame only if it is
+;;     visible.
+;; 70. No accept focus: the no-accept-focus parameter of a new frame
+;;     reads back.
+;; 71. Child z order: a new child frame is above each of its siblings.
+;; 72. Negative child position: a negative position of a new child
+;;     counts from the far edge of its parent.
+;; 73. Place replay: after random operations on child frames, a replay
+;;     of the output gives each frame that the client knows the
+;;     parent, the visibility and the position that it has in Emacs.
+;;     The z values of the siblings have the order of
+;;     `frame--z-order-lessp'.
+;; 74. Distinct z: no two siblings have the same z order.
+;; 75. Place before define: after an attach, the place that a client
+;;     has for a frame at its first define-frame is the place of the
+;;     frame in Emacs.
+;; 76. Quiet places: a redisplay with no change of a place sends no
+;;     place-frame, and a session with only visible root frames sends
+;;     no place-frame.  Thus the output of such a session is the same
+;;     as before child frames.  This is one law of the design with two
+;;     parts, so two tests name it.
+;; 77. Place flush: a move, a raise or a hide of a known child, with no
+;;     redisplay, sends a place-frame and flushes it.
+;; 78. Place reconnect: after random operations, a detach and an
+;;     attach, the new client gets the places of the frames in Emacs.
+;; 79. Negative set position: `set-frame-position' with a negative
+;;     value counts from the far edge of the parent, and
+;;     `frame-position' then gives a value that is not negative.
+;; 80. Help on motion: a motion over a text with a `help-echo' shows
+;;     the help.  A motion over a plain text after it calls
+;;     `show-help-function' with nil.
+;; 81. Highlight into child: a motion from a frame into its child
+;;     clears the mouse highlight.
+;; 82. Tip transparent: a motion, button or wheel input for a tip frame
+;;     T of R at X, Y has the effect of the same input for R at X +
+;;     left of T, Y + top of T.  A sum outside the range of int32 stops
+;;     at the limit of the range.
+;; 83. Tip keeps help: a motion in a tip over the help text of its
+;;     parent keeps the help.
+;; 84. Tip position: the place of a tooltip keeps it in the root and
+;;     off the mouse.  An integer left or top in the parameters gives
+;;     that exact position.
+;; 85. Tip show: after `x-show-tip', the root has one visible tooltip
+;;     with the text.  Its text area is as large as the lines, but not
+;;     larger than `x-max-tooltip-size'.
+;; 86. Tip settings: a tooltip has no bars and no fullscreen state.
+;; 87. Tip hide: `x-hide-tip' returns t once, and then nil.  After it,
+;;     the session has no tooltip frame.
+;; 88. Tip timeout: a small timeout hides the tooltip.  The timeout
+;;     `most-positive-fixnum' gives no error, and the tooltip stays.
+;; 89. Tooltip mode: with `tooltip-mode', a motion over a help text
+;;     shows a tooltip.  A motion into the tooltip after that does not
+;;     delete it.
+;; 90. Lisp hide: the C function `x-hide-tip' returns the value of the
+;;     Lisp hide.
+;; 91. Border width: a new frame can have a border-width parameter.
+;;     The client draws no outer border, so the border width stays 0.
+;; 92. Tip under child: a tooltip goes to the root of the frame under
+;;     the mouse, at the place of law 84 for the mouse position in the
+;;     root.
+;; 93. Tip with no mouse: with no mouse position, a tooltip goes to the
+;;     root of its frame, at the place of law 84 for the mouse at the
+;;     top-left corner of the root.
 ;; 94. Menu bar draw: each draw-glyphs message is inside the rows of
 ;;     the menu bar or below the top of the windows.  A frame with a
 ;;     menu bar draws in its rows.  After each change of the number of
@@ -311,6 +393,25 @@
 ;;     gives them, and then the show-menu message.  A quit, a throw, or a
 ;;     detach while the entries wait sends no entries, no show-menu
 ;;     message, and no hide-menu message.
+;; 99. Scroll-bar area: when a frame starts and after each change of
+;;     the scroll-bar parameters, each window has a vertical
+;;     scroll-bar area of the configured width on the requested side,
+;;     or no area if the request is nil.  A window has no horizontal
+;;     scroll bar.
+;; 100. Scroll-bar default width: when `scroll-bar-width' is nil, the
+;;      width of the area is the smallest multiple of the column width
+;;      that is at least 14 pixels.
+;; 101. Scroll-bar draw: a redisplay draws the full scroll-bar column
+;;      of each window.  The handle has the frame foreground, and the
+;;      trough and the border have the frame background.  The handle
+;;      top agrees with the window start in the buffer, within 1
+;;      pixel.
+;; 102. Scroll-bar click: a press on a bar gives a down event on the
+;;      bar, and its release gives a click or a drag event whose end
+;;      position is on the same bar, wherever the release is.
+;; 103. Scroll-bar drag: while the grab of a bar holds, each motion
+;;      gives a `scroll-bar-movement' event on the bar.  After the
+;;      release, a motion gives `mouse-movement' again.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -373,6 +474,47 @@
                   (display &optional xrm-string must-succeed))
 (declare-function xw-color-defined-p "remoteterm.c" (color &optional frame))
 (declare-function xw-color-values "remoteterm.c" (color &optional frame))
+
+;;;; The numbering of the laws
+
+(defconst remoteterm-tests--source
+  (expand-file-name "remoteterm-tests.el"
+                    (file-name-directory (macroexp-file-name)))
+  "The file name of the source of these tests.")
+
+(ert-deftest remoteterm-tests-law-numbers ()
+  "The commentary lists each law one time, in the order of the numbers.
+The numbers go from 1 to the highest number with no gap and no
+duplicate.  Each law number that the docstring of a test names, as
+\"(law N)\" or \"Law N:\", has an entry in the commentary."
+  (pcase-let ((`(,listed . ,named)
+               (remoteterm-tests--law-numbers remoteterm-tests--source)))
+    (should (equal listed (number-sequence 1 (length listed))))
+    (should-not (seq-difference named listed))))
+
+(defun remoteterm-tests--law-numbers (file)
+  "Return the law numbers of FILE as (LISTED . NAMED).
+LISTED has the numbers of the entries of the commentary, in order.
+NAMED has the numbers that the docstrings name."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((code (progn (re-search-forward "^;;; Code:$") (point))))
+      (cons (remoteterm-tests--matches "^;; \\([0-9]+\\)\\. " 1 code)
+            (remoteterm-tests--matches
+             "(law \\([0-9]+\\))\\|\"Law \\([0-9]+\\):" nil nil)))))
+
+(defun remoteterm-tests--matches (regexp group bound)
+  "Return the numbers that REGEXP matches before BOUND, in order.
+The number of a match is the text of the group GROUP, or of the first
+group that matched if GROUP is nil.  A nil BOUND is the end of the
+buffer."
+  (goto-char (point-min))
+  (let (numbers)
+    (while (re-search-forward regexp bound t)
+      (push (string-to-number
+             (match-string (or group (if (match-beginning 1) 1 2))))
+            numbers))
+    (nreverse numbers)))
 
 (defun remoteterm-tests--terminal (display)
   "Return the live terminal for DISPLAY, or nil."
@@ -1523,17 +1665,16 @@ window of another session signals an error."
                          `((parent-frame . ,parent)
                            (minibuffer . ,(minibuffer-window other)))))))))))
 
-(rd-daemon-deftest remoteterm-tests-minibuffer-only-frame
+(ert-deftest remoteterm-tests-minibuffer-only-frame ()
   "A minibuffer parameter `only' gives a frame with only a minibuffer.
-The root window of the frame is its own minibuffer window."
-  (remoteterm-tests--for-each-case
-   '(only)
-   (lambda (minibuffer)
-     (remoteterm-tests--with-display "remote-minibuffer-only"
-       (remoteterm-tests--with-frame frame "remote-minibuffer-only"
-           `((minibuffer . ,minibuffer))
-         (should (eq (frame-root-window frame) (minibuffer-window frame)))
-         (should (remoteterm-tests--own-minibuffer-p frame)))))))
+The root window of the frame is its own minibuffer window.  This is
+an example and not a law, so it runs in batch mode with no trials."
+  (skip-unless (featurep 'remote-test))
+  (remoteterm-tests--with-display "remote-minibuffer-only"
+    (remoteterm-tests--with-frame frame "remote-minibuffer-only"
+        '((minibuffer . only))
+      (should (eq (frame-root-window frame) (minibuffer-window frame)))
+      (should (remoteterm-tests--own-minibuffer-p frame)))))
 
 (rd-daemon-deftest remoteterm-tests-frame-visibility-parameter
   "A new frame is visible unless its visibility parameter is nil (law 69).
@@ -6601,8 +6742,10 @@ not an integer.
 Law: after each change, the height of the menu bar of a normal frame
 from `frame-geometry' is the number of lines that the last change
 gives, times the height of a line of the frame.  A value that is not
-a number of lines gives no menu bar.  A child frame and a
-minibuffer-only frame keep a height of 0."
+a number of lines gives no menu bar.  A frame made as a child frame
+and a minibuffer-only frame keep a height of 0.  The law does not
+cover a frame that gets a parent-frame parameter later: it keeps the
+menu bar lines that it had."
   (let ((rd-gen-trials 12))
     (rd-gen-for-all
      (lambda ()

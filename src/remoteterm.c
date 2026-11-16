@@ -930,7 +930,9 @@ remote_set_cursor_type (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
    height of the menu bar of F to VALUE lines.  A VALUE that is not a
    natural number gives no menu bar.  Redisplay draws the menu bar into
    the menu bar window of F.  A minibuffer-only frame and a child frame
-   have no menu bar.  */
+   do not change their menu bar.  Thus a frame made as a child frame
+   has no menu bar, and a frame that gets a parent later keeps the
+   menu bar lines that it had.  */
 static void
 remote_set_menu_bar_lines (struct frame *f, Lisp_Object value,
 			   Lisp_Object oldval)

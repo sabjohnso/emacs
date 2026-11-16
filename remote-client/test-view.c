@@ -51,9 +51,15 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - Choice: the activation of a random enabled item sends exactly one
      menu choice, with the id of that item.
 
-   The program runs TRIALS trials of the law from a seed that it gets
-   from the clock, and writes the seed of a failed trial.  With one
-   argument, it runs the trial of that seed only.  */
+   The origin law holds for each random chain of 1 to MAX_CHAIN child
+   frames of a root, with random offsets, some 0 or negative: a menu
+   of the last child at the point X, Y shows in the window of the
+   root, at X, Y plus the sum of the offsets of the chain.
+
+   The program runs TRIALS trials of the menu law and ORIGIN_TRIALS
+   trials of the origin law from a seed that it gets from the clock,
+   and writes the seed of a failed trial.  With one argument, it runs
+   the trial of that seed only.  */
 
 #include <config.h>
 
@@ -80,6 +86,10 @@ enum { CHILD = 2, CHILD_X = 50, CHILD_Y = 40, CHILD_WIDTH = 60,
 
 /* The number of trials of the menu law.  */
 enum { TRIALS = 40 };
+
+/* The number of trials of the origin law, and the longest chain of
+   child frames of a trial.  */
+enum { ORIGIN_TRIALS = 20, MAX_CHAIN = 4 };
 
 /* The enabled items of a menu: the widget of each, and the id of its
    entry.  */
@@ -175,6 +185,12 @@ static bool remove_menu_frame_example (void);
 static bool refused_grab_example (void);
 static bool child_menu_example (void);
 static bool remove_menu_root_example (void);
+static bool move_menu_child_example (void);
+static bool reparent_menu_example (void);
+static bool hidden_child_menu_example (void);
+static bool origin_laws (void);
+static bool origin_law (struct example *, uint64_t);
+static int random_offset (uint64_t *);
 static bool menu_origin (GtkMenuShell *, int *, int *);
 static bool trigger_example (GdkEventType);
 static bool widgets_example (void);
@@ -198,6 +214,9 @@ static int choices_after (const struct sent *, int);
 static void popdown (GtkMenuShell *);
 static void show_menu (struct example *, uint32_t, uint32_t,
 		       const struct menu_entry *, size_t, const char *);
+static void show_menu_at (struct example *, uint32_t, uint32_t, int32_t,
+			  int32_t, const struct menu_entry *, size_t,
+			  const char *);
 static GtkMenuShell *wait_for_menu (void);
 static GtkMenuShell *open_menu (void);
 static GtkWidget *find_item (GtkMenuShell *, const char *);
@@ -268,13 +287,16 @@ main (int argc, char **argv)
 		 && replace_example () && no_window_example ()
 		 && bad_entries_example () && remove_menu_frame_example ()
 		 && refused_grab_example () && child_menu_example ()
-		 && remove_menu_root_example ()
+		 && remove_menu_root_example () && move_menu_child_example ()
+		 && reparent_menu_example () && hidden_child_menu_example ()
+		 && origin_laws ()
 		 && trigger_example (GDK_BUTTON_PRESS)
 		 && trigger_example (GDK_KEY_PRESS)
 		 && widgets_example () && menu_laws ());
   if (!passed)
     return 1;
-  printf ("test-view: the examples and %d trials passed\n", TRIALS);
+  printf ("test-view: the examples, %d trials of the menu law and %d "
+	  "trials of the origin law passed\n", TRIALS, ORIGIN_TRIALS);
   return 0;
 }
 
@@ -986,6 +1008,141 @@ remove_menu_root_example (void)
   return passed;
 }
 
+/* The server moves the child frame while the menu of the child is
+   open.  The menu stays where it is, as a popup menu of X does, so
+   the view must keep the menu open and send no choice.  */
+static bool
+move_menu_child_example (void)
+{
+  struct example *example = start_child_example ();
+  show_menu (example, CHILD, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  place_frame (example, CHILD, 1, CHILD_X + 7, CHILD_Y + 3, true);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 0 && open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu of a moved child is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server gives the child frame the new root frame 3 while the
+   menu of the child is open.  The menu stays in the window of the
+   root of its opening, the frame 1.  Thus the removal of the frame 3
+   does not close the menu, and the removal of the frame 1 closes it
+   with one dismissal.  */
+static bool
+reparent_menu_example (void)
+{
+  struct example *example = start_child_example ();
+  define_any_frame (example, 3, 300, 200);
+  show_menu (example, CHILD, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  bool passed = wait_for_menu () != NULL;
+  place_frame (example, CHILD, 3, CHILD_X, CHILD_Y, true);
+  remove_any_frame (example, 3);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 0 && open_menu ();
+  remove_frame (example);
+  passed = passed && wait_for_choice (example, 5, 0, 0);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu of a child with a new root is "
+	     "wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* The server shows a menu for a hidden child frame.  The root has a
+   window, but the child is not in it, so the view must send a
+   dismissal at once.  */
+static bool
+hidden_child_menu_example (void)
+{
+  struct example *example = start_child_example ();
+  place_frame (example, CHILD, 1, CHILD_X, CHILD_Y, false);
+  show_menu (example, CHILD, 5, file_menu, G_N_ELEMENTS (file_menu), "");
+  struct rd_message dismissal =
+    { .type = RD_MENU_CHOICE, .u.menu_choice = { .serial = 5 } };
+  bool passed = (sent_p (&example->sent, &dismissal)
+		 && choice_count (&example->sent) == 1);
+  run_for (WAIT_LIMIT / 10);
+  passed = passed && choice_count (&example->sent) == 1 && !open_menu ();
+  if (!passed)
+    fprintf (stderr, "test-view: a menu of a hidden child is wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* Run ORIGIN_TRIALS trials of the origin law in one frame, from a seed
+   that comes from the clock.  Write the seed of a failed trial.  */
+static bool
+origin_laws (void)
+{
+  uint64_t base
+    = ((uint64_t) time (NULL) << 20 ^ getpid ()) * ORIGIN_TRIALS;
+  struct example *example = start_example (300, 200);
+  for (uint32_t frame = 2; frame <= MAX_CHAIN + 1; frame++)
+    define_any_frame (example, frame, CHILD_WIDTH, CHILD_HEIGHT);
+  bool passed = true;
+  for (int trial = 0; passed && trial < ORIGIN_TRIALS; trial++)
+    {
+      passed = origin_law (example, base + trial);
+      if (!passed)
+	fprintf (stderr, "test-view: the origin law failed with seed %llu\n",
+		 (unsigned long long) (base + trial));
+    }
+  end_example (example);
+  return passed;
+}
+
+/* Run the trial SEED of the origin law in the frame 1 of EXAMPLE.  A
+   random chain of 1 to MAX_CHAIN child frames starts at the frame 1,
+   and each child has a random offset in its parent.  The menu of the
+   last child at a random point must show in the window of the frame
+   1, at the point plus the sum of the offsets.  The sum is in the
+   frame 1, so GTK does not move the menu to keep it on the screen.
+   Return true if the law holds.  */
+static bool
+origin_law (struct example *example, uint64_t seed)
+{
+  static const struct menu_entry one_item[] =
+    { { ITEM, ENABLED, 1, "Item", "" } };
+  uint64_t state = seed;
+  int length = 1 + random_below (&state, MAX_CHAIN);
+  int sum_x = 0, sum_y = 0;
+  for (int i = 0; i < length; i++)
+    {
+      int x = random_offset (&state), y = random_offset (&state);
+      place_frame (example, i + 2, i + 1, x, y, true);
+      sum_x += x;
+      sum_y += y;
+    }
+  int want_x = random_below (&state, 250);
+  int want_y = random_below (&state, 150);
+  uint32_t serial = random_next (&state);
+  show_menu_at (example, length + 1, serial, want_x - sum_x,
+		want_y - sum_y, one_item, G_N_ELEMENTS (one_item), "");
+  GtkMenuShell *menu = wait_for_menu ();
+  int x = 0, y = 0;
+  bool passed = (menu && menu_origin (menu, &x, &y)
+		 && x == want_x && y == want_y);
+  if (!passed)
+    fprintf (stderr, "test-view: a menu of a chain of %d children "
+	     "is at %d, %d and not at %d, %d\n", length, x, y, want_x,
+	     want_y);
+  rc_view_close_menu (example->view);
+  return passed;
+}
+
+/* Return a random offset of a child frame in its parent, from -40 to
+   40.  Some offsets are 0, and some are negative.  */
+static int
+random_offset (uint64_t *state)
+{
+  return (int) random_below (state, 81) - 40;
+}
+
 /* Put in X and Y the position of the window of MENU in the drawing
    area of the window of the example, and return true.  Return false
    if MENU or the area has no window.  */
@@ -1301,6 +1458,17 @@ static void
 show_menu (struct example *example, uint32_t frame, uint32_t serial,
 	   const struct menu_entry *entries, size_t n, const char *title)
 {
+  show_menu_at (example, frame, serial, 10, 20, entries, n, title);
+}
+
+/* Give the N entries ENTRIES of the menu SERIAL, with the title TITLE,
+   to the view of EXAMPLE at the position X, Y of FRAME, as the client
+   does.  */
+static void
+show_menu_at (struct example *example, uint32_t frame, uint32_t serial,
+	      int32_t x, int32_t y, const struct menu_entry *entries,
+	      size_t n, const char *title)
+{
   struct rc_menu_model model = { 0 };
   for (size_t i = 0; i < n; i++)
     {
@@ -1314,7 +1482,7 @@ show_menu (struct example *example, uint32_t frame, uint32_t serial,
       rc_menu_add (&model, &item);
     }
   struct rd_show_menu show =
-    { .frame = frame, .serial = serial, .x = 10, .y = 20,
+    { .frame = frame, .serial = serial, .x = x, .y = y,
       .ntitle = strlen (title) };
   memcpy (show.title, title, show.ntitle);
   struct rc_menu *menu = rc_menu_show (&model, serial);
@@ -1595,8 +1763,8 @@ sent_p (const struct sent *sent, const struct rd_message *message)
 }
 
 /* Return true if A and B are the same focus, resize, button, motion,
-   or menu-choice message.  The time and the modifiers of a button or a motion do not
-   count.  */
+   or menu-choice message.  The time and the modifiers of a button or
+   a motion do not count.  */
 static bool
 same_message_p (const struct rd_message *a, const struct rd_message *b)
 {
