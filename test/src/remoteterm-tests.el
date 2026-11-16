@@ -299,11 +299,24 @@
        (when (remoteterm-tests--terminal ,display)
          (x-close-connection ,display)))))
 
+(defconst remoteterm-tests--plain-layout
+  '((menu-bar-lines . 0) (tab-bar-lines . 0) (tool-bar-lines . 0)
+    (vertical-scroll-bars . nil))
+  "The frame parameters of a frame with no bars.
+`remoteterm-tests--make-frame' adds them after the parameters of a
+test, so a parameter of the test wins.  A test that needs a bar asks
+for it.  A test of the default bars calls `x-create-frame-with-faces'
+directly.")
+
 (defun remoteterm-tests--make-frame (display parameters)
-  "Make a frame on DISPLAY with PARAMETERS.
-`make-frame' makes no graphical frames in batch mode, so call the
-function that it calls for graphical frames."
-  (x-create-frame-with-faces (cons (cons 'display display) parameters)))
+  "Make a frame on DISPLAY with PARAMETERS and no bars.
+A bar comes only if PARAMETERS ask for it (see
+`remoteterm-tests--plain-layout').  `make-frame' makes no graphical
+frames in batch mode, so call the function that it calls for
+graphical frames."
+  (x-create-frame-with-faces
+   (cons (cons 'display display)
+         (append parameters remoteterm-tests--plain-layout))))
 
 (defmacro remoteterm-tests--with-frame (frame display parameters &rest body)
   "Bind FRAME to a new frame on DISPLAY with PARAMETERS, and evaluate BODY.
