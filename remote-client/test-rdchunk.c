@@ -57,6 +57,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      is not chunked gives RD_CHUNK_REFUSED, and does not change the
      state.
 
+   - Image: the image-data messages of an image, in order, join to
+     its bytes with the image limit RD_MAX_IMAGE_SIZE.  A message at
+     the offset 0 with another image ID starts a new image, and drops
+     the image before it.  An image with more than RD_MAX_IMAGE_SIZE
+     bytes is refused at its first message.
+
    - Queue: the messages of a queue join to its text.  A queue has a
      message until the last message of its text, and is empty after
      it.  A new text in the middle of a text gives a new serial, and the
@@ -106,6 +112,7 @@ static bool not_chunked_law (uint64_t *);
 static bool add_message_law (uint64_t *);
 static bool chunked_types_example (uint64_t *);
 static bool queue_law (uint64_t *);
+static bool image_law (uint64_t *);
 static struct text random_text (uint64_t *);
 static enum rd_chunk_result join (struct rd_chunks *, uint32_t,
 				  const struct text *);
@@ -138,6 +145,7 @@ static const struct
     { "add message", add_message_law },
     { "chunked types", chunked_types_example },
     { "queue", queue_law },
+    { "image", image_law },
   };
 
 int
@@ -505,6 +513,45 @@ queue_law (uint64_t *state)
   return passed;
 }
 
+static bool
+image_law (uint64_t *state)
+{
+  struct rd_chunks chunks = { 0 };
+  struct text first = random_text (state), second = random_text (state);
+  uint32_t image = random_next (state);
+  struct rd_message message;
+  /* Some messages of FIRST, then all messages of SECOND with another
+     image ID.  */
+  uint32_t sent = random_below (state, rd_chunk_count (first.size));
+  bool passed = true;
+  for (uint32_t i = 0; passed && i < sent; i++)
+    {
+      rd_chunk_message (RD_IMAGE_DATA, image, first.bytes, first.size, i,
+			&message);
+      passed = (rd_chunks_add_message (&chunks, &message, RD_MAX_IMAGE_SIZE)
+		== RD_CHUNK_PARTIAL);
+    }
+  enum rd_chunk_result result = RD_CHUNK_REFUSED;
+  for (uint32_t i = 0; passed && i < rd_chunk_count (second.size); i++)
+    {
+      rd_chunk_message (RD_IMAGE_DATA, image + 1, second.bytes, second.size,
+			i, &message);
+      result = rd_chunks_add_message (&chunks, &message, RD_MAX_IMAGE_SIZE);
+    }
+  passed = passed && result == RD_CHUNK_DONE && has_text (&chunks, &second);
+  /* The first message of an image that is too large.  */
+  static const unsigned char zeros[RD_MAX_IMAGE_CHUNK];
+  uint32_t total = RD_MAX_IMAGE_SIZE + 1 + random_below (state, 1000);
+  rd_chunk_message (RD_IMAGE_DATA, image + 2, zeros, total, 0, &message);
+  passed = (passed
+	    && (rd_chunks_add_message (&chunks, &message, RD_MAX_IMAGE_SIZE)
+		== RD_CHUNK_REFUSED));
+  free (first.bytes);
+  free (second.bytes);
+  rd_chunks_free (&chunks);
+  return passed;
+}
+
 /* Return a new random text of STATE.  Free its bytes with free.  */
 static struct text
 random_text (uint64_t *state)
@@ -561,7 +608,7 @@ join_within (struct rd_chunks *chunks, uint32_t serial,
 static bool
 chunked_p (enum rd_type type)
 {
-#define CHUNKED_TYPE_P(ENUM, NAME) || type == RD_##ENUM
+#define CHUNKED_TYPE_P(ENUM, NAME, SERIAL) || type == RD_##ENUM
   return false RD_CHUNKED_MESSAGES (CHUNKED_TYPE_P);
 #undef CHUNKED_TYPE_P
 }

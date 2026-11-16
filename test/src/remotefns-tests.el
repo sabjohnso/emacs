@@ -131,6 +131,22 @@
 ;;     The text has N bytes.  A message has at most
 ;;     `remote-display--max-clipboard-chunk' bytes of the text.
 ;;
+;; The server sends these messages of images (the image block):
+;;
+;; (draw-image :frame F :image ID :x X :y Y :clip-x CX :clip-y CY
+;;             :clip-width CW :clip-height CH)
+;;     Paint the pixels of the image ID with its top-left pixel at X, Y
+;;     of the frame F, over the pixels that are there.  The client
+;;     changes only the pixels in the rectangle at CX, CY with the size
+;;     CW, CH.  An image that the client does not have changes no pixel.
+;; (image-data :image ID :offset O :total N :bytes [BYTE...])
+;;     The bytes of the PNG file of the image ID, from the offset O.
+;;     The file has N bytes.  A message has at most
+;;     `remote-display--max-image-chunk' bytes of the file.
+;; (forget-image :image ID)
+;;     The server does not use the image ID again.  The client frees
+;;     it.
+;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
 ;; 16 bits, because a row of a fringe bitmap has 16 bits.  Each color
@@ -151,6 +167,7 @@
 (defvar remote-display--hash-size)
 (defvar remote-display--max-font-chunk)
 (defvar remote-display--max-clipboard-chunk)
+(defvar remote-display--max-image-chunk)
 (defvar remote-display--max-fringe-rows)
 (defvar remote-display--message-formats)
 (defvar remote-display--modifier-bits)
@@ -183,7 +200,10 @@
     (clipboard-data . remotefns-tests--clipboard-data))
   "The message types of the base block, each with its generator.")
 
-(defconst remotefns-tests--image-generators nil
+(defconst remotefns-tests--image-generators
+  '((draw-image . remotefns-tests--draw-image)
+    (image-data . remotefns-tests--image-data)
+    (forget-image . remotefns-tests--forget-image))
   "The message types of the image block, each with its generator.
 The block is for the feature Images (PLAN.org feature-images).")
 
@@ -369,6 +389,29 @@ src/rdproto.h.")
         :offset (rd-gen-uint32) :total (rd-gen-uint32)
         :bytes (remotefns-tests--byte-vector
                 remote-display--max-clipboard-chunk)))
+
+(defun remotefns-tests--draw-image ()
+  "Return a random `draw-image' message."
+  (list 'draw-image
+        :frame (rd-gen-uint32)
+        :image (rd-gen-uint32)
+        :x (rd-gen-int32)
+        :y (rd-gen-int32)
+        :clip-x (rd-gen-int32)
+        :clip-y (rd-gen-int32)
+        :clip-width (rd-gen-uint32)
+        :clip-height (rd-gen-uint32)))
+
+(defun remotefns-tests--image-data ()
+  "Return a random `image-data' message."
+  (list 'image-data :image (rd-gen-uint32)
+        :offset (rd-gen-uint32) :total (rd-gen-uint32)
+        :bytes (remotefns-tests--byte-vector
+                remote-display--max-image-chunk)))
+
+(defun remotefns-tests--forget-image ()
+  "Return a random `forget-image' message."
+  (list 'forget-image :image (rd-gen-uint32)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -678,6 +721,56 @@ src/rdproto.h.")
   (should-error (remote-display--encode
                  `(clipboard-data :serial 0 :offset 0 :total 0
                                   :bytes ,(make-vector 8193 0)))
+                :type 'args-out-of-range))
+
+(defun remotefns-tests--type-byte (type)
+  "Return the type byte of the message type TYPE.
+The type bytes start at 1, in the order of
+`remote-display--message-formats'."
+  (1+ (cl-position type (mapcar #'car remote-display--message-formats))))
+
+(ert-deftest remotefns-tests-draw-image-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 33, the type byte, frame 7, image 9, x -1, y 2, clip-x 3,
+  ;; clip-y 4, clip-width 5, clip-height 6.
+  (should (equal (remote-display--encode
+                  '(draw-image :frame 7 :image 9 :x -1 :y 2 :clip-x 3
+                               :clip-y 4 :clip-width 5 :clip-height 6))
+                 (unibyte-string 0 0 0 33
+                                 (remotefns-tests--type-byte 'draw-image)
+                                 0 0 0 7 0 0 0 9 #xff #xff #xff #xff
+                                 0 0 0 2 0 0 0 3 0 0 0 4 0 0 0 5
+                                 0 0 0 6))))
+
+(ert-deftest remotefns-tests-image-data-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 17, the type byte, image 7, offset #x0102, total #x0304,
+  ;; 2 bytes.
+  (should (equal (remote-display--encode
+                  '(image-data :image 7 :offset #x0102 :total #x0304
+                               :bytes [#x89 ?P]))
+                 (unibyte-string 0 0 0 17
+                                 (remotefns-tests--type-byte 'image-data)
+                                 0 0 0 7 0 0 1 2 0 0 3 4 0 2 #x89 ?P))))
+
+(ert-deftest remotefns-tests-forget-image-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 5, the type byte, image 7.
+  (should (equal (remote-display--encode '(forget-image :image 7))
+                 (unibyte-string 0 0 0 5
+                                 (remotefns-tests--type-byte 'forget-image)
+                                 0 0 0 7))))
+
+(ert-deftest remotefns-tests-image-chunk-limits ()
+  "An image-data message has at most 8192 bytes of the file."
+  (skip-unless (featurep 'remote-display))
+  (should (= remote-display--max-image-chunk 8192))
+  (should (remote-display--encode
+           `(image-data :image 0 :offset 0 :total 0
+                        :bytes ,(make-vector 8192 0))))
+  (should-error (remote-display--encode
+                 `(image-data :image 0 :offset 0 :total 0
+                              :bytes ,(make-vector 8193 0)))
                 :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-font-chunk-limits ()

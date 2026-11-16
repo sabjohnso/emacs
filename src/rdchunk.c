@@ -19,10 +19,16 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include <config.h>
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "rdchunk.h"
+
+/* rd_chunk_count and rd_chunk_message use one chunk size for each
+   chunked type.  */
+static_assert ((int) RD_MAX_IMAGE_CHUNK == (int) RD_MAX_CLIPBOARD_CHUNK,
+	       "the chunked types have one chunk size");
 
 static bool continues_p (const struct rd_chunks *,
 			 const struct rd_chunk_part *);
@@ -30,20 +36,20 @@ static bool start (struct rd_chunks *, const struct rd_chunk_part *, size_t);
 static void set_part (struct rd_message *, const struct rd_chunk_part *);
 
 /* The part of the struct DATA of a chunked message (RD_CHUNKED_MESSAGES
-   in rdproto.h).  */
-#define PART_OF(DATA)							\
-  ((struct rd_chunk_part) { .serial = (DATA)->serial,			\
+   in rdproto.h), with the field SERIAL.  */
+#define PART_OF(DATA, SERIAL)						\
+  ((struct rd_chunk_part) { .serial = (DATA)->SERIAL,			\
 			    .offset = (DATA)->offset,			\
 			    .total = (DATA)->total,			\
 			    .nbytes = (DATA)->nbytes,			\
 			    .bytes = (DATA)->bytes })
 
 /* Copy the fields of the part PART to the struct DATA of a chunked
-   message.  */
-#define SET_PART(DATA, PART)						\
+   message, with the field SERIAL.  */
+#define SET_PART(DATA, SERIAL, PART)					\
   do									\
     {									\
-      (DATA)->serial = (PART)->serial;					\
+      (DATA)->SERIAL = (PART)->serial;					\
       (DATA)->offset = (PART)->offset;					\
       (DATA)->total = (PART)->total;					\
       (DATA)->nbytes = (PART)->nbytes;					\
@@ -58,9 +64,9 @@ rd_chunk_part_of (const struct rd_message *message,
 {
   switch (message->type)
     {
-#define PART_OF_CASE(ENUM, NAME)				\
+#define PART_OF_CASE(ENUM, NAME, SERIAL)			\
     case RD_##ENUM:						\
-      *part = PART_OF (&message->u.NAME);			\
+      *part = PART_OF (&message->u.NAME, SERIAL);		\
       return true;
       RD_CHUNKED_MESSAGES (PART_OF_CASE)
 #undef PART_OF_CASE
@@ -209,9 +215,9 @@ set_part (struct rd_message *message, const struct rd_chunk_part *part)
 {
   switch (message->type)
     {
-#define SET_PART_CASE(ENUM, NAME)				\
+#define SET_PART_CASE(ENUM, NAME, SERIAL)			\
     case RD_##ENUM:						\
-      SET_PART (&message->u.NAME, part);			\
+      SET_PART (&message->u.NAME, SERIAL, part);		\
       break;
       RD_CHUNKED_MESSAGES (SET_PART_CASE)
 #undef SET_PART_CASE

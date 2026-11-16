@@ -19,8 +19,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 /* A text can have more bytes than one message holds, so the sender
    splits it into chunked messages (rdproto.h), and the receiver joins
-   them.  A chunked message has the fields serial, offset, total and
-   bytes.  The clipboard-data message is a chunked message.  The
+   them.  A chunked message has a serial field that identifies the
+   text, and the fields offset, total and bytes.  The clipboard-data
+   and image-data messages are chunked messages.  The
    server (Emacs) and the client both use this file, as they use
    rdproto.c, so both sides have the same rules.  The file uses no
    Lisp objects.  */

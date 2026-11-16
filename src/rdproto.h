@@ -334,8 +334,53 @@ enum rd_cursor_kind
 
 /* Images (PLAN.org feature-images).  */
 
-/* The messages of images.  The block has no rows now.  */
-#define RD_IMAGE_MESSAGES(MESSAGE)
+/* The messages of images.  The server decodes each image, and sends
+   its pixels as a PNG file in image-data messages.  The client keeps
+   the pixels of each image ID, and paints them for a draw-image
+   message.  An ID is unique for the life of the server process.  */
+#define RD_IMAGE_MESSAGES(MESSAGE)					\
+  MESSAGE (DRAW_IMAGE, draw_image, RD_DRAW_IMAGE_FIELDS)		\
+  MESSAGE (IMAGE_DATA, image_data, RD_IMAGE_DATA_FIELDS)		\
+  MESSAGE (FORGET_IMAGE, forget_image, RD_FORGET_IMAGE_FIELDS)
+
+/* The maximum number of bytes of a PNG file in one image-data
+   message, and the maximum size of a PNG file.  The chunk has the
+   size of a font chunk, so no message struct gets larger.  */
+enum { RD_MAX_IMAGE_CHUNK = RD_MAX_FONT_CHUNK };
+enum { RD_MAX_IMAGE_SIZE = 64 * 1024 * 1024 };
+
+/* Paint the pixels of IMAGE with its top-left pixel at X, Y of FRAME,
+   over the pixels that are there.  A client changes only the pixels
+   inside the rectangle at CLIP_X, CLIP_Y with the size CLIP_WIDTH,
+   CLIP_HEIGHT.  The server sends a clear-area message first, so a
+   transparent pixel shows the background.  An image that the client
+   does not have changes no pixel.  */
+#define RD_DRAW_IMAGE_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, image)						\
+  FIELD (M, int32, x)							\
+  FIELD (M, int32, y)							\
+  FIELD (M, int32, clip_x)						\
+  FIELD (M, int32, clip_y)						\
+  FIELD (M, uint32, clip_width)						\
+  FIELD (M, uint32, clip_height)
+
+/* The bytes BYTES from OFFSET of the PNG file with the pixels of
+   IMAGE.  The file has TOTAL bytes, at most RD_MAX_IMAGE_SIZE.  The
+   server sends the messages of one image in order, from the offset 0.
+   rdchunk.h splits and joins the messages.  An ID keeps its pixels
+   until a forget-image message or the end of the connection.  */
+#define RD_IMAGE_DATA_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, image)						\
+  FIELD (M, uint32, offset)						\
+  FIELD (M, uint32, total)						\
+  ARRAY (M, uint8, bytes, nbytes, RD_MAX_IMAGE_CHUNK)
+
+/* The server does not use IMAGE again.  The client frees its pixels,
+   and ignores an ID that it does not have.  The server never uses an
+   ID again, so this message cannot remove a newer image.  */
+#define RD_FORGET_IMAGE_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, image)
 
 /* Tooltips and child frames (PLAN.org feature-child-frames).  */
 
@@ -348,13 +393,16 @@ enum rd_cursor_kind
 #define RD_MENU_MESSAGES(MESSAGE)
 
 /* The chunked message types (rdchunk.h).  A row is CHUNKED (ENUM,
-   NAME): the type RD_ENUM, and the member NAME of the union of struct
-   rd_message.  The fields of the type are serial, offset and total,
-   and the array bytes with its count nbytes.  The type also has a row
-   in its block of RD_MESSAGES.  A new chunked type adds one row
-   here.  */
+   NAME, SERIAL): the type RD_ENUM, and the member NAME of the union of
+   struct rd_message.  SERIAL is the field that identifies the text.
+   The other fields of the type are offset and total, and the array
+   bytes with its count nbytes.  The type also has a row in its block
+   of RD_MESSAGES.  A new chunked type adds one row here.  rdchunk.c
+   uses one chunk size, so each chunked type has chunks of
+   RD_MAX_CLIPBOARD_CHUNK bytes.  */
 #define RD_CHUNKED_MESSAGES(CHUNKED)					\
-  CHUNKED (CLIPBOARD_DATA, clipboard_data)
+  CHUNKED (CLIPBOARD_DATA, clipboard_data, serial)			\
+  CHUNKED (IMAGE_DATA, image_data, image)
 
 /* The buttons of a button message that are the mouse wheel.  */
 enum rd_wheel_button
