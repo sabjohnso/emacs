@@ -43,6 +43,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "remoteinput.h"
 #include "remoteterm.h"
 #include "rdproto.h"
+#include "rdpng.h"
 
 static struct frame *remote_decode_frame (Lisp_Object);
 static Lisp_Object remote_frame_or_nil (struct frame *);
@@ -58,6 +59,7 @@ static void remote_counting_flush (void *);
 static void remote_counting_free (void *);
 static ptrdiff_t remote_recording_queued (void *);
 static ptrdiff_t remote_counting_queued (void *);
+static Lisp_Object remote_surface_pixels (cairo_surface_t *);
 
 static const struct remote_sink_ops remote_recording_ops =
   { remote_recording_write, remote_recording_flush, remote_recording_free,
@@ -467,6 +469,69 @@ the end of the range of frame IDs.  */)
   return make_uint (dpyinfo->last_frame_id);
 }
 
+DEFUN ("remote-display--set-last-image-id",
+       Fremote_display__set_last_image_id,
+       Sremote_display__set_last_image_id, 1, 1, 0,
+       doc: /* Set the counter of image IDs to ID, and return ID.
+The tests use this to reach the end of the range of image IDs.  */)
+  (Lisp_Object id)
+{
+  remote_set_last_image_id (check_integer_range (id, 0, UINT32_MAX));
+  return id;
+}
+
+DEFUN ("remote-display--set-max-image-size",
+       Fremote_display__set_max_image_size,
+       Sremote_display__set_max_image_size, 1, 1, 0,
+       doc: /* Set the largest PNG file of an image to SIZE bytes.
+Return the limit before the call.  The tests use this to get an image
+whose PNG file is too large, with no large image.  */)
+  (Lisp_Object size)
+{
+  return make_uint (remote_set_max_image_size
+		    (check_integer_range (size, 0, RD_MAX_IMAGE_SIZE)));
+}
+
+DEFUN ("remote-display--png-pixels", Fremote_display__png_pixels,
+       Sremote_display__png_pixels, 1, 1, 0,
+       doc: /* Decode the PNG FILE, a unibyte string, as a client does.
+Return (WIDTH HEIGHT . PIXELS), where PIXELS is a vector of the
+premultiplied ARGB32 pixels, row after row.  Return nil if FILE is not
+a PNG file that the client accepts.  */)
+  (Lisp_Object file)
+{
+  CHECK_STRING (file);
+  cairo_surface_t *surface = rd_png_decode (SDATA (file), SBYTES (file));
+  if (!surface)
+    return Qnil;
+  Lisp_Object pixels = remote_surface_pixels (surface);
+  Lisp_Object size
+    = Fcons (make_int (cairo_image_surface_get_width (surface)),
+	     Fcons (make_int (cairo_image_surface_get_height (surface)),
+		    pixels));
+  cairo_surface_destroy (surface);
+  return size;
+}
+
+/* Return a vector of the ARGB32 pixels of the image surface SURFACE,
+   row after row.  */
+static Lisp_Object
+remote_surface_pixels (cairo_surface_t *surface)
+{
+  int width = cairo_image_surface_get_width (surface);
+  int height = cairo_image_surface_get_height (surface);
+  int stride = cairo_image_surface_get_stride (surface);
+  unsigned char *data = cairo_image_surface_get_data (surface);
+  Lisp_Object pixels = make_nil_vector (width * height);
+  for (int y = 0; y < height; y++)
+    {
+      uint32_t *row = (uint32_t *) (data + y * stride);
+      for (int x = 0; x < width; x++)
+	ASET (pixels, y * width + x, make_uint (row[x]));
+    }
+  return pixels;
+}
+
 /* Return the frame of FRAME.  Signal an error if it is not a live
    remote frame.  The hooks that the test functions call are only for
    remote frames.  */
@@ -626,6 +691,9 @@ syms_of_remotetest (void)
   defsubr (&Sremote_display__draw_overlap);
   defsubr (&Sremote_display__cursor_state);
   defsubr (&Sremote_display__set_last_frame_id);
+  defsubr (&Sremote_display__set_last_image_id);
+  defsubr (&Sremote_display__set_max_image_size);
+  defsubr (&Sremote_display__png_pixels);
   defsubr (&Sremote_display__set_queued);
   defsubr (&Sremote_display__input);
   defsubr (&Sremote_display__queue_empty);

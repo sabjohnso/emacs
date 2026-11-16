@@ -493,6 +493,7 @@ static struct remote_display_info *
 remote_open_session (Lisp_Object name)
 {
   struct remote_display_info *dpyinfo = xzalloc (sizeof *dpyinfo);
+  remote_init_images (dpyinfo);
   dpyinfo->name_list_element = Fcons (name, Qnil);
   remote_display_name_list = Fcons (dpyinfo->name_list_element,
 				    remote_display_name_list);
@@ -543,6 +544,7 @@ remote_delete_terminal (struct terminal *terminal)
   remote_display_name_list = Fdelq (dpyinfo->name_list_element,
 				    remote_display_name_list);
   remote_set_sink (dpyinfo, NULL);
+  remote_free_images (dpyinfo);
   xfree (dpyinfo->font_defined);
   xfree (dpyinfo->bitmaps);
   xfree (dpyinfo);
@@ -668,8 +670,7 @@ remote_flush_frame (struct frame *f)
 static void
 remote_frame_up_to_date (struct frame *f)
 {
-  remote_send_image_forgets (FRAME_DISPLAY_INFO (f));
-  remote_send_image_data (FRAME_DISPLAY_INFO (f));
+  remote_send_images (FRAME_DISPLAY_INFO (f));
 }
 
 /* The transport of the client of DPYINFO calls this when it sent
@@ -679,8 +680,7 @@ remote_output_drained (struct remote_display_info *dpyinfo)
 {
   remote_send_font_data (dpyinfo);
   remote_send_clipboard_data (dpyinfo);
-  remote_send_image_forgets (dpyinfo);
-  remote_send_image_data (dpyinfo);
+  remote_send_images (dpyinfo);
 }
 
 /* Call SEND_ONE with DPYINFO while the sink of DPYINFO has fewer than

@@ -36,8 +36,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 struct rd_message;
 struct remote_font_transfer;
-struct remote_image_memo;
-struct remote_image_transfer;
+struct remote_images;
 
 /* A session sends font data, clipboard data and image data only while
    its sink has fewer bytes than this that it did not send, so these
@@ -130,15 +129,8 @@ struct remote_display_info
      order.  See remotefonts.c.  */
   struct remote_font_transfer *font_transfers;
 
-  /* The number of the attach of the client, unique for the life of the
-     process; the PNG files that the client did not get complete, in
-     order; the IDs that the client must forget; and true if a
-     draw-image message went out before the data of its image.  See
-     remoteimage.c.  */
-  uintmax_t image_attach;
-  struct remote_image_transfer *image_transfers;
-  struct remote_image_memo *image_forgets;
-  bool image_drawn_early;
+  /* The images of the client.  remoteimage.c owns them.  */
+  struct remote_images *images;
 
   /* The sink of the client that receives the messages of this
      session.  The session owns the sink.  A client is attached if
@@ -262,9 +254,13 @@ extern void remote_drop_font_transfers (struct remote_display_info *);
 
 /* Defined in remoteimage.c.  */
 extern uint32_t remote_image_prepare (struct frame *, struct image *);
-extern void remote_send_image_data (struct remote_display_info *);
+extern void remote_send_images (struct remote_display_info *);
 extern void remote_send_image_forgets (struct remote_display_info *);
+extern void remote_init_images (struct remote_display_info *);
 extern void remote_reset_images (struct remote_display_info *);
+extern void remote_free_images (struct remote_display_info *);
+extern void remote_set_last_image_id (uint32_t);
+extern size_t remote_set_max_image_size (size_t);
 
 /* In remoteterm.c.  */
 extern struct frame *remote_frame_of_id (struct remote_display_info *,
