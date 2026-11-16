@@ -287,6 +287,18 @@ syms_of_remotefns (void)
   Vremote_display__max_image_chunk = make_fixnum (RD_MAX_IMAGE_CHUNK);
   make_symbol_constant (intern_c_string ("remote-display--max-image-chunk"));
 
+  DEFVAR_LISP ("remote-display--max-menu-text",
+	       Vremote_display__max_menu_text,
+	       doc: /* The maximum number of bytes of a menu label or a menu title.  */);
+  Vremote_display__max_menu_text = make_fixnum (RD_MAX_MENU_TEXT);
+  make_symbol_constant (intern_c_string ("remote-display--max-menu-text"));
+
+  DEFVAR_LISP ("remote-display--max-menu-key",
+	       Vremote_display__max_menu_key,
+	       doc: /* The maximum number of bytes of the key equivalent of a menu item.  */);
+  Vremote_display__max_menu_key = make_fixnum (RD_MAX_MENU_KEY);
+  make_symbol_constant (intern_c_string ("remote-display--max-menu-key"));
+
   DEFVAR_LISP ("remote-display--modifier-bits",
 	       Vremote_display__modifier_bits,
 	       doc: /* The bits of the modifiers field of an input message.

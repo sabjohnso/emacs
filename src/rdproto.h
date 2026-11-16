@@ -415,8 +415,85 @@ enum { RD_MAX_IMAGE_SIDE = 8192 };
 
 /* Menus drawn by Emacs (PLAN.org feature-menus).  */
 
-/* The messages of menus.  The block has no rows now.  */
-#define RD_MENU_MESSAGES(MESSAGE)
+/* The messages of popup menus.  The server sends the entries of a
+   menu in menu-item messages, and then a show-menu message.  The
+   client answers with one menu-choice message, unless a hide-menu
+   message comes first.  */
+#define RD_MENU_MESSAGES(MESSAGE)					\
+  MESSAGE (MENU_ITEM, menu_item, RD_MENU_ITEM_FIELDS)			\
+  MESSAGE (SHOW_MENU, show_menu, RD_SHOW_MENU_FIELDS)			\
+  MESSAGE (HIDE_MENU, hide_menu, RD_HIDE_MENU_FIELDS)			\
+  MESSAGE (MENU_CHOICE, menu_choice, RD_MENU_CHOICE_FIELDS)
+
+/* The maximum number of bytes of the UTF-8 text of a label or a
+   title.  The server cuts a longer text at the start of a
+   character.  */
+enum { RD_MAX_MENU_TEXT = 1024 };
+
+/* The maximum number of bytes of the UTF-8 text of a key
+   equivalent.  */
+enum { RD_MAX_MENU_KEY = 128 };
+
+/* The kinds of a menu entry.  The submenu-start and submenu-end
+   entries enclose the entries of a submenu.  */
+enum rd_menu_kind
+  {
+    RD_MENU_KIND_ITEM = 0,
+    RD_MENU_KIND_SEPARATOR = 1,
+    RD_MENU_KIND_SUBMENU_START = 2,
+    RD_MENU_KIND_SUBMENU_END = 3,
+  };
+
+/* The bits of the FLAGS field of a menu entry.  */
+enum rd_menu_flag
+  {
+    RD_MENU_FLAG_ENABLED = 1,
+    RD_MENU_FLAG_TOGGLE = 2,
+    RD_MENU_FLAG_RADIO = 4,
+    RD_MENU_FLAG_SELECTED = 8,
+  };
+
+/* One entry of the menu SERIAL, in order.  KIND is an enum
+   rd_menu_kind value, and FLAGS has the bits of enum rd_menu_flag.
+   ID identifies the item in the menu, and is 0 for a kind that is not
+   an item.  LABEL is the UTF-8 text of the entry, and KEY is the
+   UTF-8 text of its key equivalent.  An entry with a new SERIAL makes
+   the client drop the entries of an older menu that it did not
+   show.  */
+#define RD_MENU_ITEM_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, serial)						\
+  FIELD (M, uint8, kind)						\
+  FIELD (M, uint8, flags)						\
+  FIELD (M, uint32, id)							\
+  ARRAY (M, uint8, label, nlabel, RD_MAX_MENU_TEXT)			\
+  ARRAY (M, uint8, key, nkey, RD_MAX_MENU_KEY)
+
+/* Show the menu SERIAL with the UTF-8 title TITLE at the pixel
+   position X, Y of the window of FRAME.  TITLE is empty when the menu
+   has no title.  A client that has no window for FRAME, or whose
+   entries of SERIAL do not nest correctly, answers at once with a
+   menu-choice message with CHOSEN 0.  */
+#define RD_SHOW_MENU_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, frame)						\
+  FIELD (M, uint32, serial)						\
+  FIELD (M, int32, x)							\
+  FIELD (M, int32, y)							\
+  ARRAY (M, uint8, title, ntitle, RD_MAX_MENU_TEXT)
+
+/* Close the menu SERIAL if it is open, and drop its entries.  The
+   client then sends no choice for SERIAL.  The client ignores this
+   message for a menu that is not open.  */
+#define RD_HIDE_MENU_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, serial)
+
+/* A client message: the answer to the show-menu message SERIAL.
+   CHOSEN is 1 if the user selected the item ID, and 0 if the menu
+   closed with no selection.  The server ignores ID when CHOSEN is 0,
+   and ignores a choice for a menu that it does not wait for.  */
+#define RD_MENU_CHOICE_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint32, serial)						\
+  FIELD (M, uint8, chosen)						\
+  FIELD (M, uint32, id)
 
 /* The chunked message types (rdchunk.h).  A row is CHUNKED (ENUM,
    NAME, SERIAL): the type RD_ENUM, and the member NAME of the union of

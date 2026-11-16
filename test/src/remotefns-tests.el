@@ -147,6 +147,34 @@
 ;;     The server does not use the image ID again.  The client frees
 ;;     it.
 ;;
+;; The messages of the menu block (Menus drawn by Emacs).  The server
+;; sends these messages to the client:
+;;
+;; (menu-item :serial S :kind K :flags FL :id ID :label [BYTE...]
+;;            :key [BYTE...])
+;;     One entry of the popup menu S, in order.  K is 0 for an item, 1
+;;     for a separator, 2 for the start of a submenu with the label, and
+;;     3 for the end of a submenu.  FL has the bits 1 (enabled), 2
+;;     (toggle), 4 (radio), and 8 (selected).  ID identifies the item
+;;     in the menu, and is 0 for a kind that is not an item.  The label
+;;     is UTF-8 text of at most `remote-display--max-menu-text' bytes.
+;;     The key is the UTF-8 text of the key equivalent, of at most
+;;     `remote-display--max-menu-key' bytes.
+;; (show-menu :frame F :serial S :x X :y Y :title [BYTE...])
+;;     Show the menu S with the title at the pixel position X, Y of the
+;;     window of the frame F.  The title is UTF-8 text of at most
+;;     `remote-display--max-menu-text' bytes, and is empty when the menu
+;;     has no title.
+;; (hide-menu :serial S)
+;;     Close the menu S if it is open, and drop its entries.
+;;
+;; A client sends this message to the server:
+;;
+;; (menu-choice :serial S :chosen C :id ID)
+;;     The answer to the show-menu message S.  C is 1 if the user
+;;     selected the item ID, and 0 if the menu closed with no
+;;     selection.
+;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
 ;; 16 bits, because a row of a fringe bitmap has 16 bits.  Each color
@@ -168,6 +196,8 @@
 (defvar remote-display--max-font-chunk)
 (defvar remote-display--max-clipboard-chunk)
 (defvar remote-display--max-image-chunk)
+(defvar remote-display--max-menu-text)
+(defvar remote-display--max-menu-key)
 (defvar remote-display--max-fringe-rows)
 (defvar remote-display--message-formats)
 (defvar remote-display--modifier-bits)
@@ -213,7 +243,11 @@ The block is for the feature Images (PLAN.org feature-images).")
 The block is for the feature Tooltips and child frames (PLAN.org
 feature-child-frames).")
 
-(defconst remotefns-tests--menu-generators nil
+(defconst remotefns-tests--menu-generators
+  '((menu-item . remotefns-tests--menu-item)
+    (show-menu . remotefns-tests--show-menu)
+    (hide-menu . remotefns-tests--hide-menu)
+    (menu-choice . remotefns-tests--menu-choice))
   "The message types of the menu block, each with its generator.
 The block is for the feature Menus drawn by Emacs (PLAN.org
 feature-menus).")
@@ -419,6 +453,29 @@ src/rdproto.h.")
   (list 'place-frame :frame (rd-gen-uint32) :parent (rd-gen-uint32)
         :x (rd-gen-int32) :y (rd-gen-int32) :z (rd-gen-uint32)
         :visible (rd-gen-integer 0 255)))
+(defun remotefns-tests--menu-item ()
+  "Return a random `menu-item' message."
+  (list 'menu-item :serial (rd-gen-uint32)
+        :kind (rd-gen-integer 0 255) :flags (rd-gen-integer 0 255)
+        :id (rd-gen-uint32)
+        :label (remotefns-tests--byte-vector remote-display--max-menu-text)
+        :key (remotefns-tests--byte-vector remote-display--max-menu-key)))
+
+(defun remotefns-tests--show-menu ()
+  "Return a random `show-menu' message."
+  (list 'show-menu :frame (rd-gen-uint32) :serial (rd-gen-uint32)
+        :x (rd-gen-int32) :y (rd-gen-int32)
+        :title (remotefns-tests--byte-vector
+                remote-display--max-menu-text)))
+
+(defun remotefns-tests--hide-menu ()
+  "Return a random `hide-menu' message."
+  (list 'hide-menu :serial (rd-gen-uint32)))
+
+(defun remotefns-tests--menu-choice ()
+  "Return a random `menu-choice' message."
+  (list 'menu-choice :serial (rd-gen-uint32)
+        :chosen (rd-gen-integer 0 255) :id (rd-gen-uint32)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -779,6 +836,78 @@ The type bytes start at 1, in the order of
                  `(image-data :image 0 :offset 0 :total 0
                               :bytes ,(make-vector 8193 0)))
                 :type 'args-out-of-range))
+
+;; The type bytes of the menu block change when an earlier block gets
+;; a new type, so these examples compute the type byte.
+
+(ert-deftest remotefns-tests-menu-item-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 18, the type, serial 7, kind 2, flags 9, id #x0102,
+  ;; 2 label bytes, 1 key byte.
+  (should (equal (remote-display--encode
+                  '(menu-item :serial 7 :kind 2 :flags 9 :id #x0102
+                              :label [?a ?b] :key [?k]))
+                 (unibyte-string 0 0 0 18
+                                 (remotefns-tests--type-byte 'menu-item)
+                                 0 0 0 7 2 9 0 0 1 2 0 2 ?a ?b 0 1 ?k))))
+
+(ert-deftest remotefns-tests-show-menu-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 20, the type, frame 1, serial 7, x -1, y 2, 1 title byte.
+  (should (equal (remote-display--encode
+                  '(show-menu :frame 1 :serial 7 :x -1 :y 2 :title [?t]))
+                 (unibyte-string 0 0 0 20
+                                 (remotefns-tests--type-byte 'show-menu)
+                                 0 0 0 1 0 0 0 7 #xff #xff #xff #xff
+                                 0 0 0 2 0 1 ?t))))
+
+(ert-deftest remotefns-tests-hide-menu-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 5, the type, serial 7.
+  (should (equal (remote-display--encode '(hide-menu :serial 7))
+                 (unibyte-string 0 0 0 5
+                                 (remotefns-tests--type-byte 'hide-menu)
+                                 0 0 0 7))))
+
+(ert-deftest remotefns-tests-menu-choice-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 10, the type, serial 7, chosen 1, id #x0102.
+  (should (equal (remote-display--encode
+                  '(menu-choice :serial 7 :chosen 1 :id #x0102))
+                 (unibyte-string 0 0 0 10
+                                 (remotefns-tests--type-byte 'menu-choice)
+                                 0 0 0 7 1 0 0 1 2))))
+
+(defun remotefns-tests--menu-texts (size)
+  "Return a menu-item and a show-menu message with texts of SIZE bytes.
+The label and the title have SIZE bytes, and the key is empty."
+  (let ((text (make-vector size ?a)))
+    (list `(menu-item :serial 0 :kind 0 :flags 0 :id 0
+                      :label ,text :key [])
+          `(show-menu :frame 0 :serial 0 :x 0 :y 0 :title ,text))))
+
+(defun remotefns-tests--menu-key (size)
+  "Return a menu-item message with a key of SIZE bytes."
+  `(menu-item :serial 0 :kind 0 :flags 0 :id 0
+              :label [] :key ,(make-vector size ?k)))
+
+(ert-deftest remotefns-tests-menu-text-limits ()
+  "A label or a title has at most 1024 bytes, and a key at most 128."
+  (skip-unless (featurep 'remote-display))
+  (should (= remote-display--max-menu-text 1024))
+  (should (= remote-display--max-menu-key 128))
+  (dolist (message (append (remotefns-tests--menu-texts 1024)
+                           (list (remotefns-tests--menu-key 128))))
+    (should (equal (car (remote-display--decode
+                         (remote-display--encode message)))
+                   message)))
+  (dolist (message (append (remotefns-tests--menu-texts 1025)
+                           (list (remotefns-tests--menu-key 129))))
+    (should-error (remote-display--encode message)
+                  :type 'args-out-of-range))
+  (dolist (limit '(remote-display--max-menu-text
+                   remote-display--max-menu-key))
+    (should-error (set limit 1) :type 'setting-constant)))
 
 (ert-deftest remotefns-tests-font-chunk-limits ()
   "A font-data message has at most `remote-display--max-font-chunk' bytes."

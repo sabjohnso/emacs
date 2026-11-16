@@ -67,6 +67,8 @@ struct stream
 };
 
 static bool run_examples (void);
+static bool menu_item_example (void);
+static bool menu_values_example (void);
 static bool run_trial (uint64_t);
 static bool same_messages (const struct rd_message *, int,
 			   const struct received *);
@@ -86,7 +88,8 @@ main (int argc, char **argv)
 {
   if (argc == 2)
     return run_trial (strtoull (argv[1], NULL, 10)) ? 0 : 1;
-  if (!run_examples ())
+  if (!run_examples () || !menu_item_example ()
+      || !menu_values_example ())
     return 1;
   uint64_t base = ((uint64_t) time (NULL) << 20 ^ getpid ()) * TRIALS;
   for (int trial = 0; trial < TRIALS; trial++)
@@ -130,6 +133,60 @@ run_examples (void)
       rc_reader_free (reader);
       free (stream.bytes);
     }
+  return passed;
+}
+
+/* Return true if the kinds and the flags of a menu entry have their
+   values of the wire format.  */
+static bool
+menu_values_example (void)
+{
+  bool passed = (RD_MENU_KIND_ITEM == 0 && RD_MENU_KIND_SEPARATOR == 1
+		 && RD_MENU_KIND_SUBMENU_START == 2
+		 && RD_MENU_KIND_SUBMENU_END == 3
+		 && RD_MENU_FLAG_ENABLED == 1 && RD_MENU_FLAG_TOGGLE == 2
+		 && RD_MENU_FLAG_RADIO == 4 && RD_MENU_FLAG_SELECTED == 8);
+  if (!passed)
+    fprintf (stderr, "test-reader: a menu kind or flag has a wrong value\n");
+  return passed;
+}
+
+/* Return true if a menu-item message has the bytes of the wire format,
+   and the reader gives the same message.  The type byte of the menu
+   block changes when an earlier block gets a new type, so the example
+   uses RD_MENU_ITEM and not a literal byte.  */
+static bool
+menu_item_example (void)
+{
+  struct rd_message item = {
+    .type = RD_MENU_ITEM,
+    .u.menu_item = {
+      .serial = 7,
+      .kind = RD_MENU_KIND_SUBMENU_START,
+      .flags = RD_MENU_FLAG_ENABLED | RD_MENU_FLAG_SELECTED,
+      .id = 0x0102,
+      .nlabel = 2, .label = { 'a', 'b' },
+      .nkey = 1, .key = { 'k' },
+    },
+  };
+  /* Length 18, the type, serial 7, kind 2, flags 9, id 0x0102, 2 label
+     bytes, 1 key byte.  */
+  const unsigned char expected[] = {
+    0, 0, 0, 18, RD_MENU_ITEM, 0, 0, 0, 7, 2, 9, 0, 0, 1, 2,
+    0, 2, 'a', 'b', 0, 1, 'k',
+  };
+  struct stream stream = { 0 };
+  add_message (&stream, &item);
+  struct received received = { .count = 0 };
+  struct rc_reader *reader = rc_reader_new (receive, &received);
+  rc_reader_feed (reader, stream.bytes, stream.size);
+  bool passed = (stream.size == sizeof expected
+		 && memcmp (stream.bytes, expected, sizeof expected) == 0
+		 && same_messages (&item, 1, &received));
+  rc_reader_free (reader);
+  free (stream.bytes);
+  if (!passed)
+    fprintf (stderr, "test-reader: the menu-item example failed\n");
   return passed;
 }
 
