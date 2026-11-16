@@ -6481,26 +6481,54 @@ a redisplay for a new client."
         `(remoteterm-tests--attach-after
           ',operations display frame buffer))))))
 
-(rd-daemon-deftest remoteterm-tests-attach-redraws-due-timer
-  "A timer that is due at the attach does not change the attach redraw.
+(rd-daemon-deftest remoteterm-tests-attach-redraws-screen
+  "A due timer at the attach does not change the screen of the attach.
 `redisplay' runs the timers that are due, and if a timer runs, it does
-one more redisplay.  In a slow trial of
-`remoteterm-tests-attach-redraws', an idle timer can become due while
-no client is attached.  Here, the last operation with no client starts
-a timer that is due.  The law is that of
-`remoteterm-tests-attach-redraws'."
+one more redisplay.  Thus the bytes of the attach can change with the
+time, and `remoteterm-tests-attach-redraws' holds the timers.  Here,
+the last operation with no client starts a timer that is due, and the
+attach uses `redisplay' with the timers.  Law: the timer runs, and the
+replay of the bytes of the attach gives the same screen as the replay
+of the bytes of `redraw-frame' and a redisplay for a new client."
   (let ((rd-gen-trials 12))
     (rd-gen-for-all
      #'remoteterm-tests--detached-operations
      (lambda (operations)
-       (remoteterm-tests--check-attach-redraws
-        `(remoteterm-tests--attach-after
-          ',(append operations '((timer))) display frame buffer))))))
+       (pcase-let (((map :ran :attached :redrawn :rows :columns :geometry)
+                    (rd-daemon-eval
+                     (remoteterm-tests--frame-form
+                      '((width . 30) (height . 6))
+                      '(insert "abc\ndef\n")
+                      `(remoteterm-tests--attach-with-timer
+                        ',operations display frame buffer window font)))))
+         (should ran)
+         (should (equal (remoteterm-tests--replay
+                         (remoteterm-tests--messages attached)
+                         rows columns geometry)
+                        (remoteterm-tests--replay
+                         (remoteterm-tests--messages redrawn)
+                         rows columns geometry))))
+       (remoteterm-tests--should-leave-no-timer)))))
+
+(rd-daemon-deftest remoteterm-tests-redisplay-once-holds-timers
+  "`remoteterm-tests--redisplay-once' holds the due timers, and keeps them.
+A random number of timers are due.  Law: no timer runs during
+`remoteterm-tests--redisplay-once', and each timer runs during the
+next `redisplay'."
+  (let ((rd-gen-trials 4))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 1 3))
+     (lambda (count)
+       (should (equal (rd-daemon-eval
+                       `(remoteterm-tests--hold-timers ,count))
+                      (list 0 count)))))))
 
 (defun remoteterm-tests--check-attach-redraws (attach)
   "Check the law of `remoteterm-tests-attach-redraws' for the form ATTACH.
-ATTACH is the result form of `remoteterm-tests--frame-form'.  Its
-value must be as for `remoteterm-tests--attach-after'."
+`remoteterm-tests--frame-form' evaluates ATTACH as its result form.
+The value of ATTACH must be a list (ATTACHED REDRAWN), as for
+`remoteterm-tests--attach-after'.  After the check, no timer of the
+operation (timer) must stay."
   (pcase-let ((`(,attached ,redrawn)
                (rd-daemon-eval
                 (remoteterm-tests--frame-form
@@ -6508,16 +6536,22 @@ value must be as for `remoteterm-tests--attach-after'."
                  '(insert "abc\ndef\n")
                  attach))))
     (should (> (length redrawn) 0))
-    (should (equal attached redrawn))))
+    (should (equal attached redrawn)))
+  (remoteterm-tests--should-leave-no-timer))
+
+(defun remoteterm-tests--should-leave-no-timer ()
+  "Check that the daemon has no timer of the operation (timer)."
+  (should (= (rd-daemon-eval '(remoteterm-tests--live-timers)) 0)))
 
 (defun remoteterm-tests--detached-operations ()
   "Return a random list of operations on a frame with no client.
 An operation is (insert POSITION STRING), (delete COUNT), (goto
 POSITION), (resize COLUMNS LINES), (message STRING), (redraw),
-\(sit), or (redisplay).  (sit) is `sit-for' with no time, and (redraw)
-is `redraw-frame'."
+\(timer), (sit), or (redisplay).  (sit) is `sit-for' with no time,
+\(redraw) is `redraw-frame', and (timer) starts a timer that is due
+now."
   (cl-loop repeat (rd-gen-integer 0 8)
-           collect (pcase (rd-gen-random 9)
+           collect (pcase (rd-gen-random 10)
                      (0 (list 'insert (rd-gen-integer 1 60)
                               (rd-gen-element
                                '("x" "yz\n" "\n" "\u00e9\u4e2d"
@@ -6529,38 +6563,111 @@ is `redraw-frame'."
                      (4 (list 'message (rd-gen-element '("m" "a\nb"))))
                      (5 '(redraw))
                      (6 '(sit))
+                     (7 '(timer))
                      (_ '(redisplay)))))
 
-(defun remoteterm-tests--attach-after (operations display frame buffer)
+;; The number of runs of the timers of the operation (timer).
+(defvar remoteterm-tests--timer-runs 0)
+
+(defun remoteterm-tests--attach-after (operations display frame buffer
+                                                   &optional redisplay)
   "Detach DISPLAY, do OPERATIONS, and attach a client again.
 FRAME shows BUFFER, and DISPLAY has a client that drew FRAME.  The
 value is (ATTACHED REDRAWN).  ATTACHED is the bytes of the first
 redisplay after the attach.  REDRAWN is the bytes of `redraw-frame'
-and a redisplay for one more new client."
-  (remote-display--detach display)
-  (remoteterm-tests--do-detached-operations operations frame buffer)
-  (remote-display--record display)
-  (remoteterm-tests--redisplay-once)
-  (let ((attached (remote-display--take-output display)))
-    (remote-display--record display)
-    (redraw-frame frame)
-    (remoteterm-tests--redisplay-once)
-    (list attached (remote-display--take-output display))))
+and a redisplay for one more new client.  REDISPLAY is the function
+that does the first redisplay after the attach.  If it is nil, the
+function is `remoteterm-tests--redisplay-once'.  At the end, cancel
+the timers of the operation (timer) that did not run."
+  (unwind-protect
+      (progn
+        (remote-display--detach display)
+        (remoteterm-tests--do-detached-operations operations frame buffer)
+        (remote-display--record display)
+        (funcall (or redisplay #'remoteterm-tests--redisplay-once))
+        (let ((attached (remote-display--take-output display)))
+          (remote-display--record display)
+          (redraw-frame frame)
+          (remoteterm-tests--redisplay-once)
+          (list attached (remote-display--take-output display))))
+    (remoteterm-tests--cancel-timers)))
+
+(defun remoteterm-tests--attach-with-timer (operations display frame buffer
+                                                       window font)
+  "Do OPERATIONS and a due timer with no client, and attach with timers.
+DISPLAY, FRAME, and BUFFER are as for `remoteterm-tests--attach-after'.
+WINDOW and FONT are as for `remoteterm-tests--geometry-form'.  The
+first redisplay after the attach is `redisplay', which runs the due
+timers.  The value is a plist.  :ran is non-nil if a timer of the
+operation (timer) ran during the attach.  :attached and :redrawn are
+as for `remoteterm-tests--attach-after'.  :rows and :columns are the
+size of the text area of WINDOW, and :geometry is its geometry."
+  (let ((runs nil))
+    (pcase-let ((`(,attached ,redrawn)
+                 (remoteterm-tests--attach-after
+                  (append operations '((timer))) display frame buffer
+                  (lambda ()
+                    (setq runs remoteterm-tests--timer-runs)
+                    (redisplay t)
+                    (setq runs (- remoteterm-tests--timer-runs runs))))))
+      (list :ran (> runs 0)
+            :attached attached
+            :redrawn redrawn
+            :rows (window-body-height window)
+            :columns (window-body-width window)
+            :geometry (eval (remoteterm-tests--geometry-form)
+                            `((frame . ,frame) (window . ,window)
+                              (font . ,font)))))))
 
 (defun remoteterm-tests--redisplay-once ()
   "Do one redisplay, and run no timer.
 `redisplay' runs the timers that are due before it redisplays.  If a
 timer runs, it redisplays one more time, and the second redisplay can
 draw the cursor again.  Thus the bytes of `redisplay' change with the
-time.  This function holds the timers until the redisplay ends."
+time.  This function holds the timers until the redisplay ends.  It
+removes them from `timer-list' and `timer-idle-list' for this time,
+because the C code of Emacs finds the due timers in these two lists.
+`remoteterm-tests-redisplay-once-holds-timers' checks this."
   (let ((timer-list nil)
         (timer-idle-list nil))
     (redisplay t)))
 
+(defun remoteterm-tests--hold-timers (count)
+  "Start COUNT due timers, and redisplay with and then without a hold.
+The value is (HELD RAN).  HELD is the number of timer runs during
+`remoteterm-tests--redisplay-once', and RAN is the number of runs
+after the next `redisplay'."
+  (let ((runs remoteterm-tests--timer-runs))
+    (unwind-protect
+        (progn
+          (dotimes (_ count) (remoteterm-tests--start-timer))
+          (remoteterm-tests--redisplay-once)
+          (let ((held (- remoteterm-tests--timer-runs runs)))
+            (redisplay t)
+            (list held (- remoteterm-tests--timer-runs runs))))
+      (remoteterm-tests--cancel-timers))))
+
+(defun remoteterm-tests--start-timer ()
+  "Start a timer that is due now, for the operation (timer)."
+  (run-at-time 0 nil #'remoteterm-tests--count-timer-run))
+
+(defun remoteterm-tests--count-timer-run ()
+  "Count a run of a timer of the operation (timer)."
+  (cl-incf remoteterm-tests--timer-runs))
+
+(defun remoteterm-tests--live-timers ()
+  "Return the number of timers of the operation (timer) that did not run."
+  (cl-count #'remoteterm-tests--count-timer-run
+            (append timer-list timer-idle-list)
+            :key #'timer--function))
+
+(defun remoteterm-tests--cancel-timers ()
+  "Cancel the timers of the operation (timer) that did not run."
+  (cancel-function-timers #'remoteterm-tests--count-timer-run))
+
 (defun remoteterm-tests--do-detached-operations (operations frame buffer)
   "Do OPERATIONS of `remoteterm-tests--detached-operations' on BUFFER.
-FRAME shows BUFFER.  An operation can also be (timer), which starts a
-timer that is due now and does nothing."
+FRAME shows BUFFER."
   (let ((window (frame-root-window frame)))
     (with-current-buffer buffer
       (dolist (operation operations)
@@ -6576,7 +6683,7 @@ timer that is due now and does nothing."
           (`(resize ,columns ,lines)
            (set-frame-size frame columns lines))
           (`(message ,string) (message "%s" string))
-          ('(timer) (run-at-time 0 nil #'ignore))
+          ('(timer) (remoteterm-tests--start-timer))
           ('(redraw) (redraw-frame frame))
           ('(sit) (sit-for 0))
           ('(redisplay) (redisplay t)))))))
@@ -6615,7 +6722,8 @@ attach.  The test does this twice."
          (should (> before 0))
          (pcase-dolist (`(,detached ,attached) cycles)
            (should (= detached 0))
-           (should (> attached 0))))))))
+           (should (> attached 0))))
+       (remoteterm-tests--should-leave-no-timer)))))
 
 (defun remoteterm-tests--count-detached (operations display frame buffer)
   "Count the mode lines that redisplay draws for OPERATIONS with no client.
