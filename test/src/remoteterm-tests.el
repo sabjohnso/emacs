@@ -551,26 +551,55 @@ OPEN-NAMES is the model: the names that are open before OPERATION."
               (scroll-bar-mode 1)
               (should scroll-bar-mode)
               (should (= (window-scroll-bar-width (frame-root-window frame))
-                         0)))))
+                         14)))))
       (setq scroll-bar-mode mode
             default-frame-alist alist))))
 
-(ert-deftest remoteterm-tests-no-scroll-bar-area ()
-  "A remote window keeps no area for a scroll bar.
-The client draws no scroll bars, so an area would be an empty strip.
-The law holds for each value of the scroll-bar parameters, when a frame
-starts and when the parameters change."
+(ert-deftest remoteterm-tests-scroll-bar-area ()
+  "Law S1: a remote window has the vertical scroll-bar area of its request.
+When a frame starts and after each change of the scroll-bar
+parameters, each window has an area of the configured width on the
+requested side, or no area if the request is nil.  t requests the
+side of `default-frame-scroll-bars'.  A window has no horizontal
+scroll bar, because only toolkit builds have one."
   (skip-unless (featurep 'remote-test))
   (remoteterm-tests--with-display "remote-test"
-    (dolist (bars (remoteterm-tests--scroll-bar-requests))
-      (remoteterm-tests--with-frame frame "remote-test"
-          `(,@bars (scroll-bar-width . 14) (scroll-bar-height . 14))
-        (split-window (frame-root-window frame))
-        (remoteterm-tests--should-have-no-scroll-bar-area frame bars)
-        (dolist (other (remoteterm-tests--scroll-bar-requests))
-          (modify-frame-parameters frame other)
-          (remoteterm-tests--should-have-no-scroll-bar-area
-           frame (list bars other)))))))
+    (let ((rd-gen-trials 16))
+      (rd-gen-for-all
+       (lambda ()
+         (cons (rd-gen-element (remoteterm-tests--scroll-bar-requests))
+               (rd-gen-integer 1 40)))
+       (lambda (case)
+         (pcase-let ((`(,bars . ,width) case))
+           (remoteterm-tests--with-frame frame "remote-test"
+               `(,@bars (scroll-bar-width . ,width) (scroll-bar-height . 14))
+             (split-window (frame-root-window frame))
+             (remoteterm-tests--should-have-scroll-bar-area frame bars width)
+             (dolist (other (remoteterm-tests--scroll-bar-requests))
+               (modify-frame-parameters frame other)
+               (remoteterm-tests--should-have-scroll-bar-area
+                frame other width)))))))))
+
+(ert-deftest remoteterm-tests-scroll-bar-default-width ()
+  "Law S2: the default scroll-bar width is whole columns of at least 14 pixels.
+When `scroll-bar-width' is nil, the width of the area is the smallest
+multiple of the column width that is at least 14, as for an X scroll
+bar with no toolkit."
+  (skip-unless (featurep 'remote-test))
+  (remoteterm-tests--with-display "remote-test"
+    (let ((rd-gen-trials 12))
+      (rd-gen-for-all
+       (lambda ()
+         (list (rd-gen-element '(left right))
+               (format "Monospace-%d" (rd-gen-integer 4 30))))
+       (lambda (case)
+         (pcase-let ((`(,side ,font) case))
+           (remoteterm-tests--with-frame frame "remote-test"
+               `((vertical-scroll-bars . ,side) (font . ,font))
+             (let ((column (frame-char-width frame)))
+               (should (equal (window-scroll-bar-width
+                               (frame-root-window frame))
+                              (* column (ceiling 14 column))))))))))))
 
 (defun remoteterm-tests--scroll-bar-requests ()
   "Return each combination of the two scroll-bar frame parameters."
@@ -581,13 +610,17 @@ starts and when the parameters change."
                     '(nil t)))
           '(nil t left right)))
 
-(defun remoteterm-tests--should-have-no-scroll-bar-area (frame request)
-  "Check that no window of FRAME has an area for a scroll bar.
-REQUEST names the case in a failure."
-  (dolist (window (window-list frame 'never))
-    (should (equal (list request (window-scroll-bar-width window)
-                         (window-scroll-bar-height window))
-                   (list request 0 0)))))
+(defun remoteterm-tests--should-have-scroll-bar-area (frame request width)
+  "Check that each window of FRAME has the scroll-bar area of REQUEST.
+REQUEST is an alist of the two scroll-bar parameters.  WIDTH is the
+configured width of a vertical scroll bar."
+  (let* ((vertical (alist-get 'vertical-scroll-bars request))
+         (side (if (eq vertical t) default-frame-scroll-bars vertical)))
+    (dolist (window (window-list frame 'never))
+      (should (equal (list request (window-scroll-bar-width window)
+                           (window-scroll-bar-height window)
+                           (car (window-current-scroll-bars window)))
+                     (list request (if side width 0) 0 side))))))
 
 (ert-deftest remoteterm-tests-display-pixel-size ()
   "The size of a display is the size of the largest frame of its session."

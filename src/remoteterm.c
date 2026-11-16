@@ -967,7 +967,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     gui_set_scroll_bar_height,
     NULL, /* title */
     gui_set_unsplittable,
-    NULL, /* vertical scroll bars: the client draws none */
+    gui_set_vertical_scroll_bars,
     gui_set_horizontal_scroll_bars,
     gui_set_visibility,
     NULL, /* tab bar lines */
@@ -1313,6 +1313,17 @@ remote_default_font_parameter (struct frame *f, Lisp_Object parms)
 			 RES_TYPE_STRING);
 }
 
+/* The set_scroll_bar_default_width_hook.  The default width of a
+   scroll bar is that of an X scroll bar with no toolkit: the smallest
+   number of whole columns that is at least 14 pixels.  */
+static void
+remote_set_scroll_bar_default_width (struct frame *f)
+{
+  int unit = FRAME_COLUMN_WIDTH (f);
+  FRAME_CONFIG_SCROLL_BAR_COLS (f) = (14 + unit - 1) / unit;
+  FRAME_CONFIG_SCROLL_BAR_WIDTH (f) = FRAME_CONFIG_SCROLL_BAR_COLS (f) * unit;
+}
+
 /* The set_new_font_hook.  */
 static Lisp_Object
 remote_new_font (struct frame *f, Lisp_Object font_object, int fontset)
@@ -1332,12 +1343,14 @@ remote_new_font (struct frame *f, Lisp_Object font_object, int fontset)
   FRAME_LINE_HEIGHT (f) = ascent + descent;
   FRAME_TAB_BAR_HEIGHT (f) = FRAME_TAB_BAR_LINES (f) * FRAME_LINE_HEIGHT (f);
 
+  /* A scroll bar of the default width gets the default width of the
+     new font.  A scroll bar of a given width keeps that width.  */
   int unit = FRAME_COLUMN_WIDTH (f);
-  if (FRAME_CONFIG_SCROLL_BAR_WIDTH (f) > 0)
+  if (RANGED_FIXNUMP (1, get_frame_param (f, Qscroll_bar_width), INT_MAX))
     FRAME_CONFIG_SCROLL_BAR_COLS (f)
       = (FRAME_CONFIG_SCROLL_BAR_WIDTH (f) + unit - 1) / unit;
   else
-    FRAME_CONFIG_SCROLL_BAR_COLS (f) = (14 + unit - 1) / unit;
+    remote_set_scroll_bar_default_width (f);
 
   if (f->can_set_window_size)
     adjust_frame_size (f, FRAME_COLS (f) * FRAME_COLUMN_WIDTH (f),
@@ -2370,6 +2383,8 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->frame_raise_lower_hook = remote_raise_lower_frame;
   terminal->set_window_size_hook = remote_set_window_size;
   terminal->set_new_font_hook = remote_new_font;
+  terminal->set_scroll_bar_default_width_hook
+    = remote_set_scroll_bar_default_width;
   return terminal;
 }
 
@@ -2409,9 +2424,10 @@ syms_of_remoteterm (void)
      doc: /* SKIP: real doc in xterm.c.  */);
   x_underline_at_descent_line = false;
 
-  /* The client draws no scroll bars.  loadup.el loads scroll-bar.el
-     only if this variable exists, and init files call scroll-bar-mode,
-     so the remote backend defines it, as the Android port does.  */
+  /* The remote scroll bar is the scroll bar with no toolkit.
+     loadup.el loads scroll-bar.el only if this variable exists, and
+     init files call scroll-bar-mode, so the remote backend defines it,
+     as the Android port does.  */
   DEFVAR_LISP ("x-toolkit-scroll-bars", Vx_toolkit_scroll_bars,
      doc: /* SKIP: real doc in xterm.c.  */);
   Vx_toolkit_scroll_bars = Qnil;
