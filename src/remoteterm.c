@@ -358,10 +358,12 @@ TYPE is as for `frame-edges'.  */)
 
 DEFUN ("x-hide-tip", Fx_hide_tip, Sx_hide_tip, 0, 0, 0,
        doc: /* Hide the current tooltip window.
-Remote frames have no tooltips yet, so return nil.  */)
+Return t if a tooltip was hidden, and nil otherwise.  The Lisp
+function `remote-display--hide-tip' does the work.  This function is
+in C because menu.c calls it.  */)
   (void)
 {
-  return Qnil;
+  return call0 (Qremote_display__hide_tip);
 }
 
 /* Return the largest pixel width of the frames of the session TERMINAL
@@ -927,7 +929,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     gui_set_autolower,
     remote_set_background_color,
     NULL, /* border color */
-    gui_set_border_width,
+    NULL, /* border width: the client draws no outer border */
     remote_set_cursor_color,
     remote_set_cursor_type,
     gui_set_font,
@@ -2374,6 +2376,7 @@ syms_of_remoteterm (void)
   /* The frame parameter of a frame that is transparent to input: see
      remoteinput.c.  */
   DEFSYM (Qremote_tip, "remote-tip");
+  DEFSYM (Qremote_display__hide_tip, "remote-display--hide-tip");
 
   remote_display_name_list = Qnil;
   staticpro (&remote_display_name_list);

@@ -30,6 +30,7 @@
 (require 'frame)
 (require 'faces)
 (require 'fontset)
+(require 'term/remote-tip)
 
 (declare-function x-open-connection "remoteterm.c"
                   (display &optional xrm-string must-succeed))

@@ -8255,6 +8255,221 @@ the summaries of the events of a press and a release of button 1.  For
   "Return N, or the limit of the range of int32 that is nearest to N."
   (max (- (ash 1 31)) (min n (1- (ash 1 31)))))
 
+;;;; Tooltips
+
+;; A tooltip is a child frame of the root frame under the mouse, with
+;; the parameter `remote-tip'.  `x-show-tip' of lisp/term/remote-tip.el
+;; makes it, and `x-hide-tip' deletes it.
+
+(declare-function remote-display--tip-position "remote-tip"
+                  (mouse size root-size offsets parms))
+
+(defvar remote-display--tip-default-offsets)
+
+(ert-deftest remoteterm-tests-tip-position ()
+  "The place of a tooltip keeps it in the root and off the mouse (law T1).
+On each axis: an integer left or top in the parameters gives that
+exact position.  Else a tooltip that is not larger than the root is in
+the root.  If the tooltip fits in the root before or after the mouse
+at the offset, it does not contain the mouse."
+  (skip-unless (featurep 'remote))
+  (rd-gen-for-all
+   (lambda () (list (rd-gen-tip-axis) (rd-gen-tip-axis)))
+   (pcase-lambda (`(,x-case ,y-case))
+     (pcase-let* ((`(,mouse-x ,width ,root-width ,dx ,left) x-case)
+                  (`(,mouse-y ,height ,root-height ,dy ,top) y-case)
+                  (`(,x . ,y)
+                   (remote-display--tip-position
+                    (cons mouse-x mouse-y) (cons width height)
+                    (cons root-width root-height) (cons dx dy)
+                    (append (and left `((left . ,left)))
+                            (and top `((top . ,top)))))))
+       (remoteterm-tests--check-tip-axis
+        x-case (car remote-display--tip-default-offsets) x)
+       (remoteterm-tests--check-tip-axis
+        y-case (cdr remote-display--tip-default-offsets) y)))))
+
+(defun remoteterm-tests--check-tip-axis (case default-offset start)
+  "Check the law T1 for START, the place of a tooltip on one axis.
+CASE is a value of `rd-gen-tip-axis'.  DEFAULT-OFFSET is the offset
+of the axis when the offset of CASE is nil."
+  (pcase-let ((`(,mouse ,size ,limit ,offset ,explicit) case))
+    (if explicit
+        (should (= start explicit))
+      (let ((offset (or offset default-offset)))
+        (when (<= size limit)
+          (should (<= 0 start (- limit size))))
+        (when (or (<= 0 (+ mouse offset) (- limit size))
+                  (<= 0 (- mouse offset size) (- limit size)))
+          (should-not (<= start mouse (+ start size -1))))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-show
+  "After `x-show-tip', the root has one visible tooltip with the text (law T2).
+The text area of the tooltip is as wide as the longest line, but not
+wider than `x-max-tooltip-size'.  It is as high as the lines, but not
+higher than `x-max-tooltip-size'.  A line that wraps can make it
+higher, up to `x-max-tooltip-size'."
+  (remoteterm-tests--with-place-root root
+    (let ((rd-gen-trials 20))
+      (rd-gen-for-all
+       (lambda ()
+         (list (rd-gen-list (lambda () (rd-gen-tip-text 4 100)) 2)
+               (rd-gen-tip-text 4 100)
+               (cons (rd-gen-integer 5 80) (rd-gen-integer 2 40))))
+       (pcase-lambda (`(,before ,text ,max-size))
+         (let ((x-max-tooltip-size max-size))
+           (dolist (other before)
+             (x-show-tip other root))
+           (x-show-tip text root)
+           (remoteterm-tests--check-tip root text)))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-settings
+  "A tooltip has no bars and no fullscreen state (law T3).
+The frame defaults and the bar modes do not change this, and the size
+is that of law T2."
+  (remoteterm-tests--for-each-case
+   '("tooltip\nsettings" "x")
+   (lambda (text)
+     (remoteterm-tests--with-place-root root
+       (let ((default-frame-alist '((fullscreen . maximized)
+                                    (menu-bar-lines . 1) (width . 200)
+                                    (vertical-scroll-bars . right))))
+         (menu-bar-mode 1)
+         (tab-bar-mode 1)
+         (x-show-tip text root)
+         (let ((tip (remoteterm-tests--check-tip root text)))
+           (should (equal (mapcar (lambda (parameter)
+                                    (frame-parameter tip parameter))
+                                  '(menu-bar-lines tab-bar-lines
+                                    tool-bar-lines fullscreen
+                                    vertical-scroll-bars
+                                    horizontal-scroll-bars))
+                          '(0 0 0 nil nil nil)))))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-hide
+  "`x-hide-tip' returns t once, and then nil (law T4).
+After it, the session has no tooltip frame."
+  (remoteterm-tests--for-each-case
+   '("hide" "two\nlines")
+   (lambda (text)
+     (remoteterm-tests--with-place-root root
+       (x-show-tip text root)
+       (should (equal (list (x-hide-tip) (x-hide-tip)) '(t nil)))
+       (should-not (remoteterm-tests--tip-frames))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-timeout
+  "A small TIMEOUT hides the tooltip (law T5).
+The TIMEOUT `most-positive-fixnum' of mouse.el gives no error, and the
+tooltip stays."
+  (remoteterm-tests--for-each-case
+   `((0.1 0) (,most-positive-fixnum 1))
+   (pcase-lambda (`(,timeout ,count))
+     (remoteterm-tests--with-place-root root
+       (x-show-tip "timeout" root nil timeout)
+       (with-timeout (1)
+         (while (/= (length (remoteterm-tests--tip-frames)) count)
+           (accept-process-output nil 0.05)))
+       (remoteterm-tests--handle-events)
+       (should (= (length (remoteterm-tests--tip-frames)) count))))))
+
+(rd-daemon-deftest remoteterm-tests-tip-mode
+  "With `tooltip-mode', a motion over a help text shows a tooltip (law T6).
+A motion into the tooltip after that does not delete it."
+  (remoteterm-tests--for-each-case
+   '((2 2) (10 5))
+   (pcase-lambda (`(,column ,line))
+     (remoteterm-tests--with-place-root root
+       (let ((buffer (remoteterm-tests--all-help-buffer))
+             (tooltip-delay 0)
+             (tooltip-short-delay 0)
+             (tooltip-help-message nil))
+         (unwind-protect
+             (progn
+               (tooltip-mode 1)
+               (select-frame root)
+               (set-window-buffer (frame-first-window root) buffer)
+               (redisplay t)
+               (pcase-let ((`(,_ ,x ,y)
+                            (remoteterm-tests--cell-point root column line)))
+                 (remoteterm-tests--input root 'motion x y 5))
+               (remoteterm-tests--handle-events)
+               (let ((tips (remoteterm-tests--tip-frames)))
+                 (should (= (length tips) 1))
+                 (remoteterm-tests--input (car tips) 'motion 1 1 6)
+                 (remoteterm-tests--handle-events)
+                 (should (equal (remoteterm-tests--tip-frames) tips))))
+           (tooltip-mode -1)
+           (kill-buffer buffer)))))))
+
+(ert-deftest remoteterm-tests-tip-hide-calls-lisp ()
+  "The C function `x-hide-tip' returns the value of the Lisp hide (law T7)."
+  (skip-unless (featurep 'remote))
+  (cl-letf (((symbol-function 'remote-display--hide-tip)
+             (lambda () 'hidden)))
+    (should (eq (x-hide-tip) 'hidden))))
+
+(ert-deftest remoteterm-tests-frame-border-width ()
+  "A new frame can have a border-width parameter (law T8).
+`tooltip-frame-parameters' give one.  The client draws no outer
+border, so the border width of the frame and the outer border width
+of its geometry stay 0."
+  (skip-unless (featurep 'remote-test))
+  (remoteterm-tests--with-display "remote-border"
+    (remoteterm-tests--with-frame frame "remote-border" '((border-width . 1))
+      (should (eql (frame-parameter frame 'border-width) 0))
+      (should (eql (alist-get 'outer-border-width (frame-geometry frame))
+                   0)))))
+
+(defun remoteterm-tests--check-tip (root text)
+  "Check that ROOT has one visible tooltip that shows TEXT, and return it.
+Check the size of law T2."
+  (let ((tips (seq-filter (lambda (frame)
+                            (and (eq (frame-parent frame) root)
+                                 (frame-visible-p frame)))
+                          (frame-list))))
+    (should (= (length tips) 1))
+    (let ((tip (car tips)))
+      (should (frame-parameter tip 'remote-tip))
+      (should (equal (with-current-buffer
+                         (window-buffer (frame-root-window tip))
+                       (buffer-string))
+                     text))
+      (remoteterm-tests--check-tip-size tip text)
+      tip)))
+
+(defun remoteterm-tests--check-tip-size (tip text)
+  "Check that the text area of the tooltip TIP fits TEXT (law T2)."
+  (let* ((window (frame-root-window tip))
+         (lines (string-lines text))
+         (longest (apply #'max (mapcar #'length lines)))
+         (max-width (* (car x-max-tooltip-size) (frame-char-width tip)))
+         (max-height (* (cdr x-max-tooltip-size) (frame-char-height tip)))
+         (text-height (min max-height
+                           (* (length lines) (frame-char-height tip))))
+         (height (window-body-height window t)))
+    (should (= (window-body-width window t)
+               (min max-width (* longest (frame-char-width tip)))))
+    (if (<= longest (car x-max-tooltip-size))
+        (should (= height text-height))
+      (should (<= text-height height max-height)))))
+
+(defun remoteterm-tests--tip-frames ()
+  "Return the live tooltip frames of `remoteterm-tests--place-display'."
+  (seq-filter (lambda (frame) (frame-parameter frame 'remote-tip))
+              (remoteterm-tests--place-frames)))
+
+(defun remoteterm-tests--all-help-buffer ()
+  "Return a new buffer whose whole text has the same `help-echo'.
+It has 20 lines of 40 characters, with the help text
+`remoteterm-tests--help'."
+  (let ((buffer (generate-new-buffer "remote-all-help")))
+    (with-current-buffer buffer
+      (dotimes (_ 20)
+        (insert (make-string 40 ?h) "\n"))
+      (put-text-property (point-min) (point-max)
+                         'help-echo remoteterm-tests--help))
+    buffer))
+
 ;;;; Focus and size input
 
 (defun remoteterm-tests--z-key (frame)

@@ -363,6 +363,7 @@
 (if (featurep 'remote)
     (progn
       (load "term/common-win")
+      (load "term/remote-tip")
       (load "term/remote-win")))
 (if (fboundp 'x-create-frame)
     ;; Do it after loading term/foo-win.el since the value of the

@@ -209,5 +209,31 @@ A position can be negative."
       (6 (list 'delete (rd-gen-integer 1 7)))
       (7 (list 'show (index))))))
 
+(defun rd-gen-tip-text (max-lines max-length)
+  "Return a random text of 1 to MAX-LINES lines for a tooltip.
+Each line has 1 to MAX-LENGTH lowercase letters.  The text has no
+newline at its end."
+  (mapconcat (lambda (_)
+               (apply #'string
+                      (cl-loop repeat (rd-gen-integer 1 max-length)
+                               collect (+ ?a (rd-gen-random 26)))))
+             (number-sequence 1 (rd-gen-integer 1 max-lines))
+             "\n"))
+
+(defun rd-gen-tip-axis ()
+  "Return a random case for one axis of the place of a tooltip.
+The value is (MOUSE SIZE LIMIT OFFSET EXPLICIT).  LIMIT is the size of
+the root frame on the axis, and SIZE is the size of the tooltip, which
+can be larger than LIMIT.  MOUSE can be outside the root frame.
+OFFSET is nil or a positive number of pixels.  EXPLICIT is nil, or a
+position that the parameters of the tooltip give."
+  (let* ((limit (rd-gen-integer 1 2000))
+         (size (rd-gen-integer 1 (+ limit 100))))
+    (list (rd-gen-integer -100 (+ limit 100))
+          size
+          limit
+          (and (/= (rd-gen-random 4) 0) (rd-gen-integer 1 40))
+          (and (= (rd-gen-random 4) 0) (rd-gen-integer -100 2000)))))
+
 (provide 'remote-display-generators)
 ;;; remote-display-generators.el ends here
