@@ -68,6 +68,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "keyboard.h"
 #include "termhooks.h"
 #include "remoteinput.h"
+#include "remotetoolbar.h"
 
 /* Keysyms with this bit are vendor keys.  */
 enum { KEYSYM_VENDOR = 1 << 28 };
@@ -177,8 +178,9 @@ remote_key_input (struct remote_display_info *dpyinfo,
 /* Store the event of the button MESSAGE for its frame of DPYINFO.
    First, a button in a tip frame goes to the parent of the tip
    (remote_input_target).  Then the scroll bars get the button
-   (remotescroll.c), then a wheel button gives a wheel event, and each
-   other button gives a click.  The button 0 is not a button.  */
+   (remotescroll.c), then the tool bar (remotetoolbar.c).  If they do
+   not take it, a wheel button gives a wheel event, and each other
+   button gives a click.  The button 0 is not a button.  */
 static void
 remote_button_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
@@ -192,6 +194,9 @@ remote_button_input (struct remote_display_info *dpyinfo,
   const struct remote_wheel *wheel = remote_wheel_of (button.button);
   if (remote_scroll_bar_button_input (&dpyinfo->scroll_bar_grab, &bar_button,
 				      wheel != NULL))
+    return;
+  if (remote_tool_bar_button (f, button.x, button.y, button.button,
+			      button.press, bar_button.modifiers))
     return;
   if (!wheel)
     remote_click_event (f, &button);

@@ -12393,6 +12393,212 @@ minimum height of the windows from `frame-windows-min-size'."
            (frame-windows-min-size frame nil nil t)))
    '((tool-bar-lines . 2))))
 
+(rd-daemon-deftest remoteterm-tests-tool-bar-click
+  "Law T3: a click on a tool bar item gives the tool bar event of the item.
+A trial makes a frame with a tool bar of one item.  Then it sends a
+press and a release of a random button, with random modifiers, at a
+random pixel of the icon of the item.  With `mouse-highlight' on, a
+motion to that pixel comes first, so that the item has the highlight.
+Laws:
+ - The buttons 1 to 3 give only the tool bar event of the item, with
+   the modifiers, and no mouse event.  With no modifiers, the key
+   sequence [tool-bar KEY] has the command of the item.  With
+   modifiers, it has no command.
+ - The wheel buttons 4 to 7 give one wheel event, as in the text
+   area, and no tool bar event."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     (lambda ()
+       (list :button (rd-gen-integer 1 7)
+             :modifiers (rd-gen-element '(0 1 2))
+             :highlight (rd-gen-element '(t nil))
+             :fx (rd-gen-random 1000)
+             :fy (rd-gen-random 1000)))
+     (lambda (trial)
+       (pcase-let* (((map :button :modifiers) trial)
+                    (events (remoteterm-tests--tool-bar-click-events trial)))
+         (if (< button 4)
+             (should (equal events
+                            (list (remoteterm-tests--tool-bar-model-event
+                                   modifiers))))
+           (should (= (length events) 1))
+           (should (string-match-p "wheel-"
+                                   (symbol-name (car events))))))))))
+
+(defun remoteterm-tests--tool-bar-model-event (modifiers)
+  "Return the summary of the tool bar event of a click with MODIFIERS.
+The summary is as in `remoteterm-tests--tool-bar-events-now'.  Only
+the key with no modifiers has the command of the item."
+  (list 'tool-bar (remoteterm-tests--tool-bar-key modifiers)
+        (and (= modifiers 0) #'remoteterm-tests--tool-bar-command-of-item)))
+
+(defun remoteterm-tests--tool-bar-key (modifiers)
+  "Return the key of the tool bar item with the client MODIFIERS.
+MODIFIERS is 0, 1 (shift) or 2 (control)."
+  (event-convert-list (append (pcase modifiers (1 '(shift)) (2 '(control)))
+                              '(rd-item))))
+
+(defvar remoteterm-tests--tool-bar-runs 0
+  "The number of calls of `remoteterm-tests--tool-bar-command-of-item'.")
+
+(defun remoteterm-tests--tool-bar-command-of-item ()
+  "The command of the tool bar item of the click tests."
+  (interactive)
+  (setq remoteterm-tests--tool-bar-runs
+        (1+ remoteterm-tests--tool-bar-runs)))
+
+(defun remoteterm-tests--tool-bar-click-events (trial)
+  "Send the click of TRIAL to the tool bar item, and return the events.
+TRIAL is a plist of the law `remoteterm-tests-tool-bar-click'.  The
+events are as in `remoteterm-tests--tool-bar-events-now'."
+  (pcase-let (((map :button :modifiers :highlight :fx :fy) trial))
+    (remoteterm-tests--with-tool-bar-item
+     t
+     (lambda (frame item)
+       (let* ((mouse-highlight highlight)
+              (x (+ (car item) (remoteterm-tests--thousandths fx 8)))
+              (y (+ (cdr item) (remoteterm-tests--thousandths fy 8))))
+         (when highlight
+           (remoteterm-tests--bar-motion frame x y))
+         (remoteterm-tests--tool-bar-button frame x y button 1 modifiers)
+         (remoteterm-tests--tool-bar-button frame x y button 0 modifiers)
+         (remoteterm-tests--tool-bar-events-now))))))
+
+(defun remoteterm-tests--with-tool-bar-item (enable function)
+  "Call FUNCTION with a frame that has a tool bar with one item.
+ENABLE is the `:enable' form of the item.  The item has the key
+`rd-item', the command `remoteterm-tests--tool-bar-command-of-item',
+and an icon of 8 x 8 pixels.  The arguments of FUNCTION are the frame
+and the pixel (X . Y) of the top left corner of the icon.  The buffer
+of the frame is current while FUNCTION runs.  Return the value of
+FUNCTION."
+  (remoteterm-tests--bar-input-session
+   '((width . 40) (height . 10) (tool-bar-lines . 1))
+   (lambda (frame window _other)
+     (with-temp-buffer
+       (setq-local tool-bar-map (make-sparse-keymap))
+       (define-key tool-bar-map [rd-item]
+         `(menu-item "RD" remoteterm-tests--tool-bar-command-of-item
+                     :enable ,enable
+                     :image (image :type xbm :data-width 8
+                                   :data-height 8
+                                   :data ,(make-bool-vector 64 t))))
+       (set-window-buffer window (current-buffer))
+       (force-mode-line-update t)
+       (remote-display--take-output "remote-draw")
+       (let* ((output (remoteterm-tests--redisplay-output "remote-draw"))
+              (height (cdr (alist-get 'tool-bar-size
+                                      (frame-geometry frame))))
+              (icon (seq-find
+                     (lambda (message)
+                       (and (eq (car message) 'draw-image)
+                            (< (plist-get (cdr message) :y) height)))
+                     (remoteterm-tests--all-messages output))))
+         (should icon)
+         (funcall function frame (cons (plist-get (cdr icon) :x)
+                                       (plist-get (cdr icon) :y))))))))
+
+(defun remoteterm-tests--tool-bar-button (frame x y button press modifiers)
+  "Send a press (PRESS is 1) or a release of BUTTON at X, Y of FRAME.
+MODIFIERS are the client modifier bits."
+  (remote-display--input
+   "remote-draw"
+   (remote-display--encode
+    `(button :frame ,(remoteterm-tests--frame-id frame)
+             :time ,(cl-incf remoteterm-tests--bar-time 10000)
+             :x ,x :y ,y :button ,button :modifiers ,modifiers
+             :press ,press))))
+
+(defun remoteterm-tests--tool-bar-events-now ()
+  "Read the events that wait now, and return a summary of them in order.
+A tool bar event gives (tool-bar KEY COMMAND), where COMMAND is the
+binding of [tool-bar KEY] in the current buffer.  A mouse or wheel
+event gives its symbol.  Other events give nothing."
+  (let ((events nil)
+        event)
+    (while (setq event (read-event nil nil 0.05))
+      (pcase event
+        (`(,key (,_ (tool-bar)))
+         (push (list 'tool-bar key (key-binding (vector 'tool-bar key)))
+               events))
+        (`(,(and (pred symbolp) symbol) . ,_)
+         (when (string-match-p "mouse-\\|wheel-" (symbol-name symbol))
+           (push symbol events)))))
+    (nreverse events)))
+
+(ert-deftest remoteterm-tests-tool-bar-click-runs ()
+  "A click on a tool bar item runs the command of the item.
+The key sequence of the click is [tool-bar rd-item]."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--tool-bar-run-case)
+                   '((tool-bar rd-item) 1)))))
+
+(defun remoteterm-tests--tool-bar-run-case ()
+  "Click the tool bar item, read the key sequence, and run its command.
+Return the list (KEYS RUNS): the symbols of the key sequence, and the
+number of calls of the command of the item.  Run the binding of the
+key sequence only if it is a command.  KEYS is nil if no key comes
+in a short time."
+  (remoteterm-tests--with-tool-bar-item
+   t
+   (lambda (frame item)
+     (let ((runs remoteterm-tests--tool-bar-runs))
+       (remoteterm-tests--click-tool-bar-item frame item)
+       (let* ((keys (with-timeout (5 nil) (read-key-sequence-vector nil)))
+              (command (and keys (key-binding keys))))
+         (when (commandp command)
+           (command-execute command))
+         (list (mapcar #'remoteterm-tests--event-symbol keys)
+               (- remoteterm-tests--tool-bar-runs runs)))))))
+
+(defun remoteterm-tests--event-symbol (event)
+  "Return the symbol of EVENT, an event of a key sequence."
+  (if (consp event) (car event) event))
+
+(defun remoteterm-tests--click-tool-bar-item (frame item &optional release)
+  "Click mouse-1 in the middle of the icon at ITEM of FRAME.
+ITEM is the pixel (X . Y) of the top left corner of the icon.  A
+motion to the icon comes first.  RELEASE is the pixel (X . Y) of the
+release, or nil for the pixel of the press."
+  (let ((x (+ (car item) 4))
+        (y (+ (cdr item) 4)))
+    (remoteterm-tests--bar-motion frame x y)
+    (remoteterm-tests--tool-bar-button frame x y 1 1 0)
+    (remoteterm-tests--tool-bar-button frame (or (car release) x)
+                                       (or (cdr release) y) 1 0 0)))
+
+(ert-deftest remoteterm-tests-tool-bar-click-elsewhere ()
+  "A press on the item and a release in the text area give no tool bar event.
+A click on a disabled item gives no event."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should-not (assq 'tool-bar
+                      (remoteterm-tests--daemon-call
+                       'remoteterm-tests--tool-bar-release-in-text-case)))
+    (should-not (remoteterm-tests--daemon-call
+                 'remoteterm-tests--tool-bar-disabled-case))))
+
+(defun remoteterm-tests--tool-bar-release-in-text-case ()
+  "Press on the tool bar item, release in the text area, return the events.
+The events are as in `remoteterm-tests--tool-bar-events-now'."
+  (remoteterm-tests--with-tool-bar-item
+   t
+   (lambda (frame item)
+     (remoteterm-tests--click-tool-bar-item
+      frame item (remoteterm-tests--text-pixel (frame-root-window frame)))
+     (remoteterm-tests--tool-bar-events-now))))
+
+(defun remoteterm-tests--tool-bar-disabled-case ()
+  "Click on a disabled tool bar item, and return the events.
+The events are as in `remoteterm-tests--tool-bar-events-now'."
+  (remoteterm-tests--with-tool-bar-item
+   nil
+   (lambda (frame item)
+     (remoteterm-tests--click-tool-bar-item frame item)
+     (remoteterm-tests--tool-bar-events-now))))
+
 ;;;; The loop of the trials
 
 (defun remoteterm-tests--trials-until (trials bad)

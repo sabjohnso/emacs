@@ -20,8 +20,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 /* A remote frame has the tool bar that Emacs draws: the tool-bar
    window of the frame, above the windows.  Redisplay draws the items
    of the tool bar into that window, and the icons are image glyphs.
-   This file sets the height of the tool bar.  The model is the tool
-   bar of Android (androidfns.c).  */
+   This file sets the height of the tool bar, and gives the buttons
+   in the tool bar to it.  The model is the tool bar of Android
+   (androidfns.c and androidterm.c).  */
 
 #include <config.h>
 
@@ -32,6 +33,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "remotetoolbar.h"
 
 static void remote_resize_for_tool_bar (struct frame *f);
+static bool remote_tool_bar_takes_p (struct frame *f, int x, int y,
+				     bool press);
 
 void
 remote_set_tool_bar_lines (struct frame *f, Lisp_Object value,
@@ -95,4 +98,33 @@ remote_resize_for_tool_bar (struct frame *f)
   else
     adjust_frame_size (f, -1, -1, 4, false, Qtool_bar_lines);
   f->tool_bar_resized = f->tool_bar_redisplayed;
+}
+
+bool
+remote_tool_bar_button (struct frame *f, int x, int y, int button,
+			bool press, int modifiers)
+{
+  /* As on Android, the tool bar takes only the buttons 1 to 3.  The
+     buttons 4 to 7 are the wheel, and keep the wheel events.  */
+  if (button >= 4 || !remote_tool_bar_takes_p (f, x, y, press))
+    return false;
+  handle_tool_bar_click (f, x, y, press, modifiers);
+  return true;
+}
+
+/* Return true if the tool bar of F takes a button at X, Y.  PRESS is
+   true for a press.  The tool bar takes a button only in the tool-bar
+   window.  It takes a release only after a press on an item
+   (last_tool_bar_item), so that a press in the text area and a
+   release in the tool bar give a normal click.  */
+static bool
+remote_tool_bar_takes_p (struct frame *f, int x, int y, bool press)
+{
+  if (!WINDOWP (f->tool_bar_window)
+      || !WINDOW_TOTAL_LINES (XWINDOW (f->tool_bar_window)))
+    return false;
+  Lisp_Object window = window_from_coordinates (f, x, y, 0, true, true,
+						true);
+  return (EQ (window, f->tool_bar_window)
+	  && (press || f->last_tool_bar_item != -1));
 }

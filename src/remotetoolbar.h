@@ -34,4 +34,13 @@ extern void remote_set_tool_bar_lines (struct frame *f, Lisp_Object value,
    height of the tool bar of F to HEIGHT pixels.  */
 extern void remote_change_tool_bar_height (struct frame *f, int height);
 
+/* Give the button BUTTON at X, Y of F to the tool bar of F, if the
+   tool bar takes it.  PRESS is true for a press and false for a
+   release, and MODIFIERS are the Emacs modifiers.  The tool bar
+   takes the buttons 1 to 3 in the tool-bar window.  It takes a
+   release only after a press on an item.  Return true if the tool bar
+   took the button, and false if not.  */
+extern bool remote_tool_bar_button (struct frame *f, int x, int y,
+				    int button, bool press, int modifiers);
+
 #endif /* EMACS_REMOTETOOLBAR_H */
