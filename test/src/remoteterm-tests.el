@@ -12214,18 +12214,23 @@ number, a number that is not an integer, or nil.  Laws:
    height is the text height plus the tool bar height.
  - The third value keeps the native height, because
    `frame-inhibit-implied-resize' has `tool-bar-lines'.  The frame has
-   10 lines or more, so the windows keep their minimum size.  As in the
+   15 lines or more, so the windows keep their minimum size.  As in the
    frames of X with no toolkit, the second value can keep the text
    size: the first change after the first redisplay of a frame makes
    the frame larger to hold its tool bar.
  - After each value, the tool bar height from `frame-geometry' is
    more than 0 if and only if the model gives lines, the root window
    starts below the tool bar, and the parameter is the number of lines
-   of the model."
-  (let ((rd-gen-trials 12))
+   of the model.
+ - After the second and the third value, the tool bar height is the
+   number of lines of the model times the height of a line.  No
+   redisplay comes between the change and the state, so the icons do
+   not change the height.  The new frame can have a redisplay of its
+   tool bar before the state, which fits the height to the icons."
+  (let ((rd-gen-trials 20))
     (rd-gen-for-all
      (lambda ()
-       (cons (rd-gen-integer 10 20)
+       (cons (rd-gen-integer 15 25)
              (cl-loop repeat 3 collect (remoteterm-tests--tool-bar-value))))
      (lambda (trial)
        (pcase-let* ((`(,height . ,values) trial)
@@ -12239,13 +12244,13 @@ number, a number that is not an integer, or nil.  Laws:
                        (plist-get made :tool-bar))))
          (should (= (plist-get last :native-height)
                     (plist-get (nth 1 states) :native-height)))
-         (cl-mapc #'remoteterm-tests--check-tool-bar states values))))))
+         (cl-mapc #'remoteterm-tests--check-tool-bar states values
+                  '(nil t t)))))))
 
 (defun remoteterm-tests--tool-bar-value ()
   "Return a random value for the `tool-bar-lines' parameter.
-The value is 0, 1, or 2 lines, or a value that is not a number of
-lines."
-  (rd-gen-element (list (rd-gen-random 3) -1 1.5 nil)))
+The value is 0 to 5 lines, or a value that is not a number of lines."
+  (rd-gen-element (list (rd-gen-random 6) (rd-gen-random 6) -1 1.5 nil)))
 
 (defun remoteterm-tests--tool-bar-model (value)
   "Return the number of tool bar lines that the parameter VALUE gives.
@@ -12253,16 +12258,22 @@ This is the model of the tool bar.  A value that is not a natural
 number gives 0 lines."
   (if (natnump value) value 0))
 
-(defun remoteterm-tests--check-tool-bar (step value)
+(defun remoteterm-tests--check-tool-bar (step value &optional exact)
   "Check the tool bar of STEP against the model of VALUE.
-STEP is a plist of `remoteterm-tests--tool-bar-state'."
+STEP is a plist of `remoteterm-tests--tool-bar-state'.  If EXACT is
+non-nil, the tool bar height must be the number of lines of the model
+times the height of a line."
   (let ((lines (remoteterm-tests--tool-bar-model value)))
     (should (eq (> (plist-get step :tool-bar) 0) (> lines 0)))
+    (when exact
+      (should (= (plist-get step :tool-bar)
+                 (* lines (plist-get step :char-height)))))
     (should (= (plist-get step :root-top) (plist-get step :tool-bar)))
     (should (eql (plist-get step :lines) lines))))
 
-(defun remoteterm-tests--tool-bar-steps (height values)
+(defun remoteterm-tests--tool-bar-steps (height values &optional parameters)
   "Make a frame with HEIGHT lines, and give it each tool bar line count.
+The frame also has the frame PARAMETERS.
 VALUES has three values of the `tool-bar-lines' parameter.  The first
 value is a parameter of the new frame, and the others are changes.
 Return the state of `remoteterm-tests--tool-bar-state' after each
@@ -12273,7 +12284,8 @@ that redisplay does not draw the tool bar."
   (remoteterm-tests--with-display "remote-tool-bar"
     (remoteterm-tests--with-frame frame "remote-tool-bar"
                                   `((width . 40) (height . ,height)
-                                    (tool-bar-lines . ,(car values)))
+                                    (tool-bar-lines . ,(car values))
+                                    ,@parameters)
       (let ((made (remoteterm-tests--tool-bar-state frame)))
         (frame-after-make-frame frame t)
         (select-frame frame)
@@ -12297,6 +12309,31 @@ the top of the root window, :lines is the `tool-bar-lines' parameter,
         :text-height (frame-text-height frame)
         :native-height (frame-pixel-height frame)
         :char-height (frame-char-height frame)))
+
+(rd-daemon-deftest remoteterm-tests-tool-bar-full-height
+  "Law T4: a frame with a full-screen height keeps its native height.
+A trial makes a remote frame with the `fullscreen' parameter
+`fullheight' or `maximized', and gives it three random values of
+`tool-bar-lines', as in law T1.  Law: after the second and the third
+value, the native height is the native height after the first value.
+The tool bar takes its height from the windows."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda ()
+       (list (rd-gen-integer 15 25)
+             (cl-loop repeat 3 collect (remoteterm-tests--tool-bar-value))
+             (rd-gen-element '(fullheight maximized))))
+     (lambda (trial)
+       (pcase-let* ((`(,height ,values ,fullscreen) trial)
+                    (states (remoteterm-tests--tool-bar-steps
+                             height values `((fullscreen . ,fullscreen)))))
+         (should (equal (mapcar (lambda (state)
+                                  (plist-get state :native-height))
+                                states)
+                        (make-list 3 (plist-get (car states)
+                                                :native-height))))
+         (cl-mapc #'remoteterm-tests--check-tool-bar states values
+                  '(nil t t)))))))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-default
   "Law T2: the default tool bar of a remote frame follows `tool-bar-mode'.
@@ -12464,11 +12501,12 @@ events are as in `remoteterm-tests--tool-bar-events-now'."
          (remoteterm-tests--tool-bar-button frame x y button 0 modifiers)
          (remoteterm-tests--tool-bar-events-now))))))
 
-(defun remoteterm-tests--with-tool-bar-item (enable function)
+(defun remoteterm-tests--with-tool-bar-item (enable function &optional size)
   "Call FUNCTION with a frame that has a tool bar with one item.
 ENABLE is the `:enable' form of the item.  The item has the key
 `rd-item', the command `remoteterm-tests--tool-bar-command-of-item',
-and an icon of 8 x 8 pixels.  The arguments of FUNCTION are the frame
+and an icon of SIZE pixels, a pair (WIDTH . HEIGHT).  The default SIZE
+is 8 x 8 pixels.  The arguments of FUNCTION are the frame
 and the pixel (X . Y) of the top left corner of the icon.  The buffer
 of the frame is current while FUNCTION runs.  Return the value of
 FUNCTION."
@@ -12480,9 +12518,8 @@ FUNCTION."
        (define-key tool-bar-map [rd-item]
          `(menu-item "RD" remoteterm-tests--tool-bar-command-of-item
                      :enable ,enable
-                     :image (image :type xbm :data-width 8
-                                   :data-height 8
-                                   :data ,(make-bool-vector 64 t))))
+                     :image ,(remoteterm-tests--tool-bar-icon
+                              (or size '(8 . 8)))))
        (set-window-buffer window (current-buffer))
        (force-mode-line-update t)
        (remote-display--take-output "remote-draw")
@@ -12497,6 +12534,14 @@ FUNCTION."
          (should icon)
          (funcall function frame (cons (plist-get (cdr icon) :x)
                                        (plist-get (cdr icon) :y))))))))
+
+(defun remoteterm-tests--tool-bar-icon (size)
+  "Return the image of a black icon of SIZE, a pair (WIDTH . HEIGHT).
+Each row of the bits of an XBM bool vector has a multiple of 8 bits."
+  (let ((stride (* 8 (ceiling (car size) 8))))
+    `(image :type xbm :data-width ,(car size) :data-height ,(cdr size)
+            :stride ,stride
+            :data ,(make-bool-vector (* stride (cdr size)) t))))
 
 (defun remoteterm-tests--tool-bar-button (frame x y button press modifiers)
   "Send a press (PRESS is 1) or a release of BUTTON at X, Y of FRAME.
@@ -12525,6 +12570,81 @@ event gives its symbol.  Other events give nothing."
          (when (string-match-p "mouse-\\|wheel-" (symbol-name symbol))
            (push symbol events)))))
     (nreverse events)))
+
+(rd-daemon-deftest remoteterm-tests-tool-bar-routing
+  "Law T5: only a click on the item goes to the tool bar.
+A trial makes a frame with a tool bar of one enabled item.  Then it
+sends a press and a release of a random button 1 to 3.  Each of the
+two pixels is in a random zone of the frame: the icon of the item, the
+tool bar away from the item, the last row of the tool bar, the first
+row of the root window, or the text area.  Laws:
+ - A press on the icon and a release on the icon give only the tool
+   bar event of the item.
+ - A press below the tool bar gives one or more mouse events and no
+   tool bar event, whatever the zone of the release is.
+ - Each other pair of zones gives no tool bar event."
+  (let ((rd-gen-trials 15))
+    (rd-gen-for-all
+     (lambda ()
+       (list :button (rd-gen-integer 1 3)
+             :press (remoteterm-tests--tool-bar-zone)
+             :release (remoteterm-tests--tool-bar-zone)))
+     (lambda (trial)
+       (pcase-let* (((map :press :release) trial)
+                    (events (remoteterm-tests--tool-bar-routing-events
+                             trial))
+                    (tool-bar (seq-filter #'consp events)))
+         (cond ((and (eq (car press) 'icon) (eq (car release) 'icon))
+                (should (equal events
+                               (list (remoteterm-tests--tool-bar-model-event
+                                      0)))))
+               ((memq (car press) '(window-edge text))
+                (should-not tool-bar)
+                (should (seq-some #'symbolp events)))
+               (t (should-not tool-bar))))))))
+
+(defun remoteterm-tests--tool-bar-zone ()
+  "Return a random (ZONE FX FY) for the law of the tool bar routing.
+ZONE is `icon', `bar', `bar-edge', `window-edge' or `text'.  FX and FY
+are thousandths that give the pixel in the zone."
+  (list (rd-gen-element '(icon bar bar-edge window-edge text))
+        (rd-gen-random 1000) (rd-gen-random 1000)))
+
+(defun remoteterm-tests--tool-bar-zone-pixel (zone frame item)
+  "Return the pixel (X . Y) of ZONE in FRAME.
+ZONE is as for `remoteterm-tests--tool-bar-zone'.  ITEM is the pixel
+(X . Y) of the top left corner of the 8 x 8 icon.  The zone `bar' starts
+40 pixels to the right of the icon, so it is not on the item."
+  (pcase-let* ((`(,kind ,fx ,fy) zone)
+               (height (cdr (alist-get 'tool-bar-size
+                                       (frame-geometry frame))))
+               (width (frame-pixel-width frame))
+               (away (+ (car item) 40))
+               (away-x (+ away (remoteterm-tests--thousandths
+                                fx (- width away)))))
+    (pcase kind
+      ('icon (cons (+ (car item) (remoteterm-tests--thousandths fx 8))
+                   (+ (cdr item) (remoteterm-tests--thousandths fy 8))))
+      ('bar (cons away-x (remoteterm-tests--thousandths fy height)))
+      ('bar-edge (cons away-x (1- height)))
+      ('window-edge (cons (remoteterm-tests--thousandths fx (/ width 2))
+                          height))
+      ('text (remoteterm-tests--text-pixel (frame-root-window frame))))))
+
+(defun remoteterm-tests--tool-bar-routing-events (trial)
+  "Send the press and the release of TRIAL, and return the events.
+TRIAL is a plist of the law `remoteterm-tests-tool-bar-routing'.  The
+events are as in `remoteterm-tests--tool-bar-events-now'."
+  (pcase-let (((map :button :press :release) trial))
+    (remoteterm-tests--with-tool-bar-item
+     t
+     (lambda (frame item)
+       (let ((mouse-highlight nil))
+         (pcase-dolist (`(,zone ,down) `((,press 1) (,release 0)))
+           (pcase-let ((`(,x . ,y) (remoteterm-tests--tool-bar-zone-pixel
+                                    zone frame item)))
+             (remoteterm-tests--tool-bar-button frame x y button down 0)))
+         (remoteterm-tests--tool-bar-events-now))))))
 
 (ert-deftest remoteterm-tests-tool-bar-click-runs ()
   "A click on a tool bar item runs the command of the item.
@@ -12601,121 +12721,263 @@ The events are as in `remoteterm-tests--tool-bar-events-now'."
 
 ;;;; Image relief
 
+;; The relief model: the light and the dark colors of a background.
+
+(defun remoteterm-tests--relief-colors (background)
+  "Return the relief colors (LIGHT . DARK) of the protocol BACKGROUND.
+This is the model of the relief colors.  Each component of LIGHT is
+the component of BACKGROUND times 6/5, plus #x20, and at most #xff.
+Each component of DARK is the component of BACKGROUND times 3/5."
+  (cl-flet ((scale (numerator add)
+              (apply #'+ (mapcar (lambda (shift)
+                                   (ash (min #xff
+                                             (+ add
+                                                (/ (* (logand
+                                                       (ash background
+                                                            (- shift))
+                                                       #xff)
+                                                      numerator)
+                                                   5)))
+                                        shift))
+                                 '(16 8 0)))))
+    (cons (scale 6 #x20) (scale 3 0))))
+
+(defun remoteterm-tests--relief-only-colors (colors others)
+  "Return the relief COLORS (LIGHT . DARK) that are not in OTHERS.
+OTHERS are the protocol colors of the backgrounds near the relief.  A
+pixel with a color that is also a background does not show a relief."
+  (seq-difference (list (car colors) (cdr colors)) others))
+
+(defun remoteterm-tests--border-colors (messages rectangle)
+  "Return the different colors of the border pixels of RECTANGLE.
+RECTANGLE is (X Y WIDTH HEIGHT).  The border pixels are the pixels of
+RECTANGLE on its four edges.  The color of a pixel is as for
+`remoteterm-tests--relief-sides', and is nil for no color."
+  (pcase-let ((`(,x ,y ,width ,height) rectangle)
+              (clears (reverse (remoteterm-tests--of-messages
+                                'clear-area messages))))
+    (seq-uniq
+     (cl-loop for py from y below (+ y height)
+              nconc (cl-loop for px from x below (+ x width)
+                             when (or (memq px (list x (+ x width -1)))
+                                      (memq py (list y (+ y height -1))))
+                             collect (remoteterm-tests--pixel-color
+                                      clears px py))))))
+
+(defun remoteterm-tests--grow (rectangle dx dy)
+  "Return RECTANGLE (X Y WIDTH HEIGHT) with each side out by DX or DY.
+DX is for the left and right sides, and DY for the top and bottom."
+  (pcase-let ((`(,x ,y ,width ,height) rectangle))
+    (list (- x dx) (- y dy) (+ width dx dx) (+ height dy dy))))
+
+(defun remoteterm-tests--check-relief (messages rectangle thick raised
+                                                colors others)
+  "Check the relief of THICK pixels around RECTANGLE in MESSAGES.
+RECTANGLE is (X Y WIDTH HEIGHT), the rectangle inside the relief.
+RAISED is non-nil for a raised relief, and nil for a sunken relief.
+COLORS is (LIGHT . DARK) of `remoteterm-tests--relief-colors'.  OTHERS
+are the colors of the backgrounds near the relief.  Laws:
+ - The top and left sides have one color, and the bottom and right
+   sides have one color.  A raised relief has LIGHT at the top and
+   left, and DARK at the bottom and right.  A sunken relief has the
+   inverse.
+ - No pixel on the edges of RECTANGLE, and no pixel just outside the
+   sides, has a relief color that is not also in OTHERS.
+Return the sides (TOP-LEFT . BOTTOM-RIGHT)."
+  (pcase-let* ((sides (remoteterm-tests--relief-sides messages rectangle
+                                                      thick))
+               (relief-only (remoteterm-tests--relief-only-colors
+                             colors others)))
+    (should (equal sides (if raised
+                             (cons (list (car colors)) (list (cdr colors)))
+                           (cons (list (cdr colors)) (list (car colors))))))
+    (dolist (border (list rectangle
+                          (remoteterm-tests--grow rectangle (1+ thick)
+                                                  (1+ thick))))
+      (should-not (seq-intersection
+                   (remoteterm-tests--border-colors messages border)
+                   relief-only)))
+    sides))
+
 (rd-daemon-deftest remoteterm-tests-image-relief
   "An image with `:relief' N has a relief of N pixels (law 65).
 A trial draws the slices of an image with a random relief on a random
-background.  Each pixel of the top and left sides of the relief has
-one color, and each pixel of the bottom and right sides has one other
-color.  For a positive N, the top and left color is the light color
-and the bottom and right color is the dark color.  For a negative N,
-it is the inverse.  Each component of the light color is not less
-than that of the background, and each component of the dark color is
-not more than that of the background."
-  (let ((rd-gen-trials 15))
+background.  The relief is a number from -6 to 6, or no `:relief'.
+Laws, with the colors of `remoteterm-tests--relief-colors':
+ - For N that is not 0, the laws of `remoteterm-tests--check-relief'
+   hold.  A positive N is raised, and a negative N is sunken.
+ - For N 0, or no `:relief', no pixel near the image has a relief
+   color that is not also a background."
+  (let ((rd-gen-trials 20))
     (rd-gen-for-all
      #'remoteterm-tests--image-relief-case
      (lambda (case)
        (pcase-let* ((`(,width ,height ,relief ,_ ,_ ,background) case)
-                    (messages (remoteterm-tests--image-relief-output case))
+                    (`(,messages . ,default)
+                     (remoteterm-tests--image-relief-output case))
                     (draw (cdar (remoteterm-tests--image-draws messages)))
-                    (`(,top-left . ,bottom-right)
-                     (remoteterm-tests--relief-sides
-                      messages
-                      (list (plist-get draw :x) (plist-get draw :y)
-                            width height)
-                      (abs relief))))
+                    (base (remoteterm-tests--rgb-pixel background))
+                    (colors (remoteterm-tests--relief-colors base))
+                    (rectangle (list (plist-get draw :x) (plist-get draw :y)
+                                     width height)))
          (should draw)
-         (should (= (length top-left) 1))
-         (should (= (length bottom-right) 1))
-         (should-not (equal top-left bottom-right))
-         (pcase-let ((`(,light ,dark) (if (> relief 0)
-                                          (list (car top-left)
-                                                (car bottom-right))
-                                        (list (car bottom-right)
-                                              (car top-left))))
-                     (base (remoteterm-tests--rgb-pixel background)))
-           (should (remoteterm-tests--pixel<= base light))
-           (should (remoteterm-tests--pixel<= dark base))))))))
+         (if (memq relief '(nil 0))
+             (should-not
+              (seq-intersection
+               (cl-loop for grow from 0 to 7
+                        nconc (remoteterm-tests--border-colors
+                               messages (remoteterm-tests--grow
+                                         rectangle grow grow)))
+               (remoteterm-tests--relief-only-colors
+                colors (list base default))))
+           (remoteterm-tests--check-relief
+            messages rectangle (abs relief) (> relief 0) colors
+            (list base default))))))))
 
 (defun remoteterm-tests--image-relief-case ()
   "Return a random (WIDTH HEIGHT RELIEF COLUMNS ROWS BACKGROUND).
 WIDTH and HEIGHT are the size of a PBM image, and RELIEF is its
-`:relief', a number that is not 0.  COLUMNS and ROWS cut the image
-into slices, as for `rd-gen-parts'.  BACKGROUND is the background of
-the face of the slices, a list of three 8-bit components."
+`:relief', a number from -6 to 6, or nil for no `:relief'.  COLUMNS
+and ROWS cut the image into slices, as for `rd-gen-parts'.  BACKGROUND
+is the background of the face of the slices, a list of three 8-bit
+components."
   (let ((width (rd-gen-integer 1 32))
         (height (rd-gen-integer 1 32)))
     (list width height
-          (* (rd-gen-element '(1 -1)) (rd-gen-integer 1 6))
+          (rd-gen-element (list nil 0 (rd-gen-integer 1 6)
+                                (- (rd-gen-integer 1 6))))
           (rd-gen-parts width 3) (rd-gen-parts height 3)
           (remoteterm-tests--rgb))))
 
 (defun remoteterm-tests--image-relief-output (case)
-  "Draw the image of CASE, and return the drawing messages.
-CASE is as for `remoteterm-tests--image-relief-case'."
+  "Draw the image of CASE, and return (MESSAGES . DEFAULT).
+MESSAGES are the drawing messages.  DEFAULT is the protocol color of
+the background of the default face.  CASE is as for
+`remoteterm-tests--image-relief-case'."
   (pcase-let ((`(,width ,height ,relief ,columns ,rows ,background) case))
     (remoteterm-tests--draw-buffer
      (lambda ()
        (remoteterm-tests--insert-slices
-        (create-image (remoteterm-tests--pbm width height) 'pbm t
-                      :scale 1 :relief relief)
+        (apply #'create-image (remoteterm-tests--pbm width height) 'pbm t
+               :scale 1 (and relief (list :relief relief)))
         columns rows
         `(:background ,(remoteterm-tests--rgb-string background))))
      #'ignore
-     (lambda (_display _frame output)
-       (remoteterm-tests--messages output)))))
+     (lambda (_display frame output)
+       (cons (remoteterm-tests--messages output)
+             (remoteterm-tests--face-background-pixel 'default frame))))))
 
-(ert-deftest remoteterm-tests-tool-bar-relief ()
-  "A tool bar item under the mouse has a raised relief, and a press sinks it.
+(defun remoteterm-tests--face-background-pixel (face frame)
+  "Return the protocol color of the background of FACE on FRAME."
+  (remoteterm-tests--rgb-pixel
+   (mapcar (lambda (value) (ash value -8))
+           (xw-color-values (face-background face frame t) frame))))
+
+(rd-daemon-deftest remoteterm-tests-tool-bar-relief
+  "Law T6: a tool bar item under the mouse is raised, and a press sinks it.
 With `auto-raise-tool-bar-buttons', a motion onto the item draws a
-relief of `tool-bar-button-relief' pixels around the icon and its
-`tool-bar-button-margin'.  Its top and left sides are lighter than its
-bottom and right sides.  A press on the item draws the relief again
-with the inverse colors."
+relief around the icon and its `tool-bar-button-margin'.  A trial
+picks a random `tool-bar-button-relief' R from 1 to 5, a random margin
+(a number, or a pair (X . Y) of two different numbers), a random size
+of the icon, and a random background of the `tool-bar' face.  Laws,
+with the relief colors of that background:
+ - After the motion, the laws of `remoteterm-tests--check-relief' hold
+   for a raised relief of R pixels around the icon and its margin.
+ - After the press, they hold for a sunken relief.  Its top and left
+   color is the bottom and right color of the raised relief, and the
+   inverse."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda ()
+       (list (rd-gen-integer 1 5) (rd-gen-tool-bar-margin)
+             (cons (rd-gen-integer 4 16) (rd-gen-integer 4 16))
+             (remoteterm-tests--rgb)))
+     (lambda (trial)
+       (apply #'remoteterm-tests--tool-bar-relief-check
+              (car trial) trial)))))
+
+(ert-deftest remoteterm-tests-tool-bar-relief-default ()
+  "A negative `tool-bar-button-relief' gives the default relief of 1 pixel.
+Also an example of law T6, with the relief 2 and the margin 3."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
-    (pcase-let ((`(,raised ,sunken)
-                 (remoteterm-tests--daemon-call
-                  'remoteterm-tests--tool-bar-relief-case)))
-      (pcase-dolist (`(,sides ,light-first) (list (list raised t)
-                                                 (list sunken nil)))
-        (pcase-let ((`(,top-left . ,bottom-right) sides))
-          (should (= (length top-left) 1))
-          (should (= (length bottom-right) 1))
-          (should (eq light-first
-                      (> (remoteterm-tests--pixel-brightness (car top-left))
-                         (remoteterm-tests--pixel-brightness
-                          (car bottom-right))))))))))
+    (should (remoteterm-tests--daemon-call
+             'remoteterm-tests--tool-bar-relief-default-case))))
 
-(defun remoteterm-tests--tool-bar-relief-case ()
+(defun remoteterm-tests--tool-bar-relief-default-case ()
+  "Check law T6 for the relief -1 and for the relief 2.
+The relief -1 has sides of 1 pixel.  Return t."
+  (remoteterm-tests--tool-bar-relief-check 1 -1 0 '(8 . 8) '(160 176 192))
+  (remoteterm-tests--tool-bar-relief-check 2 2 3 '(8 . 8) '(160 176 192))
+  t)
+
+(defun remoteterm-tests--tool-bar-relief-check (thick relief margin size
+                                                      background)
+  "Check law T6 for a tool bar item.
+RELIEF is the value of `tool-bar-button-relief', THICK is the width of
+the sides that it gives, MARGIN is the value of
+`tool-bar-button-margin', SIZE is the size (WIDTH . HEIGHT) of the
+icon, and BACKGROUND is the background of the `tool-bar' face, a list
+of three 8-bit components."
+  (pcase-let* ((`(,mx . ,my) (if (consp margin) margin
+                               (cons margin margin)))
+               (`(,raised ,sunken ,rectangle ,colors ,others)
+                (remoteterm-tests--tool-bar-relief-case
+                 relief margin size mx my background))
+               (raised-sides (remoteterm-tests--check-relief
+                              raised rectangle thick t colors others))
+               (sunken-sides (remoteterm-tests--check-relief
+                              sunken rectangle thick nil colors others)))
+    (should (equal sunken-sides (cons (cdr raised-sides)
+                                      (car raised-sides))))))
+
+(defun remoteterm-tests--tool-bar-relief-case (relief margin size mx my
+                                                     background)
   "Move the mouse onto the tool bar item, press on it, and release it.
-Return the list (RAISED SUNKEN) of the relief sides after the motion
-and after the press, as for `remoteterm-tests--relief-sides'."
+RELIEF and MARGIN are the values of `tool-bar-button-relief' and
+`tool-bar-button-margin', MX and MY are the horizontal and the vertical
+margin, and SIZE is the size (WIDTH . HEIGHT) of the icon.  BACKGROUND
+is the background of the `tool-bar' face of the frame.  Return the
+list (RAISED SUNKEN RECTANGLE COLORS OTHERS).  RAISED and SUNKEN are
+the drawing messages after the motion and after the press.  RECTANGLE
+is the icon and its margin.  COLORS are the relief colors of the
+background of the `tool-bar' face.  OTHERS are the backgrounds of the
+`tool-bar' face and of the default face."
   (let ((auto-raise-tool-bar-buttons t)
-        (tool-bar-button-relief 2)
-        (tool-bar-button-margin 3)
+        (tool-bar-button-relief relief)
+        (tool-bar-button-margin margin)
         (mouse-highlight t))
     (remoteterm-tests--with-tool-bar-item
      t
      (lambda (frame item)
-       (let* ((x (+ (car item) 4))
-              (y (+ (cdr item) 4))
-              (rectangle (list (- (car item) 3) (- (cdr item) 3) 14 14))
-              (sides (lambda (send)
-                       (remote-display--take-output "remote-draw")
-                       (funcall send)
-                       (remoteterm-tests--relief-sides
-                        (remoteterm-tests--messages
-                         (remoteterm-tests--redisplay-output "remote-draw"))
-                        rectangle 2))))
-         (prog1 (list (funcall sides (lambda ()
-                                       (remoteterm-tests--bar-motion
-                                        frame x y)))
-                      (funcall sides (lambda ()
-                                       (remoteterm-tests--tool-bar-button
-                                        frame x y 1 1 0))))
+       (set-face-background 'tool-bar
+                            (remoteterm-tests--rgb-string background) frame)
+       (redisplay t)
+       (let* ((x (+ (car item) (/ (car size) 2)))
+              (y (+ (cdr item) (/ (cdr size) 2)))
+              (background (remoteterm-tests--rgb-pixel background))
+              (messages (lambda (send)
+                          (remote-display--take-output "remote-draw")
+                          (funcall send)
+                          (remoteterm-tests--messages
+                           (remoteterm-tests--redisplay-output
+                            "remote-draw")))))
+         (prog1 (list (funcall messages
+                               (lambda ()
+                                 (remoteterm-tests--bar-motion frame x y)))
+                      (funcall messages
+                               (lambda ()
+                                 (remoteterm-tests--tool-bar-button
+                                  frame x y 1 1 0)))
+                      (list (- (car item) mx) (- (cdr item) my)
+                            (+ (car size) mx mx) (+ (cdr size) my my))
+                      (remoteterm-tests--relief-colors background)
+                      (list background
+                            (remoteterm-tests--face-background-pixel
+                             'default frame)))
            (remoteterm-tests--tool-bar-button frame x y 1 0 0)
-           (remoteterm-tests--tool-bar-events-now)))))))
+           (remoteterm-tests--tool-bar-events-now))))
+     size)))
 
 (defun remoteterm-tests--relief-sides (messages rectangle thick)
   "Return the colors of the sides of a relief in MESSAGES.
@@ -12753,18 +13015,6 @@ CLEARS is a list of the fields of clear-area messages."
                                 (<= top y) (< y (+ top height)))))
                        clears)
              :color))
-
-(defun remoteterm-tests--pixel<= (a b)
-  "Return non-nil if no component of the color A is more than that of B.
-A and B are protocol colors #xRRGGBB."
-  (cl-every (lambda (shift)
-              (<= (logand (ash a shift) #xff) (logand (ash b shift) #xff)))
-            '(-16 -8 0)))
-
-(defun remoteterm-tests--pixel-brightness (color)
-  "Return the sum of the components of the protocol COLOR #xRRGGBB."
-  (+ (logand (ash color -16) #xff) (logand (ash color -8) #xff)
-     (logand color #xff)))
 
 ;;;; The loop of the trials
 

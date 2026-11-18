@@ -32,11 +32,21 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "frame.h"
 #include "window.h"
 #include "remoteterm.h"
+#include "remotegeom.h"
 #include "remotetoolbar.h"
 
+static int remote_tool_bar_lines_of (int height, int unit);
+static void remote_store_tool_bar_height (struct frame *f, int height);
 static void remote_resize_for_tool_bar (struct frame *f);
+static void remote_rebuild_glyphs (struct frame *f);
 static bool remote_tool_bar_takes_p (struct frame *f, int x, int y,
 				     bool press);
+
+/* The space between an image and its relief.  */
+struct remote_margin
+{
+  int x, y;
+};
 
 /* The relief of an image: the width of the sides, the type, and the
    space between the image and the sides.  */
@@ -44,7 +54,14 @@ struct remote_relief
 {
   int thick;
   bool raised;
-  int extra_x, extra_y;
+  struct remote_margin extra;
+};
+
+/* The edges of a slice that are also edges of its image.  Only these
+   edges get a side of the relief.  */
+struct remote_edges
+{
+  bool top, left, bottom, right;
 };
 
 /* The two colors of a relief.  */
@@ -53,13 +70,30 @@ struct remote_relief_colors
   unsigned long light, dark;
 };
 
+/* One side of a relief: the rectangle, its color, and whether the
+   relief has the side.  */
+struct remote_side
+{
+  bool present;
+  Emacs_Rectangle area;
+  unsigned long color;
+};
+
 static struct remote_relief remote_relief_of (struct glyph_string *s);
-static void remote_tool_bar_margin (int *x, int *y);
-static Emacs_Rectangle remote_relief_area (struct glyph_string *s,
-					   Emacs_Rectangle slice,
+static struct remote_relief remote_compute_relief (enum draw_glyphs_face hl,
+						   int image_relief,
+						   EMACS_INT button_relief,
+						   bool tool_bar_p,
+						   struct remote_margin);
+static int remote_button_relief_width (EMACS_INT relief);
+static struct remote_margin remote_tool_bar_margin (Lisp_Object margin);
+static struct remote_edges remote_slice_edges (struct glyph_string *s);
+static Emacs_Rectangle remote_relief_area (Emacs_Rectangle slice,
+					   struct remote_edges edges,
 					   struct remote_relief relief);
-static void remote_fill_sides (struct glyph_string *s, Emacs_Rectangle area,
-			       int thick, unsigned long top_left,
+static void remote_fill_sides (struct frame *f, Emacs_Rectangle area,
+			       struct remote_edges edges, int thick,
+			       unsigned long top_left,
 			       unsigned long bottom_right,
 			       Emacs_Rectangle clip);
 static void remote_fill_clipped (struct frame *f, Emacs_Rectangle area,
@@ -72,39 +106,41 @@ void
 remote_set_tool_bar_lines (struct frame *f, Lisp_Object value,
 			   Lisp_Object oldval)
 {
-  /* A frame with only a minibuffer has no tool bar, as it has no menu
-     bar.  */
-  if (FRAME_MINIBUF_ONLY_P (f))
-    return;
-
   int lines = RANGED_FIXNUMP (0, value, INT_MAX) ? XFIXNAT (value) : 0;
   remote_change_tool_bar_height (f, lines * FRAME_LINE_HEIGHT (f));
 }
 
-/* Set the height of the tool bar of F to HEIGHT pixels, and store the
-   number of lines in the `tool-bar-lines' parameter.  Then give the
-   windows of F the remaining height, and mark F for a full
-   redisplay.  */
+/* Set the height of the tool bar of F to HEIGHT pixels.  The order of
+   the steps is important.  First, store the height and the number of
+   lines in F, because the change of the size reads them.  Then change
+   the size of F and of its windows.  Last, make the glyph matrices
+   for the new sizes, and mark F for a full redisplay.  */
 void
 remote_change_tool_bar_height (struct frame *f, int height)
 {
-  int unit = FRAME_LINE_HEIGHT (f);
-  int old_height = FRAME_TOOL_BAR_HEIGHT (f);
-  int lines = (height + unit - 1) / unit;
+  remote_store_tool_bar_height (f, height);
+  remote_resize_for_tool_bar (f);
+  remote_rebuild_glyphs (f);
+}
 
+/* Return the number of lines of UNIT pixels that hold HEIGHT
+   pixels.  */
+static int
+remote_tool_bar_lines_of (int height, int unit)
+{
+  return (height + unit - 1) / unit;
+}
+
+/* Store HEIGHT as the tool bar height of F, and the number of lines
+   in the `tool-bar-lines' parameter.  Mark F for redisplay.  */
+static void
+remote_store_tool_bar_height (struct frame *f, int height)
+{
+  int lines = remote_tool_bar_lines_of (height, FRAME_LINE_HEIGHT (f));
   fset_redisplay (f);
   FRAME_TOOL_BAR_HEIGHT (f) = height;
   FRAME_TOOL_BAR_LINES (f) = lines;
   store_frame_param (f, Qtool_bar_lines, make_fixnum (lines));
-
-  /* The rows below the new height must not stay in the matrix of the
-     tool-bar window.  */
-  if (height < old_height && WINDOWP (f->tool_bar_window))
-    clear_glyph_matrix (XWINDOW (f->tool_bar_window)->current_matrix);
-
-  remote_resize_for_tool_bar (f);
-  adjust_frame_glyphs (f);
-  SET_FRAME_GARBAGED (f);
 }
 
 /* Change the size of F for a new tool bar height.  Until redisplay
@@ -130,6 +166,15 @@ remote_resize_for_tool_bar (struct frame *f)
   else
     adjust_frame_size (f, -1, -1, 4, false, Qtool_bar_lines);
   f->tool_bar_resized = f->tool_bar_redisplayed;
+}
+
+/* Make the glyph matrices of F for the sizes of its windows, and mark
+   F for a full redisplay.  */
+static void
+remote_rebuild_glyphs (struct frame *f)
+{
+  adjust_frame_glyphs (f);
+  SET_FRAME_GARBAGED (f);
 }
 
 bool
@@ -174,100 +219,122 @@ remote_draw_image_relief (struct glyph_string *s, Emacs_Rectangle slice,
       && s->hl != DRAW_IMAGE_SUNKEN)
     return;
   struct remote_relief relief = remote_relief_of (s);
+  struct remote_edges edges = remote_slice_edges (s);
   struct remote_relief_colors colors
     = remote_relief_colors (s->face->background);
-  remote_fill_sides (s, remote_relief_area (s, slice, relief), relief.thick,
+  remote_fill_sides (s->f, remote_relief_area (slice, edges, relief), edges,
+		     relief.thick,
 		     relief.raised ? colors.light : colors.dark,
 		     relief.raised ? colors.dark : colors.light, clip);
 }
 
-/* Return the relief of S.  A highlight of a tool-bar button has the
-   width `tool-bar-button-relief'.  Another relief has the width and
-   the type of the `:relief' of the image.  The relief of a tool-bar
-   button is around its margin `tool-bar-button-margin'.  */
+/* Return the relief of S.  Read the Lisp variables of the relief of a
+   tool-bar button here, and give their values to
+   remote_compute_relief.  */
 static struct remote_relief
 remote_relief_of (struct glyph_string *s)
 {
-  struct remote_relief relief = { 0 };
-  if (s->hl == DRAW_IMAGE_RAISED || s->hl == DRAW_IMAGE_SUNKEN)
-    {
-      relief.thick = (tool_bar_button_relief < 0
-		      ? DEFAULT_TOOL_BAR_BUTTON_RELIEF
-		      : min (tool_bar_button_relief, 1000000));
-      relief.raised = s->hl == DRAW_IMAGE_RAISED;
-    }
-  else
-    {
-      relief.thick = eabs (s->img->relief);
-      relief.raised = s->img->relief > 0;
-    }
-  if (s->face->id == TOOL_BAR_FACE_ID)
-    remote_tool_bar_margin (&relief.extra_x, &relief.extra_y);
-  return relief;
+  struct remote_margin margin
+    = remote_tool_bar_margin (Vtool_bar_button_margin);
+  bool tool_bar_p = s->face->id == TOOL_BAR_FACE_ID;
+  return remote_compute_relief (s->hl, s->img->relief,
+				tool_bar_button_relief, tool_bar_p, margin);
 }
 
-/* Store the horizontal and the vertical `tool-bar-button-margin' in X
-   and Y.  A value that is not a number or a pair of numbers is no
-   margin.  */
-static void
-remote_tool_bar_margin (int *x, int *y)
+/* Return the relief of an image with the highlight HL and the
+   `:relief' IMAGE_RELIEF.  The raised or the sunken highlight of a
+   tool-bar button has the width BUTTON_RELIEF.  Another relief has
+   the width and the type of IMAGE_RELIEF.  If TOOL_BAR_P, the image
+   is a tool-bar button, and the relief is around its MARGIN.  */
+static struct remote_relief
+remote_compute_relief (enum draw_glyphs_face hl, int image_relief,
+		       EMACS_INT button_relief, bool tool_bar_p,
+		       struct remote_margin margin)
 {
-  Lisp_Object margin = Vtool_bar_button_margin;
-  if (CONSP (margin) && FIXNUMP (XCAR (margin)) && FIXNUMP (XCDR (margin)))
+  bool highlight = hl == DRAW_IMAGE_RAISED || hl == DRAW_IMAGE_SUNKEN;
+  return (struct remote_relief)
     {
-      *x = XFIXNUM (XCAR (margin));
-      *y = XFIXNUM (XCDR (margin));
-    }
-  else if (FIXNUMP (margin))
-    *x = *y = XFIXNUM (margin);
+      .thick = (highlight ? remote_button_relief_width (button_relief)
+		: eabs (image_relief)),
+      .raised = highlight ? hl == DRAW_IMAGE_RAISED : image_relief > 0,
+      .extra = tool_bar_p ? margin : (struct remote_margin) { 0, 0 },
+    };
 }
 
-/* Return the rectangle of the outer edges of the relief of the SLICE
-   of S.  Each edge of the slice that is an edge of the image moves out
-   by the width of RELIEF and its space.  */
+/* Return the width of the relief of a tool-bar button for the value
+   RELIEF of `tool-bar-button-relief'.  A negative value gives the
+   default width.  As in pgtk_draw_image_relief, the width is at most
+   1000000, so that the sums of the relief area stay in an int.  */
+static int
+remote_button_relief_width (EMACS_INT relief)
+{
+  return (relief < 0 ? DEFAULT_TOOL_BAR_BUTTON_RELIEF
+	  : min (relief, 1000000));
+}
+
+/* Return the horizontal and the vertical space of the value MARGIN of
+   `tool-bar-button-margin'.  A value that is not a number or a pair of
+   numbers is no space.  */
+static struct remote_margin
+remote_tool_bar_margin (Lisp_Object margin)
+{
+  if (CONSP (margin) && FIXNUMP (XCAR (margin)) && FIXNUMP (XCDR (margin)))
+    return (struct remote_margin) { XFIXNUM (XCAR (margin)),
+				    XFIXNUM (XCDR (margin)) };
+  if (FIXNUMP (margin))
+    return (struct remote_margin) { XFIXNUM (margin), XFIXNUM (margin) };
+  return (struct remote_margin) { 0, 0 };
+}
+
+/* Return the edges of the slice of S that are edges of its image.  */
+static struct remote_edges
+remote_slice_edges (struct glyph_string *s)
+{
+  return (struct remote_edges)
+    {
+      .top = s->slice.y == 0,
+      .left = s->slice.x == 0,
+      .bottom = s->slice.y + s->slice.height == s->img->height,
+      .right = s->slice.x + s->slice.width == s->img->width,
+    };
+}
+
+/* Return the rectangle of the outer edges of the relief of SLICE.
+   Each of the EDGES moves out by the width of RELIEF and its space.  */
 static Emacs_Rectangle
-remote_relief_area (struct glyph_string *s, Emacs_Rectangle slice,
+remote_relief_area (Emacs_Rectangle slice, struct remote_edges edges,
 		    struct remote_relief relief)
 {
-  int dx = relief.thick + relief.extra_x;
-  int dy = relief.thick + relief.extra_y;
-  int left = slice.x - (s->slice.x == 0 ? dx : 0);
-  int top = slice.y - (s->slice.y == 0 ? dy : 0);
-  int right = (slice.x + slice.width
-	       + (s->slice.x + s->slice.width == s->img->width ? dx : 0));
-  int bottom = (slice.y + slice.height
-		+ (s->slice.y + s->slice.height == s->img->height ? dy : 0));
+  int dx = relief.thick + relief.extra.x;
+  int dy = relief.thick + relief.extra.y;
+  int left = slice.x - (edges.left ? dx : 0);
+  int top = slice.y - (edges.top ? dy : 0);
+  int right = slice.x + slice.width + (edges.right ? dx : 0);
+  int bottom = slice.y + slice.height + (edges.bottom ? dy : 0);
   return (Emacs_Rectangle) { left, top, right - left, bottom - top };
 }
 
-/* Fill the sides of AREA that are edges of the image of S.  The sides
-   are THICK pixels wide.  The top and left sides have the color
-   TOP_LEFT, and the bottom and right sides have the color
-   BOTTOM_RIGHT.  Change only the pixels in CLIP.  */
+/* Fill the sides of AREA of F that are EDGES.  The sides are THICK
+   pixels wide.  The top and left sides have the color TOP_LEFT, and
+   the bottom and right sides have the color BOTTOM_RIGHT.  Change only
+   the pixels in CLIP.  */
 static void
-remote_fill_sides (struct glyph_string *s, Emacs_Rectangle area, int thick,
+remote_fill_sides (struct frame *f, Emacs_Rectangle area,
+		   struct remote_edges edges, int thick,
 		   unsigned long top_left, unsigned long bottom_right,
 		   Emacs_Rectangle clip)
 {
   int right = area.x + area.width - thick;
   int bottom = area.y + area.height - thick;
-  struct frame *f = s->f;
-  if (s->slice.y == 0)
-    remote_fill_clipped (f, (Emacs_Rectangle) { area.x, area.y, area.width,
-						thick },
-			 clip, top_left);
-  if (s->slice.x == 0)
-    remote_fill_clipped (f, (Emacs_Rectangle) { area.x, area.y, thick,
-						area.height },
-			 clip, top_left);
-  if (s->slice.y + s->slice.height == s->img->height)
-    remote_fill_clipped (f, (Emacs_Rectangle) { area.x, bottom, area.width,
-						thick },
-			 clip, bottom_right);
-  if (s->slice.x + s->slice.width == s->img->width)
-    remote_fill_clipped (f, (Emacs_Rectangle) { right, area.y, thick,
-						area.height },
-			 clip, bottom_right);
+  struct remote_side sides[] = {
+    { edges.top, { area.x, area.y, area.width, thick }, top_left },
+    { edges.left, { area.x, area.y, thick, area.height }, top_left },
+    { edges.bottom, { area.x, bottom, area.width, thick }, bottom_right },
+    { edges.right, { right, area.y, thick, area.height }, bottom_right },
+  };
+  for (int i = 0; i < countof (sides); i++)
+    if (sides[i].present)
+      remote_fill_clipped (f, sides[i].area, clip, sides[i].color);
 }
 
 /* Fill the part of AREA of F inside CLIP with COLOR.  */

@@ -28,7 +28,8 @@ struct glyph_string;
 
 /* The handler of the `tool-bar-lines' frame parameter.  Set the
    height of the tool bar of F to VALUE lines.  A VALUE that is not a
-   natural number gives no tool bar.  OLDVAL is the old value.  */
+   natural number gives no tool bar.  OLDVAL, the old value, is not
+   used.  */
 extern void remote_set_tool_bar_lines (struct frame *f, Lisp_Object value,
 				       Lisp_Object oldval);
 

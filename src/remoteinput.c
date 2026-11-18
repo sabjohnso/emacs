@@ -298,7 +298,7 @@ remote_focus_input (struct remote_display_info *dpyinfo,
    mode line buffer.  A remote frame has no internal border.
    adjust_frame_size adds the heights of the menu bar and of the tool
    bar to the minimum height of the windows, so the frame holds the
-   bars and the windows.  */
+   bars and the windows (the test remoteterm-tests-resize-tool-bar).  */
 static void
 remote_resize_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)

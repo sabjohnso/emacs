@@ -177,6 +177,16 @@ before it ends, and the last part ends at SIZE."
     (cl-mapcar (lambda (start end) (cons start (- end start)))
                starts (append cuts (list size)))))
 
+(defun rd-gen-tool-bar-margin ()
+  "Return a random value of `tool-bar-button-margin'.
+The value is a number from 0 to 6, or a pair (X . Y) of two different
+numbers from 0 to 6."
+  (if (= (rd-gen-random 2) 0)
+      (rd-gen-integer 0 6)
+    (let* ((x (rd-gen-random 7))
+           (y (mod (+ x 1 (rd-gen-random 6)) 7)))
+      (cons x y))))
+
 (defun rd-gen-child-frame-ops (max-length)
   "Return a list of up to MAX-LENGTH random operations on child frames.
 An index I names a frame in a list that the test keeps: 0 is a root

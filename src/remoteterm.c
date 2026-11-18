@@ -34,6 +34,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "termhooks.h"
 #include "window.h"
 #include "remoteterm.h"
+#include "remotegeom.h"
 #include "remoteinput.h"
 #include "remotescroll.h"
 #include "remotetoolbar.h"
@@ -1849,17 +1850,6 @@ remote_glyph_clip (struct glyph_string *s)
   get_glyph_string_clip_rect (s, &native_clip);
   CONVERT_TO_EMACS_RECT (clip, native_clip);
   return clip;
-}
-
-Emacs_Rectangle
-remote_intersection (Emacs_Rectangle a, Emacs_Rectangle b)
-{
-  int left = max (a.x, b.x);
-  int top = max (a.y, b.y);
-  int right = min (a.x + (int) a.width, b.x + (int) b.width);
-  int bottom = min (a.y + (int) a.height, b.y + (int) b.height);
-  return (Emacs_Rectangle) { left, top, max (right - left, 0),
-			     max (bottom - top, 0) };
 }
 
 /* Send the glyph codes of S, a string of characters.  A message holds
