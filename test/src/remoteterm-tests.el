@@ -7275,8 +7275,11 @@ the session did not flush after each delete of the step."
         ((pick (index)
            (and frames (nth (mod index (length frames)) frames)))
          (make ()
+           ;; No tool bar: the first redisplay of a tool bar changes
+           ;; the height of the frame between two draws.
            (let ((frame (x-create-frame-with-faces
-                         '((display . "remote-frames")))))
+                         '((display . "remote-frames")
+                           (tool-bar-lines . 0)))))
              (set-window-buffer (frame-root-window frame)
                                 (generate-new-buffer "frames"))
              (select-frame frame)
@@ -7911,12 +7914,13 @@ Read between the parts, so that the other end gets them apart."
       (accept-process-output nil 0.01)))
   (process-send-string process bytes))
 
-(defun remoteterm-tests--with-input-session (function)
+(defun remoteterm-tests--with-input-session (function &optional parameters)
   "Call FUNCTION in a session with a frame and an attached client.
-The arguments of FUNCTION are the frame, the client side of the
-connection, and the server side.  Return the value of FUNCTION."
+The frame has the frame PARAMETERS, and no bars that PARAMETERS do not
+ask for.  The arguments of FUNCTION are the frame, the client side of
+the connection, and the server side.  Return the value of FUNCTION."
   (remoteterm-tests--with-display "remote-input"
-    (remoteterm-tests--with-frame frame "remote-input" nil
+    (remoteterm-tests--with-frame frame "remote-input" parameters
       (select-frame frame)
       (remoteterm-tests--with-connections
        '(a)
@@ -11198,12 +11202,13 @@ of a new buffer of the frame.  BEFORE and AFTER are as for
 Call FILL in the buffer, with the frame selected.  Attach a recording
 client, call BEFORE with the name of the session, and redisplay.  Then
 call AFTER with the name of the session, the frame, and the bytes that
-the session sent for the redisplay."
+the session sent for the redisplay.  The frame has no tool bar, so the
+images of the tool bar icons are not in the bytes."
   (let* ((display "remote-image")
          (frame (progn (x-open-connection display)
                        (x-create-frame-with-faces
                         '((display . "remote-image") (width . 80)
-                          (height . 40)))))
+                          (height . 40) (tool-bar-lines . 0)))))
          (buffer (generate-new-buffer "images")))
     (unwind-protect
         (progn
@@ -12195,6 +12200,198 @@ free of the images of a deleted session."
     (garbage-collect)
     (clear-image-cache t)
     'alive))
+
+;;;; Tool bar
+
+(rd-daemon-deftest remoteterm-tests-tool-bar-lines
+  "Law T1: the `tool-bar-lines' parameter gives the tool bar of a frame.
+A trial makes a remote frame with a random value of `tool-bar-lines',
+and redisplays it.  Then it sets the parameter to a second and a third
+random value.  Some values are not a number of lines: a negative
+number, a number that is not an integer, or nil.  Laws:
+ - The value of the new frame keeps the text size: the text height is
+   the `height' parameter times the height of a line, and the native
+   height is the text height plus the tool bar height.
+ - The third value keeps the native height, because
+   `frame-inhibit-implied-resize' has `tool-bar-lines'.  The frame has
+   10 lines or more, so the windows keep their minimum size.  As in the
+   frames of X with no toolkit, the second value can keep the text
+   size: the first change after the first redisplay of a frame makes
+   the frame larger to hold its tool bar.
+ - After each value, the tool bar height from `frame-geometry' is
+   more than 0 if and only if the model gives lines, the root window
+   starts below the tool bar, and the parameter is the number of lines
+   of the model."
+  (let ((rd-gen-trials 12))
+    (rd-gen-for-all
+     (lambda ()
+       (cons (rd-gen-integer 10 20)
+             (cl-loop repeat 3 collect (remoteterm-tests--tool-bar-value))))
+     (lambda (trial)
+       (pcase-let* ((`(,height . ,values) trial)
+                    (states (remoteterm-tests--tool-bar-steps height
+                                                              values))
+                    (`(,made ,_ ,last) states))
+         (should (= (plist-get made :text-height)
+                    (* height (plist-get made :char-height))))
+         (should (= (plist-get made :native-height)
+                    (+ (plist-get made :text-height)
+                       (plist-get made :tool-bar))))
+         (should (= (plist-get last :native-height)
+                    (plist-get (nth 1 states) :native-height)))
+         (cl-mapc #'remoteterm-tests--check-tool-bar states values))))))
+
+(defun remoteterm-tests--tool-bar-value ()
+  "Return a random value for the `tool-bar-lines' parameter.
+The value is 0, 1, or 2 lines, or a value that is not a number of
+lines."
+  (rd-gen-element (list (rd-gen-random 3) -1 1.5 nil)))
+
+(defun remoteterm-tests--tool-bar-model (value)
+  "Return the number of tool bar lines that the parameter VALUE gives.
+This is the model of the tool bar.  A value that is not a natural
+number gives 0 lines."
+  (if (natnump value) value 0))
+
+(defun remoteterm-tests--check-tool-bar (step value)
+  "Check the tool bar of STEP against the model of VALUE.
+STEP is a plist of `remoteterm-tests--tool-bar-state'."
+  (let ((lines (remoteterm-tests--tool-bar-model value)))
+    (should (eq (> (plist-get step :tool-bar) 0) (> lines 0)))
+    (should (= (plist-get step :root-top) (plist-get step :tool-bar)))
+    (should (eql (plist-get step :lines) lines))))
+
+(defun remoteterm-tests--tool-bar-steps (height values)
+  "Make a frame with HEIGHT lines, and give it each tool bar line count.
+VALUES has three values of the `tool-bar-lines' parameter.  The first
+value is a parameter of the new frame, and the others are changes.
+Return the state of `remoteterm-tests--tool-bar-state' after each
+value.  As `make-frame' does, call `frame-after-make-frame' after the
+frame is made.  Then select the frame, attach a recording client, and
+redisplay before the first change.  With no selection or no client,
+that redisplay does not draw the tool bar."
+  (remoteterm-tests--with-display "remote-tool-bar"
+    (remoteterm-tests--with-frame frame "remote-tool-bar"
+                                  `((width . 40) (height . ,height)
+                                    (tool-bar-lines . ,(car values)))
+      (let ((made (remoteterm-tests--tool-bar-state frame)))
+        (frame-after-make-frame frame t)
+        (select-frame frame)
+        (remote-display--record "remote-tool-bar")
+        (redisplay t)
+        (cons made
+              (mapcar (lambda (value)
+                        (set-frame-parameter frame 'tool-bar-lines value)
+                        (remoteterm-tests--tool-bar-state frame))
+                      (cdr values)))))))
+
+(defun remoteterm-tests--tool-bar-state (frame)
+  "Return the tool bar state of FRAME as a plist.
+:tool-bar is the tool bar height from `frame-geometry', :root-top is
+the top of the root window, :lines is the `tool-bar-lines' parameter,
+:text-height and :native-height are the text and native heights, and
+:char-height is the height of a line."
+  (list :tool-bar (cdr (alist-get 'tool-bar-size (frame-geometry frame)))
+        :root-top (window-pixel-top (frame-root-window frame))
+        :lines (frame-parameter frame 'tool-bar-lines)
+        :text-height (frame-text-height frame)
+        :native-height (frame-pixel-height frame)
+        :char-height (frame-char-height frame)))
+
+(rd-daemon-deftest remoteterm-tests-tool-bar-default
+  "Law T2: the default tool bar of a remote frame follows `tool-bar-mode'.
+With `tool-bar-mode' on, the first redisplay of a new frame draws the
+images of the icons of `tool-bar-setup' in the rows of the tool bar.
+A trial makes some frames, and then makes a random list of steps.  A
+step is a call of `tool-bar-mode', or a new frame.  Law: after each
+step, each frame has a tool bar if and only if `tool-bar-mode' is on."
+  (let ((mode tool-bar-mode)
+        (rd-gen-trials 6))
+    (unwind-protect
+        (progn
+          (tool-bar-mode 1)
+          (remoteterm-tests--check-tool-bar-icons)
+          (rd-gen-for-all
+           (lambda ()
+             (cons (rd-gen-element '(1 -1))
+                   (rd-gen-list (lambda () (rd-gen-element '(1 -1 make)))
+                                6)))
+           (lambda (steps)
+             (tool-bar-mode (car steps))
+             (remoteterm-tests--with-display "remote-tool-bar"
+               (let ((frames (list (remoteterm-tests--default-bars-frame))))
+                 (unwind-protect
+                     (dolist (step (cdr steps))
+                       (if (eq step 'make)
+                           (push (remoteterm-tests--default-bars-frame) frames)
+                         (tool-bar-mode step))
+                       (should (equal (mapcar #'remoteterm-tests--tool-bar-p
+                                              frames)
+                                      (mapcar (lambda (_) tool-bar-mode)
+                                              frames))))
+                   (mapc #'delete-frame frames)))))))
+      (tool-bar-mode (if mode 1 -1)))))
+
+(defun remoteterm-tests--default-bars-frame ()
+  "Make a frame on the display \"remote-tool-bar\" with the default bars."
+  (x-create-frame-with-faces '((display . "remote-tool-bar"))))
+
+(defun remoteterm-tests--tool-bar-p (frame)
+  "Return t if FRAME has at least one tool bar line, and else nil."
+  (let ((lines (frame-parameter frame 'tool-bar-lines)))
+    (and (natnump lines) (>= lines 1))))
+
+(defun remoteterm-tests--check-tool-bar-icons ()
+  "Check that the first redisplay of a new frame draws the tool bar icons.
+The frame has the default bars.  At least one draw-image message is in
+the rows of the tool bar.  Select the frame, as for
+`remoteterm-tests--tool-bar-steps'."
+  (remoteterm-tests--with-display "remote-tool-bar"
+    (let ((frame (remoteterm-tests--default-bars-frame)))
+      (unwind-protect
+          (progn
+            (select-frame frame)
+            (remote-display--record "remote-tool-bar")
+            (let ((messages (remoteterm-tests--all-messages
+                             (remoteterm-tests--redisplay-output
+                              "remote-tool-bar")))
+                  (height (cdr (alist-get 'tool-bar-size
+                                          (frame-geometry frame)))))
+              (should (remoteterm-tests--tool-bar-p frame))
+              (should (seq-some
+                       (lambda (message)
+                         (and (eq (car message) 'draw-image)
+                              (< (plist-get (cdr message) :y) height)))
+                       messages))))
+        (delete-frame frame)))))
+
+(ert-deftest remoteterm-tests-resize-tool-bar ()
+  "A resize below the minimum size keeps the windows below the tool bar.
+The frame holds the tool bar and the minimum height of the windows."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let ((`(,frame-height ,tool-bar ,windows ,minimum)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--resize-tool-bar-case)))
+      (should (> tool-bar 0))
+      (should (>= windows minimum))
+      (should (>= frame-height (+ tool-bar windows))))))
+
+(defun remoteterm-tests--resize-tool-bar-case ()
+  "Resize a frame with a tool bar to 1 by 1 pixel.
+Return the list (FRAME-HEIGHT TOOL-BAR WINDOWS MINIMUM) of pixel
+heights: the native height of the frame, the tool bar height, the
+height of the root window and the minibuffer window together, and the
+minimum height of the windows from `frame-windows-min-size'."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (remoteterm-tests--send-resizes client-side frame '((frame 1 1)))
+     (list (frame-pixel-height frame)
+           (cdr (alist-get 'tool-bar-size (frame-geometry frame)))
+           (+ (window-pixel-height (frame-root-window frame))
+              (window-pixel-height (minibuffer-window frame)))
+           (frame-windows-min-size frame nil nil t)))
+   '((tool-bar-lines . 2))))
 
 ;;;; The loop of the trials
 

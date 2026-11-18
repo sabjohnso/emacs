@@ -36,6 +36,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "remoteterm.h"
 #include "remoteinput.h"
 #include "remotescroll.h"
+#include "remotetoolbar.h"
 #include "rdproto.h"
 
 #include <fcntl.h>
@@ -980,7 +981,7 @@ static frame_parm_handler remote_frame_parm_handlers[] =
     gui_set_horizontal_scroll_bars,
     gui_set_visibility,
     NULL, /* tab bar lines */
-    NULL, /* tool bar lines */
+    remote_set_tool_bar_lines,
     NULL, /* scroll bar foreground */
     NULL, /* scroll bar background */
     gui_set_screen_gamma,
@@ -1260,7 +1261,9 @@ remote_default_frame_parameters (struct frame *f, Lisp_Object parms)
 			 NILP (Vtab_bar_mode)
 			 ? make_fixnum (0) : make_fixnum (1),
 			 NULL, NULL, RES_TYPE_NUMBER);
-  gui_default_parameter (f, parms, Qtool_bar_lines, make_fixnum (0),
+  gui_default_parameter (f, parms, Qtool_bar_lines,
+			 NILP (Vtool_bar_mode)
+			 ? make_fixnum (0) : make_fixnum (1),
 			 NULL, NULL, RES_TYPE_NUMBER);
 
   gui_figure_window_size (f, parms, false, true);
@@ -2414,6 +2417,7 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
   terminal->set_scroll_bar_default_width_hook
     = remote_set_scroll_bar_default_width;
   terminal->set_vertical_scroll_bar_hook = remote_set_vertical_scroll_bar;
+  terminal->change_tool_bar_height_hook = remote_change_tool_bar_height;
   return terminal;
 }
 
