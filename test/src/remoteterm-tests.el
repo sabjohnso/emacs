@@ -412,6 +412,42 @@
 ;; 103. Scroll-bar drag: while the grab of a bar holds, each motion
 ;;      gives a `scroll-bar-movement' event on the bar.  After the
 ;;      release, a motion gives `mouse-movement' again.
+;; 104. Image relief: the sides of the relief of an image with
+;;      `:relief' N are N pixels wide.  The top and left sides have
+;;      one color, and the bottom and right sides have one other
+;;      color.  For a positive N, the top and left sides are light and
+;;      the bottom and right sides are dark.  For a negative N, it is
+;;      the inverse.  Each component of the light color is 6/5 of that
+;;      of the background plus #x20, and at most #xff.  Each component
+;;      of the dark color is 3/5 of that of the background.  No pixel
+;;      of the image edge, and no pixel just outside the sides, has a
+;;      relief color.  An image with `:relief' 0, or with no
+;;      `:relief', has no relief.
+;; 105. Tool bar lines: after each value of `tool-bar-lines', the tool
+;;      bar height is the number of lines of the value times the line
+;;      height.  A value that is not a natural number gives 0 lines.
+;;      The root window starts below the tool bar.  The value of a new
+;;      frame keeps the text size, and a later value keeps the native
+;;      size when `frame-inhibit-implied-resize' has `tool-bar-lines'.
+;; 106. Default tool bar: each remote frame has a tool bar if and only
+;;      if `tool-bar-mode' is on.
+;; 107. Tool bar click: a click of a button 1 to 3 on a tool bar item
+;;      gives only the tool bar event of the item, with the modifiers.
+;;      A wheel button in the tool bar gives one wheel event.
+;; 108. Tool bar full height: a frame with a full-screen height keeps
+;;      its native height for each value of `tool-bar-lines'.
+;; 109. Tool bar routing: only a press and a release on the item give
+;;      a tool bar event.  A press below the tool bar gives mouse
+;;      events and no tool bar event, whatever the pixel of the
+;;      release is.
+;; 110. Tool bar relief: with `auto-raise-tool-bar-buttons', a motion
+;;      onto an item draws a raised relief of `tool-bar-button-relief'
+;;      pixels around the icon and its `tool-bar-button-margin'.  A
+;;      press draws a sunken relief with the inverse colors.  A
+;;      negative `tool-bar-button-relief' gives the default relief of
+;;      1 pixel.  A part of `tool-bar-button-margin' that is not an
+;;      integer from 1 to INT_MAX minus the relief gives no space, as
+;;      in xdisp.c.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -485,23 +521,40 @@
 (ert-deftest remoteterm-tests-law-numbers ()
   "The commentary lists each law one time, in the order of the numbers.
 The numbers go from 1 to the highest number with no gap and no
-duplicate.  Each law number that the docstring of a test names, as
-\"(law N)\" or \"Law N:\", has an entry in the commentary."
+duplicate.  Each law number that a text names, as the word law or
+laws and then the number, has an entry in the commentary.  No text
+names a law with a capital letter before its number."
   (pcase-let ((`(,listed . ,named)
                (remoteterm-tests--law-numbers remoteterm-tests--source)))
     (should (equal listed (number-sequence 1 (length listed))))
-    (should-not (seq-difference named listed))))
+    (should-not (seq-difference named listed))
+    (should-not (remoteterm-tests--prefixed-laws
+                 remoteterm-tests--source))))
+
+(defun remoteterm-tests--prefixed-laws (file)
+  "Return the names of the laws in FILE that have a letter prefix.
+A name with a prefix is the word law, capital letters and a number,
+or an entry of the commentary with capital letters before its
+number."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((case-fold-search nil) names)
+      (while (re-search-forward
+              "\\<[Ll]aws? \\([A-Z]+[0-9]+\\)\\|^;; \\([A-Z]+[0-9]+\\)\\. "
+              nil t)
+        (push (or (match-string 1) (match-string 2)) names))
+      (nreverse names))))
 
 (defun remoteterm-tests--law-numbers (file)
   "Return the law numbers of FILE as (LISTED . NAMED).
 LISTED has the numbers of the entries of the commentary, in order.
-NAMED has the numbers that the docstrings name."
+NAMED has the numbers that follow the word law or laws in FILE."
   (with-temp-buffer
     (insert-file-contents file)
     (let ((code (progn (re-search-forward "^;;; Code:$") (point))))
       (cons (remoteterm-tests--matches "^;; \\([0-9]+\\)\\. " 1 code)
             (remoteterm-tests--matches
-             "(law \\([0-9]+\\))\\|\"Law \\([0-9]+\\):" nil nil)))))
+             "\\<[Ll]aws? \\([0-9]+\\)" 1 nil)))))
 
 (defun remoteterm-tests--matches (regexp group bound)
   "Return the numbers that REGEXP matches before BOUND, in order.
@@ -12204,7 +12257,7 @@ free of the images of a deleted session."
 ;;;; Tool bar
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-lines
-  "Law T1: the `tool-bar-lines' parameter gives the tool bar of a frame.
+  "Law 105: the `tool-bar-lines' parameter gives the tool bar of a frame.
 A trial makes a remote frame with a random value of `tool-bar-lines',
 and redisplays it.  Then it sets the parameter to a second and a third
 random value.  Some values are not a number of lines: a negative
@@ -12311,10 +12364,10 @@ the top of the root window, :lines is the `tool-bar-lines' parameter,
         :char-height (frame-char-height frame)))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-full-height
-  "Law T4: a frame with a full-screen height keeps its native height.
+  "Law 108: a frame with a full-screen height keeps its native height.
 A trial makes a remote frame with the `fullscreen' parameter
 `fullheight', `maximized' or `fullwidth', and gives it three random
-values of `tool-bar-lines', as in law T1.  Laws:
+values of `tool-bar-lines', as in law 105.  Laws:
  - With `fullheight' or `maximized', after the second and the third
    value, the native height is the native height after the first
    value.  The tool bar takes its height from the windows.
@@ -12344,7 +12397,7 @@ values of `tool-bar-lines', as in law T1.  Laws:
                     '(nil t t))))))))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-default
-  "Law T2: the default tool bar of a remote frame follows `tool-bar-mode'.
+  "Law 106: the default tool bar of a remote frame follows `tool-bar-mode'.
 With `tool-bar-mode' on, the first redisplay of a new frame draws the
 images of the icons of `tool-bar-setup' in the rows of the tool bar.
 A trial makes some frames, and then makes a random list of steps.  A
@@ -12476,7 +12529,7 @@ minimum height of the windows from `frame-windows-min-size'."
    `((tool-bar-lines . ,lines))))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-click
-  "Law T3: a click on a tool bar item gives the tool bar event of the item.
+  "Law 107: a click on a tool bar item gives the tool bar event of the item.
 A trial makes a frame with a tool bar of one item.  Then it sends a
 press and a release of a random button, with random modifiers, at a
 random pixel of the icon of the item.  With `mouse-highlight' on, a
@@ -12617,7 +12670,7 @@ event gives its symbol.  Other events give nothing."
     (nreverse events)))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-routing
-  "Law T5: only a click on the item goes to the tool bar.
+  "Law 109: only a click on the item goes to the tool bar.
 A trial makes a frame with a tool bar of one enabled item.  Then it
 sends a press and a release of a random button 1 to 3.  Each of the
 two pixels is in a random zone of the frame: the icon of the item, the
@@ -12845,7 +12898,7 @@ Return the sides (TOP-LEFT . BOTTOM-RIGHT)."
     sides))
 
 (rd-daemon-deftest remoteterm-tests-image-relief
-  "An image with `:relief' N has a relief of N pixels (law 65).
+  "An image with `:relief' N has a relief of N pixels (law 104).
 A trial draws the slices of an image with a random relief on a random
 background.  The relief is a number from -6 to 6, or no `:relief'.
 Laws, with the colors of `remoteterm-tests--relief-colors':
@@ -12919,7 +12972,7 @@ the background of the default face.  CASE is as for
            (xw-color-values (face-background face frame t) frame))))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-relief
-  "Law T6: a tool bar item under the mouse is raised, and a press sinks it.
+  "Law 110: a tool bar item under the mouse is raised, and a press sinks it.
 With `auto-raise-tool-bar-buttons', a motion onto the item draws a
 relief around the icon and its `tool-bar-button-margin'.  A trial
 picks a random `tool-bar-button-relief' R from 1 to 5, a random margin
@@ -12943,14 +12996,14 @@ with the relief colors of that background:
 
 (ert-deftest remoteterm-tests-tool-bar-relief-default ()
   "A negative `tool-bar-button-relief' gives the default relief of 1 pixel.
-Also an example of law T6, with the relief 2 and the margin 3."
+Also an example of law 110, with the relief 2 and the margin 3."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
     (should (remoteterm-tests--daemon-call
              'remoteterm-tests--tool-bar-relief-default-case))))
 
 (defun remoteterm-tests--tool-bar-relief-default-case ()
-  "Check law T6 for the relief -1 and for the relief 2.
+  "Check law 110 for the relief -1 and for the relief 2.
 The relief -1 has sides of 1 pixel.  Return t."
   (remoteterm-tests--tool-bar-relief-check 1 -1 0 '(8 . 8) '(160 176 192))
   (remoteterm-tests--tool-bar-relief-check 2 2 3 '(8 . 8) '(160 176 192))
@@ -12960,7 +13013,7 @@ The relief -1 has sides of 1 pixel.  Return t."
   "A bad part of `tool-bar-button-margin' gives no space.
 The layout of xdisp.c ignores a part of the margin that is not an
 integer from 1 to INT_MAX minus the relief.  The relief obeys the same
-rule.  Examples of law T6 with margins that are bad in full or in
+rule.  Examples of law 110 with margins that are bad in full or in
 part."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
@@ -12968,7 +13021,7 @@ part."
              'remoteterm-tests--tool-bar-relief-bad-margin-case))))
 
 (ert-deftest remoteterm-tests-tool-bar-relief-margin-parts ()
-  "Each part of `tool-bar-button-margin' gives its own space (law T6).
+  "Each part of `tool-bar-button-margin' gives its own space (law 110).
 A part that is not an integer from 1 to INT_MAX minus the relief gives
 no space, as in the layout of xdisp.c.  A number gives both spaces.
 The trials use small reliefs above 0, and negative reliefs give the
@@ -12979,7 +13032,7 @@ default relief of 1 pixel.  A relief of 0 draws no sides."
              'remoteterm-tests--tool-bar-relief-margin-parts-case))))
 
 (defun remoteterm-tests--tool-bar-relief-margin-parts-case ()
-  "Check law T6 for random margins with good and bad parts.  Return t."
+  "Check law 110 for random margins with good and bad parts.  Return t."
   (let ((rd-gen-trials 8))
     (rd-gen-for-all
      (lambda ()
@@ -12993,7 +13046,7 @@ default relief of 1 pixel.  A relief of 0 draws no sides."
   t)
 
 (defun remoteterm-tests--tool-bar-relief-bad-margin-case ()
-  "Check law T6 for margins that are bad in full or in part.
+  "Check law 110 for margins that are bad in full or in part.
 Each entry of the table is a margin and the space (X . Y) that it
 gives.  Return t."
   (pcase-dolist (`(,margin . ,space)
@@ -13074,7 +13127,7 @@ background is the color (160 176 192)."
 (defun remoteterm-tests--tool-bar-relief-check (thick relief margin size
                                                       background
                                                       &optional space)
-  "Check law T6 for a tool bar item.
+  "Check law 110 for a tool bar item.
 RELIEF is the value of `tool-bar-button-relief', THICK is the width of
 the sides that it gives, MARGIN is the value of
 `tool-bar-button-margin', SIZE is the size (WIDTH . HEIGHT) of the
