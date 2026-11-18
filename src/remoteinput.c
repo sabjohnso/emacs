@@ -295,10 +295,12 @@ remote_focus_input (struct remote_display_info *dpyinfo,
    no effect.  A smaller size than the minimum size of the windows of
    the frame gives that minimum size, as the size hints of X do: a
    frame with no text column makes redisplay write past the end of its
-   mode line buffer.  A remote frame has no internal border.
-   adjust_frame_size adds the heights of the menu bar and of the tool
-   bar to the minimum height of the windows, so the frame holds the
-   bars and the windows (the test remoteterm-tests-resize-tool-bar).  */
+   mode line buffer.  A remote frame has no internal border.  The
+   minimum height also holds the menu bar and the tool bar, so the
+   frame holds the bars and the windows (the test
+   remoteterm-tests-resize-tool-bar).  adjust_frame_size does not do
+   this for a resize: it adds the bars only to the safe minimum height
+   of the windows.  */
 static void
 remote_resize_input (struct remote_display_info *dpyinfo,
 		     const struct rd_message *message)
@@ -311,7 +313,8 @@ remote_resize_input (struct remote_display_info *dpyinfo,
   change_frame_size (f, max (resize->width,
 			      remote_windows_min_size (f, Qt)),
 		     max (resize->height,
-			  remote_windows_min_size (f, Qnil)),
+			  (remote_windows_min_size (f, Qnil)
+			   + FRAME_MARGIN_HEIGHT (f))),
 		     false, true, false);
 }
 

@@ -12313,27 +12313,35 @@ the top of the root window, :lines is the `tool-bar-lines' parameter,
 (rd-daemon-deftest remoteterm-tests-tool-bar-full-height
   "Law T4: a frame with a full-screen height keeps its native height.
 A trial makes a remote frame with the `fullscreen' parameter
-`fullheight' or `maximized', and gives it three random values of
-`tool-bar-lines', as in law T1.  Law: after the second and the third
-value, the native height is the native height after the first value.
-The tool bar takes its height from the windows."
+`fullheight', `maximized' or `fullwidth', and gives it three random
+values of `tool-bar-lines', as in law T1.  Laws:
+ - With `fullheight' or `maximized', after the second and the third
+   value, the native height is the native height after the first
+   value.  The tool bar takes its height from the windows.
+ - With `fullwidth', the frame has the full-screen width but not the
+   full-screen height.  Thus the states are the states of a frame with
+   no `fullscreen' parameter."
   (let ((rd-gen-trials 8))
     (rd-gen-for-all
      (lambda ()
        (list (rd-gen-integer 15 25)
              (cl-loop repeat 3 collect (remoteterm-tests--tool-bar-value))
-             (rd-gen-element '(fullheight maximized))))
+             (rd-gen-element '(fullheight maximized fullwidth))))
      (lambda (trial)
        (pcase-let* ((`(,height ,values ,fullscreen) trial)
                     (states (remoteterm-tests--tool-bar-steps
                              height values `((fullscreen . ,fullscreen)))))
-         (should (equal (mapcar (lambda (state)
-                                  (plist-get state :native-height))
-                                states)
-                        (make-list 3 (plist-get (car states)
-                                                :native-height))))
-         (cl-mapc #'remoteterm-tests--check-tool-bar states values
-                  '(nil t t)))))))
+         (if (eq fullscreen 'fullwidth)
+             (should (equal states
+                            (remoteterm-tests--tool-bar-steps height
+                                                              values)))
+           (should (equal (mapcar (lambda (state)
+                                    (plist-get state :native-height))
+                                  states)
+                          (make-list 3 (plist-get (car states)
+                                                  :native-height))))
+           (cl-mapc #'remoteterm-tests--check-tool-bar states values
+                    '(nil t t))))))))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-default
   "Law T2: the default tool bar of a remote frame follows `tool-bar-mode'.
@@ -12402,33 +12410,70 @@ the rows of the tool bar.  Select the frame, as for
                        messages))))
         (delete-frame frame)))))
 
-(ert-deftest remoteterm-tests-resize-tool-bar ()
-  "A resize below the minimum size keeps the windows below the tool bar.
-The frame holds the tool bar and the minimum height of the windows."
+(rd-daemon-deftest remoteterm-tests-resize-tool-bar
+  "A resize keeps the tool bar and the minimum size of the windows.
+A trial makes a frame with a random `tool-bar-lines' from 0 to 3, and
+sends 1 to 4 resizes of random sides from 1 to 200 pixels.  Laws,
+after each resize:
+ - The native height of the frame holds the tool bar and the windows.
+ - The windows have the minimum height of `frame-windows-min-size'.
+ - The tool bar height is more than 0 if and only if the frame has
+   tool bar lines."
+  (let ((rd-gen-trials 10))
+    (rd-gen-for-all
+     (lambda ()
+       (list (rd-gen-integer 0 3)
+             (cl-loop repeat (rd-gen-integer 1 4)
+                      collect (list 'frame (rd-gen-integer 1 200)
+                                    (rd-gen-integer 1 200)))))
+     (lambda (trial)
+       (dolist (heights (apply #'remoteterm-tests--resize-tool-bar-case
+                               trial))
+         (remoteterm-tests--check-resize-tool-bar (car trial) heights))))))
+
+(ert-deftest remoteterm-tests-resize-tool-bar-tiny ()
+  "A resize to 1 by 1 pixel keeps the windows below the tool bar.
+A regression example of the laws of `remoteterm-tests-resize-tool-bar'."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
-    (pcase-let ((`(,frame-height ,tool-bar ,windows ,minimum)
-                 (remoteterm-tests--daemon-call
-                  'remoteterm-tests--resize-tool-bar-case)))
-      (should (> tool-bar 0))
-      (should (>= windows minimum))
-      (should (>= frame-height (+ tool-bar windows))))))
+    (dolist (heights (remoteterm-tests--daemon-call
+                      'remoteterm-tests--resize-tool-bar-tiny-case))
+      (remoteterm-tests--check-resize-tool-bar 2 heights))))
 
-(defun remoteterm-tests--resize-tool-bar-case ()
-  "Resize a frame with a tool bar to 1 by 1 pixel.
-Return the list (FRAME-HEIGHT TOOL-BAR WINDOWS MINIMUM) of pixel
-heights: the native height of the frame, the tool bar height, the
+(defun remoteterm-tests--resize-tool-bar-tiny-case ()
+  "Resize a frame with 2 tool bar lines to 1 by 1 pixel.
+Return the value of `remoteterm-tests--resize-tool-bar-case'."
+  (remoteterm-tests--resize-tool-bar-case 2 '((frame 1 1))))
+
+(defun remoteterm-tests--check-resize-tool-bar (lines heights)
+  "Check the laws of `remoteterm-tests-resize-tool-bar' for HEIGHTS.
+LINES is the `tool-bar-lines' parameter of the frame.  HEIGHTS is an
+element of the value of `remoteterm-tests--resize-tool-bar-case'."
+  (pcase-let ((`(,frame-height ,tool-bar ,windows ,minimum) heights))
+    (should (eq (> tool-bar 0) (> lines 0)))
+    (should (>= windows minimum))
+    (should (>= frame-height (+ tool-bar windows)))))
+
+(defun remoteterm-tests--resize-tool-bar-case (lines resizes)
+  "Resize a frame with LINES tool bar lines with each of RESIZES.
+RESIZES is a list as for `remoteterm-tests--send-resizes'.  Return a
+list with one element for each resize.  An element is the list
+\(FRAME-HEIGHT TOOL-BAR WINDOWS MINIMUM) of pixel heights after the
+resize: the native height of the frame, the tool bar height, the
 height of the root window and the minibuffer window together, and the
 minimum height of the windows from `frame-windows-min-size'."
   (remoteterm-tests--with-input-session
    (lambda (frame client-side &optional _server-side)
-     (remoteterm-tests--send-resizes client-side frame '((frame 1 1)))
-     (list (frame-pixel-height frame)
-           (cdr (alist-get 'tool-bar-size (frame-geometry frame)))
-           (+ (window-pixel-height (frame-root-window frame))
-              (window-pixel-height (minibuffer-window frame)))
-           (frame-windows-min-size frame nil nil t)))
-   '((tool-bar-lines . 2))))
+     (mapcar (lambda (resize)
+               (remoteterm-tests--send-resizes client-side frame
+                                               (list resize))
+               (list (frame-pixel-height frame)
+                     (cdr (alist-get 'tool-bar-size (frame-geometry frame)))
+                     (+ (window-pixel-height (frame-root-window frame))
+                        (window-pixel-height (minibuffer-window frame)))
+                     (frame-windows-min-size frame nil nil t)))
+             resizes))
+   `((tool-bar-lines . ,lines))))
 
 (rd-daemon-deftest remoteterm-tests-tool-bar-click
   "Law T3: a click on a tool bar item gives the tool bar event of the item.
@@ -12911,6 +12956,85 @@ The relief -1 has sides of 1 pixel.  Return t."
   (remoteterm-tests--tool-bar-relief-check 2 2 3 '(8 . 8) '(160 176 192))
   t)
 
+(ert-deftest remoteterm-tests-tool-bar-relief-bad-margin ()
+  "A bad `tool-bar-button-margin' gives no space between icon and relief.
+A bad margin is not a number and not a pair of two numbers.  Examples
+of law T6 with the margins nil and (1 . a)."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (remoteterm-tests--daemon-call
+             'remoteterm-tests--tool-bar-relief-bad-margin-case))))
+
+(defun remoteterm-tests--tool-bar-relief-bad-margin-case ()
+  "Check law T6 for the margins nil and (1 . a).  Return t."
+  (dolist (margin '(nil (1 . a)))
+    (remoteterm-tests--tool-bar-relief-check 2 2 margin '(8 . 8)
+                                             '(160 176 192)))
+  t)
+
+(defun remoteterm-tests--margin-space (margin)
+  "Return the space (X . Y) between an icon and its relief for MARGIN.
+MARGIN is a value of `tool-bar-button-margin'.  This is the model of
+the margin of a relief.  A number N gives (N . N), and a pair of two
+numbers gives that pair.  Another value gives (0 . 0)."
+  (cond ((integerp margin) (cons margin margin))
+        ((and (consp margin) (integerp (car margin))
+              (integerp (cdr margin)))
+         margin)
+        (t (cons 0 0))))
+
+(ert-deftest remoteterm-tests-tool-bar-relief-huge ()
+  "A very large `tool-bar-button-relief' draws a relief and does not crash.
+The relief is at most 1000000 pixels wide, so that the sums of its area
+do not overflow.  The layout of the item has the relief 1 and no
+margin.  Then the relief changes, and a motion raises the item.
+Examples with the reliefs 2000000 and `most-positive-fixnum'.  Law:
+the pixels next to the icon have the relief colors, the light color
+at the top and the left, and the dark color at the bottom and the
+right."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (remoteterm-tests--daemon-call
+             'remoteterm-tests--tool-bar-relief-huge-case))))
+
+(defun remoteterm-tests--tool-bar-relief-huge-case ()
+  "Check the law of `remoteterm-tests-tool-bar-relief-huge'.  Return t."
+  (dolist (relief (list 2000000 most-positive-fixnum))
+    (pcase-let ((`(,messages ,rectangle ,colors)
+                 (remoteterm-tests--tool-bar-late-relief relief)))
+      (should (equal (remoteterm-tests--relief-sides messages rectangle 1)
+                     (cons (list (car colors)) (list (cdr colors)))))))
+  t)
+
+(defun remoteterm-tests--tool-bar-late-relief (relief)
+  "Raise a tool bar item with the relief RELIEF after its layout.
+The layout of the item has the relief 1 and no margin.  Then set
+`tool-bar-button-relief' to RELIEF, and move the mouse onto the item.
+Return the list (MESSAGES RECTANGLE COLORS).  MESSAGES are the drawing
+messages after the motion, RECTANGLE is the icon, and COLORS are the
+relief colors of the background of the `tool-bar' face.  That
+background is the color (160 176 192)."
+  (let ((auto-raise-tool-bar-buttons t)
+        (tool-bar-button-relief 1)
+        (tool-bar-button-margin 0)
+        (mouse-highlight t))
+    (remoteterm-tests--with-tool-bar-item
+     t
+     (lambda (frame item)
+       (set-face-background 'tool-bar
+                            (remoteterm-tests--rgb-string '(160 176 192))
+                            frame)
+       (redisplay t)
+       (setq tool-bar-button-relief relief)
+       (remote-display--take-output "remote-draw")
+       (remoteterm-tests--bar-motion frame (+ (car item) 4)
+                                     (+ (cdr item) 4))
+       (list (remoteterm-tests--messages
+              (remoteterm-tests--redisplay-output "remote-draw"))
+             (list (car item) (cdr item) 8 8)
+             (remoteterm-tests--relief-colors
+              (remoteterm-tests--rgb-pixel '(160 176 192))))))))
+
 (defun remoteterm-tests--tool-bar-relief-check (thick relief margin size
                                                       background)
   "Check law T6 for a tool bar item.
@@ -12919,8 +13043,7 @@ the sides that it gives, MARGIN is the value of
 `tool-bar-button-margin', SIZE is the size (WIDTH . HEIGHT) of the
 icon, and BACKGROUND is the background of the `tool-bar' face, a list
 of three 8-bit components."
-  (pcase-let* ((`(,mx . ,my) (if (consp margin) margin
-                               (cons margin margin)))
+  (pcase-let* ((`(,mx . ,my) (remoteterm-tests--margin-space margin))
                (`(,raised ,sunken ,rectangle ,colors ,others)
                 (remoteterm-tests--tool-bar-relief-case
                  relief margin size mx my background))
