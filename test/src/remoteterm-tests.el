@@ -1143,7 +1143,7 @@ the release is in another frame."
             (list :events (mapcar (lambda (event)
                                     (remoteterm-tests--bar-event-summary
                                      event w))
-                                  (remoteterm-tests--mouse-events-now))
+                                  (remoteterm-tests--mouse-events-now 2))
                   :down (list 'w 'vertical-scroll-bar
                               (cons (offset press-y) range)
                               (remoteterm-tests--bar-part
@@ -1196,11 +1196,17 @@ The handle is the rows of the text area with the color #000000."
           ((<= y (car (last handle))) 'handle)
           (t 'below-handle))))
 
-(defun remoteterm-tests--mouse-events-now ()
-  "Read the mouse events that wait now, and return them in order."
+(defun remoteterm-tests--mouse-events-now (&optional count)
+  "Read the mouse events that wait now, and return them in order.
+If COUNT is non-nil, wait up to 5 seconds for each of the first COUNT
+mouse events, so that a slow build (for example with AddressSanitizer)
+gets them.  Then read the other events that wait now."
   (let ((events nil)
         event)
-    (while (setq event (read-event nil nil 0.01))
+    (while (setq event (read-event nil nil (if (< (length events)
+                                                  (or count 0))
+                                               5
+                                             0.01)))
       (when (string-match-p "mouse-" (symbol-name (or (car-safe event)
                                                       'none)))
         (push event events)))
