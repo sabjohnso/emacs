@@ -86,7 +86,10 @@ static struct remote_relief remote_compute_relief (enum draw_glyphs_face hl,
 						   bool tool_bar_p,
 						   struct remote_margin);
 static int remote_button_relief_width (EMACS_INT relief);
-static struct remote_margin remote_tool_bar_margin (Lisp_Object margin);
+static struct remote_margin remote_tool_bar_margin (Lisp_Object margin,
+						    EMACS_INT button_relief);
+static int remote_margin_part (Lisp_Object part, int relief);
+static int remote_layout_relief (EMACS_INT relief);
 static struct remote_edges remote_slice_edges (struct glyph_string *s);
 static Emacs_Rectangle remote_relief_area (Emacs_Rectangle slice,
 					   struct remote_edges edges,
@@ -235,7 +238,8 @@ static struct remote_relief
 remote_relief_of (struct glyph_string *s)
 {
   struct remote_margin margin
-    = remote_tool_bar_margin (Vtool_bar_button_margin);
+    = remote_tool_bar_margin (Vtool_bar_button_margin,
+			      tool_bar_button_relief);
   bool tool_bar_p = s->face->id == TOOL_BAR_FACE_ID;
   return remote_compute_relief (s->hl, s->img->relief,
 				tool_bar_button_relief, tool_bar_p, margin);
@@ -268,22 +272,47 @@ remote_compute_relief (enum draw_glyphs_face hl, int image_relief,
 static int
 remote_button_relief_width (EMACS_INT relief)
 {
+  return min (remote_layout_relief (relief), 1000000);
+}
+
+/* Return the relief that the layout in xdisp.c gives to a tool-bar
+   button for the value RELIEF of `tool-bar-button-relief'.  */
+static int
+remote_layout_relief (EMACS_INT relief)
+{
   return (relief < 0 ? DEFAULT_TOOL_BAR_BUTTON_RELIEF
-	  : min (relief, 1000000));
+	  : min (relief, min (INT_MAX, MOST_POSITIVE_FIXNUM)));
 }
 
 /* Return the horizontal and the vertical space of the value MARGIN of
-   `tool-bar-button-margin'.  A value that is not a number or a pair of
-   numbers is no space.  */
+   `tool-bar-button-margin', with the value BUTTON_RELIEF of
+   `tool-bar-button-relief'.  A number gives both spaces, and a pair
+   gives one space with each part.  The rule of a part is the rule of
+   the layout in xdisp.c, so the relief is around the space that the
+   layout gives.  */
 static struct remote_margin
-remote_tool_bar_margin (Lisp_Object margin)
+remote_tool_bar_margin (Lisp_Object margin, EMACS_INT button_relief)
 {
-  if (CONSP (margin) && FIXNUMP (XCAR (margin)) && FIXNUMP (XCDR (margin)))
-    return (struct remote_margin) { XFIXNUM (XCAR (margin)),
-				    XFIXNUM (XCDR (margin)) };
-  if (FIXNUMP (margin))
-    return (struct remote_margin) { XFIXNUM (margin), XFIXNUM (margin) };
-  return (struct remote_margin) { 0, 0 };
+  int relief = remote_layout_relief (button_relief);
+  return (CONSP (margin)
+	  ? (struct remote_margin) {
+	      remote_margin_part (XCAR (margin), relief),
+	      remote_margin_part (XCDR (margin), relief) }
+	  : (struct remote_margin) {
+	      remote_margin_part (margin, relief),
+	      remote_margin_part (margin, relief) });
+}
+
+/* Return the space of PART of a margin, with the relief RELIEF of the
+   layout.  As in xdisp.c, a part that is not an integer from 1 to
+   INT_MAX - RELIEF gives no space.  As the width of a relief, the
+   space is at most 1000000, so that the sums of the relief area stay
+   in an int.  */
+static int
+remote_margin_part (Lisp_Object part, int relief)
+{
+  return (RANGED_FIXNUMP (1, part, INT_MAX - relief)
+	  ? min (XFIXNAT (part), 1000000) : 0);
 }
 
 /* Return the edges of the slice of S that are edges of its image.  */

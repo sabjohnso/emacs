@@ -187,6 +187,24 @@ numbers from 0 to 6."
            (y (mod (+ x 1 (rd-gen-random 6)) 7)))
       (cons x y))))
 
+(defun rd-gen-tool-bar-margin-with-space ()
+  "Return a random (MARGIN . SPACE) for `tool-bar-button-margin'.
+MARGIN can be good or bad in full or in part.  SPACE is (X . Y), the
+space that the layout of xdisp.c gives with a relief from -100 to 3:
+a part that is not an integer from 1 to INT_MAX minus the relief gives
+0."
+  (let ((part (lambda ()
+                (if (= (rd-gen-random 2) 0)
+                    (let ((n (rd-gen-integer 1 6))) (cons n n))
+                  (cons (rd-gen-element (list nil 'a 0 -1 -6 1.5
+                                              (ash 1 31)))
+                        0)))))
+    (if (= (rd-gen-random 2) 0)
+        (let ((p (funcall part)))
+          (cons (car p) (cons (cdr p) (cdr p))))
+      (let ((x (funcall part)) (y (funcall part)))
+        (cons (cons (car x) (car y)) (cons (cdr x) (cdr y)))))))
+
 (defun rd-gen-child-frame-ops (max-length)
   "Return a list of up to MAX-LENGTH random operations on child frames.
 An index I names a frame in a list that the test keeps: 0 is a root

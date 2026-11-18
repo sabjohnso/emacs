@@ -12957,31 +12957,67 @@ The relief -1 has sides of 1 pixel.  Return t."
   t)
 
 (ert-deftest remoteterm-tests-tool-bar-relief-bad-margin ()
-  "A bad `tool-bar-button-margin' gives no space between icon and relief.
-A bad margin is not a number and not a pair of two numbers.  Examples
-of law T6 with the margins nil and (1 . a)."
+  "A bad part of `tool-bar-button-margin' gives no space.
+The layout of xdisp.c ignores a part of the margin that is not an
+integer from 1 to INT_MAX minus the relief.  The relief obeys the same
+rule.  Examples of law T6 with margins that are bad in full or in
+part."
   (skip-unless (featurep 'remote-test))
   (rd-with-daemon
     (should (remoteterm-tests--daemon-call
              'remoteterm-tests--tool-bar-relief-bad-margin-case))))
 
+(ert-deftest remoteterm-tests-tool-bar-relief-margin-parts ()
+  "Each part of `tool-bar-button-margin' gives its own space (law T6).
+A part that is not an integer from 1 to INT_MAX minus the relief gives
+no space, as in the layout of xdisp.c.  A number gives both spaces.
+The trials use small reliefs above 0, and negative reliefs give the
+default relief of 1 pixel.  A relief of 0 draws no sides."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (remoteterm-tests--daemon-call
+             'remoteterm-tests--tool-bar-relief-margin-parts-case))))
+
+(defun remoteterm-tests--tool-bar-relief-margin-parts-case ()
+  "Check law T6 for random margins with good and bad parts.  Return t."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda ()
+       (list (rd-gen-element '(-100 -2 -1 1 2 3))
+             (rd-gen-tool-bar-margin-with-space)))
+     (lambda (trial)
+       (pcase-let ((`(,relief (,margin . ,space)) trial))
+         (remoteterm-tests--tool-bar-relief-check
+          (if (< relief 0) 1 relief) relief margin '(8 . 8)
+          '(160 176 192) space)))))
+  t)
+
 (defun remoteterm-tests--tool-bar-relief-bad-margin-case ()
-  "Check law T6 for the margins nil and (1 . a).  Return t."
-  (dolist (margin '(nil (1 . a)))
+  "Check law T6 for margins that are bad in full or in part.
+Each entry of the table is a margin and the space (X . Y) that it
+gives.  Return t."
+  (pcase-dolist (`(,margin . ,space)
+                 `((nil . (0 . 0))
+                   ((1 . a) . (1 . 0))
+                   ((a . 2) . (0 . 2))
+                   (-3 . (0 . 0))
+                   ((-1 . 2) . (0 . 2))
+                   (,(ash 1 31) . (0 . 0))
+                   ((3 . ,(ash 1 31)) . (3 . 0))))
     (remoteterm-tests--tool-bar-relief-check 2 2 margin '(8 . 8)
-                                             '(160 176 192)))
+                                             '(160 176 192) space))
   t)
 
 (defun remoteterm-tests--margin-space (margin)
   "Return the space (X . Y) between an icon and its relief for MARGIN.
-MARGIN is a value of `tool-bar-button-margin'.  This is the model of
-the margin of a relief.  A number N gives (N . N), and a pair of two
-numbers gives that pair.  Another value gives (0 . 0)."
-  (cond ((integerp margin) (cons margin margin))
-        ((and (consp margin) (integerp (car margin))
-              (integerp (cdr margin)))
-         margin)
-        (t (cons 0 0))))
+MARGIN is a value of `tool-bar-button-margin' from
+`rd-gen-tool-bar-margin': a number N gives (N . N), and a pair gives
+the same pair.  Signal an error for a part that is not a small natural
+number, because the space of such a part needs a table."
+  (let ((space (if (consp margin) margin (cons margin margin))))
+    (dolist (part (list (car space) (cdr space)) space)
+      (unless (and (natnump part) (< part 1000))
+        (error "No model for the margin %S" margin)))))
 
 (ert-deftest remoteterm-tests-tool-bar-relief-huge ()
   "A very large `tool-bar-button-relief' draws a relief and does not crash.
@@ -13036,14 +13072,17 @@ background is the color (160 176 192)."
               (remoteterm-tests--rgb-pixel '(160 176 192))))))))
 
 (defun remoteterm-tests--tool-bar-relief-check (thick relief margin size
-                                                      background)
+                                                      background
+                                                      &optional space)
   "Check law T6 for a tool bar item.
 RELIEF is the value of `tool-bar-button-relief', THICK is the width of
 the sides that it gives, MARGIN is the value of
 `tool-bar-button-margin', SIZE is the size (WIDTH . HEIGHT) of the
 icon, and BACKGROUND is the background of the `tool-bar' face, a list
-of three 8-bit components."
-  (pcase-let* ((`(,mx . ,my) (remoteterm-tests--margin-space margin))
+of three 8-bit components.  SPACE is the space (X . Y) between the
+icon and the relief.  If SPACE is nil, MARGIN gives it."
+  (pcase-let* ((`(,mx . ,my) (or space
+                                 (remoteterm-tests--margin-space margin)))
                (`(,raised ,sunken ,rectangle ,colors ,others)
                 (remoteterm-tests--tool-bar-relief-case
                  relief margin size mx my background))
