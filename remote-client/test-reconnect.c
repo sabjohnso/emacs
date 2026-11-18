@@ -23,10 +23,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    example first defines a frame, so the program has a window.
 
    - Ping: when the server sends nothing, the program sends a ping
-     before the timeout.
+     after its start, and a second ping before the timeout.  The
+     serial of the second ping is greater.  The wait for the first
+     ping allows for the start of GTK (CONNECT_LIMIT).
    - Live: when the server answers each ping, the program keeps its
-     connection for several timeouts.  The serials of the pings
-     increase.
+     connection for several timeouts after the first ping.  The
+     serials of the pings increase.
    - Silent: when the server answers no ping, the program connects
      again, and keeps its window.
    - Closed: when the server closes the connection, the program
@@ -131,6 +133,12 @@ enum { FONT_SIZE = 3000, FONT_CHUNK = 1000 };
 /* The wait for a message that must not come, in milliseconds.  */
 enum { QUIET_LIMIT = 300 };
 
+/* The timeout of the program in the clipboard example, in
+   milliseconds.  Each message from the test starts the timeout again.
+   The longest silence of the test is one wait of CONNECT_LIMIT and
+   then QUIET_LIMIT.  The timeout is two times that silence.  */
+enum { CLIPBOARD_TIMEOUT = 2 * (CONNECT_LIMIT + QUIET_LIMIT) };
+
 /* One run of the program: its process, the listening socket, and the
    current connection.  */
 struct run
@@ -190,11 +198,15 @@ static bool stored_p (const struct run *, const uint8_t *, const uint8_t *);
 static bool usage_example (void);
 static pid_t start_program (const struct run *, const char *);
 static bool start_run (struct run *);
+static bool start_run_with_timeout (struct run *, int);
+static void stop_clipboard_owner (pid_t);
 static void stop_run (struct run *);
 static bool accept_next (struct run *);
 static bool alive_p (const struct run *);
 static bool send_message (int, const struct rd_message *);
 static bool send_define_frame (int);
+static bool wait_for_start (int, uint32_t *);
+static bool send_pong (int, uint32_t);
 static int read_message (int, struct rd_message *, int);
 static bool wait_for_ping (int, int, uint32_t *);
 static int wait_for_exit (pid_t);
@@ -260,9 +272,10 @@ ping_example (void)
   struct run run;
   if (!start_run (&run))
     return false;
-  uint32_t serial;
-  bool passed = (send_define_frame (run.connection)
-		 && wait_for_ping (run.connection, TIMEOUT, &serial));
+  uint32_t first, second;
+  bool passed = (wait_for_start (run.connection, &first)
+		 && wait_for_ping (run.connection, TIMEOUT, &second)
+		 && second > first);
   stop_run (&run);
   return passed;
 }
@@ -274,18 +287,17 @@ live_example (void)
   struct run run;
   if (!start_run (&run))
     return false;
-  bool passed = send_define_frame (run.connection);
+  uint32_t last;
+  bool passed = (wait_for_start (run.connection, &last)
+		 && send_pong (run.connection, last));
   int64_t end = now_ms () + 4 * TIMEOUT;
-  uint32_t last = 0;
   while (passed && now_ms () < end)
     {
       uint32_t serial;
       passed = (wait_for_ping (run.connection, TIMEOUT, &serial)
-		&& serial > last);
+		&& serial > last
+		&& send_pong (run.connection, serial));
       last = serial;
-      struct rd_message pong = { .type = RD_PONG,
-				 .u.pong = { .serial = serial } };
-      passed = passed && send_message (run.connection, &pong);
     }
   struct pollfd other = { .fd = run.listener, .events = POLLIN };
   passed = passed && poll (&other, 1, 0) == 0 && alive_p (&run);
@@ -340,7 +352,8 @@ retry_example (void)
 }
 
 /* The reset example: three losses, each after the server sent bytes.
-   Each new connection comes before 3 * RC_BACKOFF_FIRST.  */
+   Each new connection comes before 3 * RC_BACKOFF_FIRST.  The first
+   loss comes after the start of the program (wait_for_start).  */
 static bool
 reset_example (void)
 {
@@ -348,9 +361,11 @@ reset_example (void)
   if (!start_run (&run))
     return false;
   bool passed = true;
+  uint32_t serial;
   for (int loss = 0; passed && loss < 3; loss++)
     {
-      passed = send_define_frame (run.connection);
+      passed = (loss == 0 ? wait_for_start (run.connection, &serial)
+		: send_define_frame (run.connection));
       poll (NULL, 0, 100);
       int64_t start = now_ms ();
       shutdown (run.connection, SHUT_RDWR);
@@ -604,26 +619,29 @@ local_font (uint8_t *hash, uint32_t *size)
 static bool
 clipboard_example (void)
 {
-  struct run run;
-  if (!start_run (&run))
-    return false;
   char *laptop = make_text (20000, 'L'), *server = make_text (12000, 'S');
+  /* The owner starts before the program connects, and the program has
+     a long timeout.  The starts of the owner and of each reader of the
+     clipboard can take more than TIMEOUT, and this example sends no
+     pong.  The ping and live examples check the timeout.  */
   pid_t owner = start_clipboard_owner (laptop);
-  const char *step = "own the clipboard";
-  bool passed = (owner > 0 && send_define_frame (run.connection)
+  struct run run;
+  const char *step = "start";
+  bool passed = (start_run_with_timeout (&run, CLIPBOARD_TIMEOUT)
+		 && (step = "own the clipboard", owner > 0)
+		 && send_define_frame (run.connection)
 		 && (step = "send the text of the laptop",
 		     wait_for_clipboard (run.connection, CONNECT_LIMIT,
 					 laptop)));
-  if (owner > 0)
-    {
-      kill (owner, SIGTERM);
-      waitpid (owner, NULL, 0);
-    }
+  stop_clipboard_owner (owner);
+  struct pollfd other = { .fd = run.listener, .events = POLLIN };
   passed = (passed && send_clipboard (run.connection, 9, server)
 	    && (step = "put the text of the server on the clipboard",
 		clipboard_becomes (server, CONNECT_LIMIT))
 	    && (step = "do not send the text of the server back",
-		!wait_for_clipboard (run.connection, QUIET_LIMIT, server)));
+		!wait_for_clipboard (run.connection, QUIET_LIMIT, server))
+	    && (step = "keep the first connection",
+		poll (&other, 1, 0) == 0 && alive_p (&run)));
   shutdown (run.connection, SHUT_RDWR);
   passed = (passed && accept_next (&run)
 	    && (step = "send the clipboard after a new connection",
@@ -915,11 +933,21 @@ start_clipboard_owner (const char *text)
     }
   if (pid > 0 && !clipboard_becomes (text, CONNECT_LIMIT))
     {
-      kill (pid, SIGTERM);
-      waitpid (pid, NULL, 0);
+      stop_clipboard_owner (pid);
       return -1;
     }
   return pid;
+}
+
+/* Stop the clipboard owner OWNER, if OWNER is a process ID.  */
+static void
+stop_clipboard_owner (pid_t owner)
+{
+  if (owner > 0)
+    {
+      kill (owner, SIGTERM);
+      waitpid (owner, NULL, 0);
+    }
 }
 
 /* Send TEXT with SERIAL in clipboard-data messages on the connection
@@ -1116,10 +1144,19 @@ stored_p (const struct run *run, const uint8_t *font, const uint8_t *hash)
   return stored;
 }
 
-/* Start the program for RUN, and accept its first connection.  Return
-   false if the program does not connect.  */
+/* Start a run with the timeout TIMEOUT of the program.  See
+   start_run_with_timeout.  */
 static bool
 start_run (struct run *run)
+{
+  return start_run_with_timeout (run, TIMEOUT);
+}
+
+/* Start the program for RUN with the timeout TIMEOUT, in
+   milliseconds, and accept its first connection.  Return false if the
+   program does not connect.  */
+static bool
+start_run_with_timeout (struct run *run, int timeout)
 {
   snprintf (run->directory, sizeof run->directory,
 	    "/tmp/test-reconnect-XXXXXX");
@@ -1132,7 +1169,7 @@ start_run (struct run *run)
   run->listener = listen_at (run->socket);
   run->connection = -1;
   char option[64];
-  snprintf (option, sizeof option, "--timeout=%d", TIMEOUT);
+  snprintf (option, sizeof option, "--timeout=%d", timeout);
   run->pid = start_program (run, option);
   return accept_next (run);
 }
@@ -1222,6 +1259,29 @@ send_message (int fd, const struct rd_message *message)
   bool sent = send (fd, bytes, size, MSG_NOSIGNAL) == (ssize_t) size;
   g_free (bytes);
   return sent;
+}
+
+/* Send a define-frame message on the connection FD, and wait at most
+   CONNECT_LIMIT milliseconds for the first ping of the program.  The
+   program reads the message and sends the ping only after the start
+   of GTK, which can take most of TIMEOUT on a slow machine.  Set
+   *SERIAL to the serial of the ping.  Return false if no ping
+   comes.  */
+static bool
+wait_for_start (int fd, uint32_t *serial)
+{
+  return (send_define_frame (fd)
+	  && wait_for_ping (fd, CONNECT_LIMIT, serial));
+}
+
+/* Send a pong with SERIAL on the connection FD.  Return false if the
+   send fails.  */
+static bool
+send_pong (int fd, uint32_t serial)
+{
+  struct rd_message pong = { .type = RD_PONG,
+			     .u.pong = { .serial = serial } };
+  return send_message (fd, &pong);
 }
 
 /* Define the frame FRAME on the connection FD, so the program shows
