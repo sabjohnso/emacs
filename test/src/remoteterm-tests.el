@@ -10813,7 +10813,9 @@ frame in its parent."
             positions)))
 
 (defun remoteterm-tests--check-tip-size (tip text)
-  "Check that the text area of the tooltip TIP fits TEXT (law 85)."
+  "Check that the text area of the tooltip TIP fits TEXT (law 85).
+If each line fits in `x-max-tooltip-size', each line also takes one
+screen line, so no line wraps and the last character of a line shows."
   (let* ((window (frame-root-window tip))
          (lines (string-lines text))
          (longest (apply #'max (mapcar #'length lines)))
@@ -10825,7 +10827,12 @@ frame in its parent."
     (should (= (window-body-width window t)
                (min max-width (* longest (frame-char-width tip)))))
     (if (<= longest (car x-max-tooltip-size))
-        (should (= height text-height))
+        (progn
+          (should (= height text-height))
+          (should (= (with-current-buffer (window-buffer window)
+                       (count-screen-lines (point-min) (point-max) nil
+                                           window))
+                     (length lines))))
       (should (<= text-height height max-height)))))
 
 (defun remoteterm-tests--tip-frames ()

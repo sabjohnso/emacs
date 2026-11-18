@@ -175,8 +175,11 @@ frame defaults do not apply."
   "Return the frame parameters of a tooltip of ROOT.
 The size is one column and one line more than `x-max-tooltip-size', so
 the text of that size does not wrap when the tooltip measures it.  The
-bar parameters are necessary, because a remote frame gets bars from
-the bar modes when its parameters do not give them."
+tooltip has no fringes, so `no-special-glyphs' is necessary: without
+it, the last column of the text area holds the continuation glyph, and
+a line as wide as the text area wraps.  The bar parameters are
+necessary, because a remote frame gets bars from the bar modes when
+its parameters do not give them."
   `((display . ,(terminal-name (frame-terminal root)))
     (parent-frame . ,root)
     (minibuffer . ,(minibuffer-window root))
@@ -193,6 +196,7 @@ the bar modes when its parameters do not give them."
     (cursor-type . nil)
     (left-fringe . 0)
     (right-fringe . 0)
+    (no-special-glyphs . t)
     (menu-bar-lines . 0)
     (tab-bar-lines . 0)
     (tool-bar-lines . 0)
