@@ -255,6 +255,11 @@ extern void remote_output_drained (struct remote_display_info *);
    with COLOR.  An empty rectangle sends nothing.  */
 extern void remote_fill_area (struct frame *f, int x, int y, int width,
 			      int height, unsigned long color);
+/* Return the part of the rectangle A inside the rectangle B.  Its size
+   is 0 if they have no common pixels, and each user of the result
+   rejects that size.  */
+extern Emacs_Rectangle remote_intersection (Emacs_Rectangle a,
+					    Emacs_Rectangle b);
 extern void syms_of_remoteterm (void);
 
 /* Defined in remoteproc.c.  */

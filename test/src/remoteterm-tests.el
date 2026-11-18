@@ -12599,6 +12599,173 @@ The events are as in `remoteterm-tests--tool-bar-events-now'."
      (remoteterm-tests--click-tool-bar-item frame item)
      (remoteterm-tests--tool-bar-events-now))))
 
+;;;; Image relief
+
+(rd-daemon-deftest remoteterm-tests-image-relief
+  "An image with `:relief' N has a relief of N pixels (law 65).
+A trial draws the slices of an image with a random relief on a random
+background.  Each pixel of the top and left sides of the relief has
+one color, and each pixel of the bottom and right sides has one other
+color.  For a positive N, the top and left color is the light color
+and the bottom and right color is the dark color.  For a negative N,
+it is the inverse.  Each component of the light color is not less
+than that of the background, and each component of the dark color is
+not more than that of the background."
+  (let ((rd-gen-trials 15))
+    (rd-gen-for-all
+     #'remoteterm-tests--image-relief-case
+     (lambda (case)
+       (pcase-let* ((`(,width ,height ,relief ,_ ,_ ,background) case)
+                    (messages (remoteterm-tests--image-relief-output case))
+                    (draw (cdar (remoteterm-tests--image-draws messages)))
+                    (`(,top-left . ,bottom-right)
+                     (remoteterm-tests--relief-sides
+                      messages
+                      (list (plist-get draw :x) (plist-get draw :y)
+                            width height)
+                      (abs relief))))
+         (should draw)
+         (should (= (length top-left) 1))
+         (should (= (length bottom-right) 1))
+         (should-not (equal top-left bottom-right))
+         (pcase-let ((`(,light ,dark) (if (> relief 0)
+                                          (list (car top-left)
+                                                (car bottom-right))
+                                        (list (car bottom-right)
+                                              (car top-left))))
+                     (base (remoteterm-tests--rgb-pixel background)))
+           (should (remoteterm-tests--pixel<= base light))
+           (should (remoteterm-tests--pixel<= dark base))))))))
+
+(defun remoteterm-tests--image-relief-case ()
+  "Return a random (WIDTH HEIGHT RELIEF COLUMNS ROWS BACKGROUND).
+WIDTH and HEIGHT are the size of a PBM image, and RELIEF is its
+`:relief', a number that is not 0.  COLUMNS and ROWS cut the image
+into slices, as for `rd-gen-parts'.  BACKGROUND is the background of
+the face of the slices, a list of three 8-bit components."
+  (let ((width (rd-gen-integer 1 32))
+        (height (rd-gen-integer 1 32)))
+    (list width height
+          (* (rd-gen-element '(1 -1)) (rd-gen-integer 1 6))
+          (rd-gen-parts width 3) (rd-gen-parts height 3)
+          (remoteterm-tests--rgb))))
+
+(defun remoteterm-tests--image-relief-output (case)
+  "Draw the image of CASE, and return the drawing messages.
+CASE is as for `remoteterm-tests--image-relief-case'."
+  (pcase-let ((`(,width ,height ,relief ,columns ,rows ,background) case))
+    (remoteterm-tests--draw-buffer
+     (lambda ()
+       (remoteterm-tests--insert-slices
+        (create-image (remoteterm-tests--pbm width height) 'pbm t
+                      :scale 1 :relief relief)
+        columns rows
+        `(:background ,(remoteterm-tests--rgb-string background))))
+     #'ignore
+     (lambda (_display _frame output)
+       (remoteterm-tests--messages output)))))
+
+(ert-deftest remoteterm-tests-tool-bar-relief ()
+  "A tool bar item under the mouse has a raised relief, and a press sinks it.
+With `auto-raise-tool-bar-buttons', a motion onto the item draws a
+relief of `tool-bar-button-relief' pixels around the icon and its
+`tool-bar-button-margin'.  Its top and left sides are lighter than its
+bottom and right sides.  A press on the item draws the relief again
+with the inverse colors."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let ((`(,raised ,sunken)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--tool-bar-relief-case)))
+      (pcase-dolist (`(,sides ,light-first) (list (list raised t)
+                                                 (list sunken nil)))
+        (pcase-let ((`(,top-left . ,bottom-right) sides))
+          (should (= (length top-left) 1))
+          (should (= (length bottom-right) 1))
+          (should (eq light-first
+                      (> (remoteterm-tests--pixel-brightness (car top-left))
+                         (remoteterm-tests--pixel-brightness
+                          (car bottom-right))))))))))
+
+(defun remoteterm-tests--tool-bar-relief-case ()
+  "Move the mouse onto the tool bar item, press on it, and release it.
+Return the list (RAISED SUNKEN) of the relief sides after the motion
+and after the press, as for `remoteterm-tests--relief-sides'."
+  (let ((auto-raise-tool-bar-buttons t)
+        (tool-bar-button-relief 2)
+        (tool-bar-button-margin 3)
+        (mouse-highlight t))
+    (remoteterm-tests--with-tool-bar-item
+     t
+     (lambda (frame item)
+       (let* ((x (+ (car item) 4))
+              (y (+ (cdr item) 4))
+              (rectangle (list (- (car item) 3) (- (cdr item) 3) 14 14))
+              (sides (lambda (send)
+                       (remote-display--take-output "remote-draw")
+                       (funcall send)
+                       (remoteterm-tests--relief-sides
+                        (remoteterm-tests--messages
+                         (remoteterm-tests--redisplay-output "remote-draw"))
+                        rectangle 2))))
+         (prog1 (list (funcall sides (lambda ()
+                                       (remoteterm-tests--bar-motion
+                                        frame x y)))
+                      (funcall sides (lambda ()
+                                       (remoteterm-tests--tool-bar-button
+                                        frame x y 1 1 0))))
+           (remoteterm-tests--tool-bar-button frame x y 1 0 0)
+           (remoteterm-tests--tool-bar-events-now)))))))
+
+(defun remoteterm-tests--relief-sides (messages rectangle thick)
+  "Return the colors of the sides of a relief in MESSAGES.
+RECTANGLE is (X Y WIDTH HEIGHT), the rectangle inside the relief, and
+THICK is the width of the relief.  The color of a pixel is the color
+of the last clear-area message that covers it, or nil if no message
+covers it.  The value is (TOP-LEFT . BOTTOM-RIGHT).  TOP-LEFT is the
+list of the different colors of the pixels of the top and left sides.
+BOTTOM-RIGHT is that list for the bottom and right sides.  The two
+corners that are in a top or left side and also in a bottom or right
+side are in no list."
+  (pcase-let* ((`(,x ,y ,width ,height) rectangle)
+               (clears (reverse (remoteterm-tests--of-messages
+                                 'clear-area messages)))
+               (top-left nil)
+               (bottom-right nil))
+    (cl-loop
+     for py from (- y thick) below (+ y height thick) do
+     (cl-loop
+      for px from (- x thick) below (+ x width thick) do
+      (let ((first (or (< px x) (< py y)))
+            (second (or (>= px (+ x width)) (>= py (+ y height))))
+            (color (remoteterm-tests--pixel-color clears px py)))
+        (cond ((and first (not second)) (push color top-left))
+              ((and second (not first)) (push color bottom-right))))))
+    (cons (seq-uniq top-left) (seq-uniq bottom-right))))
+
+(defun remoteterm-tests--pixel-color (clears x y)
+  "Return the color of the first fields in CLEARS that cover X, Y, or nil.
+CLEARS is a list of the fields of clear-area messages."
+  (plist-get (seq-find (lambda (fields)
+                         (pcase-let (((map (:x left) (:y top) :width :height)
+                                      fields))
+                           (and (<= left x) (< x (+ left width))
+                                (<= top y) (< y (+ top height)))))
+                       clears)
+             :color))
+
+(defun remoteterm-tests--pixel<= (a b)
+  "Return non-nil if no component of the color A is more than that of B.
+A and B are protocol colors #xRRGGBB."
+  (cl-every (lambda (shift)
+              (<= (logand (ash a shift) #xff) (logand (ash b shift) #xff)))
+            '(-16 -8 0)))
+
+(defun remoteterm-tests--pixel-brightness (color)
+  "Return the sum of the components of the protocol COLOR #xRRGGBB."
+  (+ (logand (ash color -16) #xff) (logand (ash color -8) #xff)
+     (logand color #xff)))
+
 ;;;; The loop of the trials
 
 (defun remoteterm-tests--trials-until (trials bad)

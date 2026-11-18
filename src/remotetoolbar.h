@@ -21,8 +21,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #define EMACS_REMOTETOOLBAR_H
 
 #include "lisp.h"
+#include "dispextern.h"
 
 struct frame;
+struct glyph_string;
 
 /* The handler of the `tool-bar-lines' frame parameter.  Set the
    height of the tool bar of F to VALUE lines.  A VALUE that is not a
@@ -42,5 +44,14 @@ extern void remote_change_tool_bar_height (struct frame *f, int height);
    took the button, and false if not.  */
 extern bool remote_tool_bar_button (struct frame *f, int x, int y,
 				    int button, bool press, int modifiers);
+
+/* Draw the relief of S, a string of one slice of an image, if it has
+   one.  An image has a relief if it has the `:relief' property, or if
+   S is a tool-bar button with the raised or the sunken highlight.
+   SLICE is the rectangle of the slice in the frame, and the fills
+   change only the pixels in CLIP.  */
+extern void remote_draw_image_relief (struct glyph_string *s,
+				      Emacs_Rectangle slice,
+				      Emacs_Rectangle clip);
 
 #endif /* EMACS_REMOTETOOLBAR_H */

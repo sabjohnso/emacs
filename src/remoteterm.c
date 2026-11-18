@@ -127,7 +127,6 @@ static void remote_flush_frame (struct frame *);
 static void remote_frame_up_to_date (struct frame *);
 static void remote_clear_glyph_string (struct glyph_string *);
 static Emacs_Rectangle remote_glyph_clip (struct glyph_string *);
-static Emacs_Rectangle remote_intersection (Emacs_Rectangle, Emacs_Rectangle);
 static int remote_foreground_x (struct glyph_string *);
 static void remote_draw_chars (struct glyph_string *);
 static void remote_draw_image (struct glyph_string *);
@@ -1728,7 +1727,8 @@ remote_draw_glyph_string (struct glyph_string *s)
    pgtk_draw_image_foreground does.  Send the data of the image, then a
    draw-image message for the slice.  If the protocol cannot send the
    image (it did not load, or it is too large), draw the outline of the
-   slice in the foreground of S.  */
+   slice in the foreground of S.  Then draw the relief of S, if it has
+   one.  */
 static void
 remote_draw_image (struct glyph_string *s)
 {
@@ -1739,6 +1739,7 @@ remote_draw_image (struct glyph_string *s)
   else
     remote_draw_outline (s->f, slice,
 			 remote_glyph_string_colors (s).foreground);
+  remote_draw_image_relief (s, slice, remote_glyph_clip (s));
 }
 
 /* Return the rectangle of the slice of the image of S in its frame.
@@ -1850,9 +1851,7 @@ remote_glyph_clip (struct glyph_string *s)
   return clip;
 }
 
-/* Return the part of A inside B.  Its size is 0 if they have no common
-   pixels, and each user of the result rejects that size.  */
-static Emacs_Rectangle
+Emacs_Rectangle
 remote_intersection (Emacs_Rectangle a, Emacs_Rectangle b)
 {
   int left = max (a.x, b.x);
