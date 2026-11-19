@@ -175,6 +175,14 @@
 ;;     selected the item ID, and 0 if the menu closed with no
 ;;     selection.
 ;;
+;; The message of the scale block (HiDPI scale).  A client sends this
+;; message to the server:
+;;
+;; (scale :scale S)
+;;     The client shows each frame with S device pixels for each
+;;     logical pixel of the desktop.  S is an integer.  The server
+;;     uses only an S from 1 to `remote-display--max-scale'.
+;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
 ;; 16 bits, because a row of a fringe bitmap has 16 bits.  Each color
@@ -198,6 +206,7 @@
 (defvar remote-display--max-image-chunk)
 (defvar remote-display--max-menu-text)
 (defvar remote-display--max-menu-key)
+(defvar remote-display--max-scale)
 (defvar remote-display--max-fringe-rows)
 (defvar remote-display--message-formats)
 (defvar remote-display--modifier-bits)
@@ -252,11 +261,17 @@ feature-child-frames).")
 The block is for the feature Menus drawn by Emacs (PLAN.org
 feature-menus).")
 
+(defconst remotefns-tests--scale-generators
+  '((scale . remotefns-tests--scale))
+  "The message types of the scale block, each with its generator.
+The block is for the feature HiDPI scale.")
+
 (defconst remotefns-tests--generators
   (append remotefns-tests--base-generators
           remotefns-tests--image-generators
           remotefns-tests--child-frame-generators
-          remotefns-tests--menu-generators)
+          remotefns-tests--menu-generators
+          remotefns-tests--scale-generators)
   "The message types, each with the function that generates a message.
 The blocks come in the order of the blocks of RD_MESSAGES in
 src/rdproto.h.")
@@ -476,6 +491,10 @@ src/rdproto.h.")
   "Return a random `menu-choice' message."
   (list 'menu-choice :serial (rd-gen-uint32)
         :chosen (rd-gen-integer 0 255) :id (rd-gen-uint32)))
+
+(defun remotefns-tests--scale ()
+  "Return a random `scale' message."
+  (list 'scale :scale (rd-gen-integer 0 255)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -908,6 +927,25 @@ The label and the title have SIZE bytes, and the key is empty."
   (dolist (limit '(remote-display--max-menu-text
                    remote-display--max-menu-key))
     (should-error (set limit 1) :type 'setting-constant)))
+
+(ert-deftest remotefns-tests-scale-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 2, the type, scale 2.
+  (should (equal (remote-display--encode '(scale :scale 2))
+                 (unibyte-string 0 0 0 2
+                                 (remotefns-tests--type-byte 'scale)
+                                 2))))
+
+(ert-deftest remotefns-tests-scale-limits ()
+  "A scale has 8 bits, and the largest scale that a server uses is 8."
+  (skip-unless (featurep 'remote-display))
+  (should (= remote-display--max-scale 8))
+  (should-error (set 'remote-display--max-scale 1) :type 'setting-constant)
+  (should (equal (car (remote-display--decode
+                       (remote-display--encode '(scale :scale 255))))
+                 '(scale :scale 255)))
+  (should-error (remote-display--encode '(scale :scale 256))
+                :type 'args-out-of-range))
 
 (ert-deftest remotefns-tests-font-chunk-limits ()
   "A font-data message has at most `remote-display--max-font-chunk' bytes."

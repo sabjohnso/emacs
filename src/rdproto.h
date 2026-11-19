@@ -97,7 +97,8 @@ enum rd_cursor_kind
   RD_BASE_MESSAGES (MESSAGE)						\
   RD_IMAGE_MESSAGES (MESSAGE)						\
   RD_CHILD_FRAME_MESSAGES (MESSAGE)					\
-  RD_MENU_MESSAGES (MESSAGE)
+  RD_MENU_MESSAGES (MESSAGE)						\
+  RD_SCALE_MESSAGES (MESSAGE)
 
 /* The messages of the base protocol.  */
 #define RD_BASE_MESSAGES(MESSAGE)					\
@@ -494,6 +495,27 @@ enum rd_menu_flag
   FIELD (M, uint32, serial)						\
   FIELD (M, uint8, chosen)						\
   FIELD (M, uint32, id)
+
+/* HiDPI scale.  */
+
+/* The messages of the scale.  A client shows the frames on a desktop
+   that has a scale: each logical pixel of the desktop has SCALE times
+   SCALE device pixels.  The positions and the sizes of the protocol
+   are device pixels, so Emacs draws text of the correct physical
+   size, and the client paints each pixel of a frame on one device
+   pixel.  */
+#define RD_SCALE_MESSAGES(MESSAGE)					\
+  MESSAGE (SCALE, scale, RD_SCALE_FIELDS)
+
+/* The largest scale that a server uses.  */
+enum { RD_MAX_SCALE = 8 };
+
+/* A client message: the scale of the client is SCALE.  A client sends
+   this message on each connection, before the input of the user, and
+   again after each change of its scale.  The server ignores a SCALE
+   of 0 or more than RD_MAX_SCALE.  */
+#define RD_SCALE_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint8, scale)
 
 /* The chunked message types (rdchunk.h).  A row is CHUNKED (ENUM,
    NAME, SERIAL): the type RD_ENUM, and the member NAME of the union of

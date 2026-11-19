@@ -299,6 +299,12 @@ syms_of_remotefns (void)
   Vremote_display__max_menu_key = make_fixnum (RD_MAX_MENU_KEY);
   make_symbol_constant (intern_c_string ("remote-display--max-menu-key"));
 
+  DEFVAR_LISP ("remote-display--max-scale",
+	       Vremote_display__max_scale,
+	       doc: /* The largest scale of a client that a server uses.  */);
+  Vremote_display__max_scale = make_fixnum (RD_MAX_SCALE);
+  make_symbol_constant (intern_c_string ("remote-display--max-scale"));
+
   DEFVAR_LISP ("remote-display--modifier-bits",
 	       Vremote_display__modifier_bits,
 	       doc: /* The bits of the modifiers field of an input message.
