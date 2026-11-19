@@ -61,7 +61,7 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
   test-fontstore test-rdchunk test-rdpng \
   test-images test-stack test-compose \
-  test-menu test-rdscrollbar
+  test-menu test-rdscrollbar test-scale
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -89,6 +89,7 @@ check: remote-client $(TESTS)
 	./test-input
 	./test-client
 	./test-sizes
+	./test-scale
 	./test-link
 	./test-backoff
 	./test-relayline
@@ -158,6 +159,9 @@ test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS)
 
 test-sizes: test-sizes.o sizes.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
+test-scale: test-scale.o scale.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-reconnect: test-reconnect.o rdproto.o rdchunk.o | remote-client
@@ -253,6 +257,7 @@ view.o client.o: stack.h compose.h
 client.o: ../src/rdchunk.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
 sizes.o test-sizes.o view.o: sizes.h
+scale.o test-scale.o: scale.h sizes.h ../src/rdproto.h
 stack.o test-stack.o: stack.h ../src/rdproto.h
 compose.o test-compose.o: compose.h stack.h ../src/rdproto.h
 link.o test-link.o client.o: link.h
