@@ -53,6 +53,7 @@ CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   images.o rdpng.o \
   stack.o compose.o \
   menu.o \
+  scale.o \
   sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
@@ -206,8 +207,8 @@ test-tls: test-tls.o tls.o stream.o
 test-link: test-link.o link.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-view: test-view.o view.o input.o sizes.o stack.o compose.o menu.o \
-  menugen.o $(RENDER_OBJS)
+test-view: test-view.o view.o input.o sizes.o scale.o stack.o compose.o \
+  menu.o menugen.o $(RENDER_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(LIBS)
 
 client.o view.o input.o test-input.o test-view.o test-reconnect.o: %.o: %.c
@@ -257,7 +258,7 @@ view.o client.o: stack.h compose.h
 client.o: ../src/rdchunk.h
 input.o test-input.o view.o: input.h ../src/rdproto.h
 sizes.o test-sizes.o view.o: sizes.h
-scale.o test-scale.o: scale.h sizes.h ../src/rdproto.h
+scale.o test-scale.o view.o test-view.o: scale.h sizes.h ../src/rdproto.h
 stack.o test-stack.o: stack.h ../src/rdproto.h
 compose.o test-compose.o: compose.h stack.h ../src/rdproto.h
 link.o test-link.o client.o: link.h

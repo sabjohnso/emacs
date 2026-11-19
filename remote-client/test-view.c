@@ -56,6 +56,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    of the last child at the point X, Y shows in the window of the
    root, at X, Y plus the sum of the offsets of the chain.
 
+   The scale examples give the view the scale 2, as a window on a
+   desktop with the scale 2 does.  The frames then have device pixels,
+   and GTK has logical pixels: one logical pixel has 2 by 2 device
+   pixels.  The resize messages and the pointer input of the view have
+   device pixels, and the windows and the menus have the logical
+   position and size of their device position and size.
+
    The program runs TRIALS trials of the menu law and ORIGIN_TRIALS
    trials of the origin law from a seed that it gets from the clock,
    and writes the seed of a failed trial.  With one argument, it runs
@@ -74,6 +81,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "menu.h"
 #include "menugen.h"
+#include "scale.h"
 #include "view.h"
 
 /* The longest time that an example waits for a message, in
@@ -188,6 +196,12 @@ static bool remove_menu_root_example (void);
 static bool move_menu_child_example (void);
 static bool reparent_menu_example (void);
 static bool hidden_child_menu_example (void);
+static bool scale_message_example (void);
+static bool scale_resize_example (void);
+static bool scale_define_example (uint32_t, uint32_t);
+static bool scale_pointer_example (void);
+static bool scale_menu_example (void);
+static int scale_count (const struct sent *, uint8_t);
 static bool origin_laws (void);
 static bool origin_law (struct example *, uint64_t);
 static int random_offset (uint64_t *);
@@ -290,6 +304,10 @@ main (int argc, char **argv)
 		 && remove_menu_root_example () && move_menu_child_example ()
 		 && reparent_menu_example () && hidden_child_menu_example ()
 		 && origin_laws ()
+		 && scale_message_example () && scale_resize_example ()
+		 && scale_define_example (500, 350)
+		 && scale_define_example (501, 351)
+		 && scale_pointer_example () && scale_menu_example ()
 		 && trigger_example (GDK_BUTTON_PRESS)
 		 && trigger_example (GDK_KEY_PRESS)
 		 && widgets_example () && menu_laws ());
@@ -1074,6 +1092,130 @@ hidden_child_menu_example (void)
   return passed;
 }
 
+/* The view sends the scale of the desktop for rc_view_send_scale.
+   After rc_view_set_scale, it sends the new scale one time, and then
+   the resize message of the window in device pixels.  */
+static bool
+scale_message_example (void)
+{
+  struct example *example = start_example (300, 200);
+  uint8_t desktop
+    = rc_scale_clamp (gdk_window_get_scale_factor
+		      (gdk_get_default_root_window ()));
+  rc_view_send_scale (example->view);
+  bool passed = scale_count (&example->sent, desktop) == 1;
+  rc_view_set_scale (example->view, 2);
+  rc_view_set_scale (example->view, 2);
+  struct rd_message resize =
+    { .type = RD_RESIZE,
+      .u.resize = { .frame = 1, .width = 600, .height = 400 } };
+  passed = (passed && scale_count (&example->sent, 2) == 1
+	    && wait_for_message (example, &resize));
+  if (!passed)
+    fprintf (stderr, "test-view: the scale messages are wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* Return the number of the scale messages of SCALE in SENT.  */
+static int
+scale_count (const struct sent *sent, uint8_t scale)
+{
+  int count = 0;
+  for (int i = 0; i < sent->count; i++)
+    count += (sent->messages[i].type == RD_SCALE
+	      && sent->messages[i].u.scale.scale == scale);
+  return count;
+}
+
+/* At the scale 2, the user gives the window the logical size 420 by
+   260.  The view must send the resize message of 840 by 520.  */
+static bool
+scale_resize_example (void)
+{
+  struct example *example = start_example (300, 200);
+  rc_view_set_scale (example->view, 2);
+  gtk_window_resize (frame_window (), 420, 260);
+  struct rd_message expected =
+    { .type = RD_RESIZE,
+      .u.resize = { .frame = 1, .width = 840, .height = 520 } };
+  bool passed = wait_for_message (example, &expected);
+  if (!passed)
+    fprintf (stderr, "test-view: no resize message of device pixels\n");
+  end_example (example);
+  return passed;
+}
+
+/* At the scale 2, the server defines the frame with WIDTH, HEIGHT
+   device pixels.  The window must get the smallest logical size that
+   has them.  If that size has more device pixels, the view sends a
+   resize message of them, and else it sends no resize message.  */
+static bool
+scale_define_example (uint32_t width, uint32_t height)
+{
+  struct example *example = start_example (300, 200);
+  rc_view_set_scale (example->view, 2);
+  run_for (WAIT_LIMIT / 10);
+  define_frame (example, width, height);
+  int logical_width = (width + 1) / 2, logical_height = (height + 1) / 2;
+  bool passed = wait_for_size (frame_window (), logical_width,
+			       logical_height);
+  run_for (WAIT_LIMIT / 10);
+  int echo = sent_index (&example->sent, width, height);
+  int cover = sent_index (&example->sent, 2 * logical_width,
+			  2 * logical_height);
+  bool even = width % 2 == 0 && height % 2 == 0;
+  passed = passed && echo < 0 && (even ? cover < 0 : cover >= 0);
+  if (!passed)
+    fprintf (stderr, "test-view: the window of %ux%u device pixels is "
+	     "wrong\n", width, height);
+  end_example (example);
+  return passed;
+}
+
+/* At the scale 2, the pointer input has device pixels.  A motion at
+   the logical point 3, 4 goes to the root at 6, 8.  A press at a
+   logical point in the child goes to the child, at the device point
+   in the child.  */
+static bool
+scale_pointer_example (void)
+{
+  struct example *example = start_child_example ();
+  rc_view_set_scale (example->view, 2);
+  send_pointer (GDK_MOTION_NOTIFY, 3, 4, 0, 0);
+  bool passed = wait_for_pointer (example, RD_MOTION, 1, 6, 8, false);
+  send_pointer (GDK_BUTTON_PRESS, CHILD_X / 2 + 5, CHILD_Y / 2 + 3, 1, 0);
+  passed = passed && wait_for_pointer (example, RD_BUTTON, CHILD, 10, 6,
+				       true);
+  if (!passed)
+    fprintf (stderr, "test-view: the pointer input at the scale 2 is "
+	     "wrong\n");
+  end_example (example);
+  return passed;
+}
+
+/* At the scale 2, a menu at the device point 80, 61 of the frame shows
+   at the logical point 40, 30 of the window.  */
+static bool
+scale_menu_example (void)
+{
+  static const struct menu_entry one_item[] =
+    { { ITEM, ENABLED, 1, "Item", "" } };
+  struct example *example = start_example (300, 200);
+  rc_view_set_scale (example->view, 2);
+  show_menu_at (example, 1, 9, 80, 61, one_item, G_N_ELEMENTS (one_item),
+		"");
+  GtkMenuShell *menu = wait_for_menu ();
+  int x = 0, y = 0;
+  bool passed = menu && menu_origin (menu, &x, &y) && x == 40 && y == 30;
+  if (!passed)
+    fprintf (stderr, "test-view: a menu at the scale 2 is at %d, %d\n",
+	     x, y);
+  rc_view_close_menu (example->view);
+  end_example (example);
+  return passed;
+}
+
 /* Run ORIGIN_TRIALS trials of the origin law in one frame, from a seed
    that comes from the clock.  Write the seed of a failed trial.  */
 static bool
@@ -1788,6 +1930,8 @@ same_message_p (const struct rd_message *a, const struct rd_message *b)
       return (a->u.motion.frame == b->u.motion.frame
 	      && a->u.motion.x == b->u.motion.x
 	      && a->u.motion.y == b->u.motion.y);
+    case RD_SCALE:
+      return a->u.scale.scale == b->u.scale.scale;
     case RD_MENU_CHOICE:
       return (a->u.menu_choice.serial == b->u.menu_choice.serial
 	      && a->u.menu_choice.chosen == b->u.menu_choice.chosen

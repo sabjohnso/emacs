@@ -26,7 +26,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    After a press, the pointer input goes to the frame of the press
    until the release of the last button, as with the implicit grab of
    X.  The key and focus input goes to the root.  The program must call
-   gtk_init before it makes a view.  */
+   gtk_init before it makes a view.
+
+   A view has one scale for all its windows, because the server has
+   one resolution for a session (rc_view_set_scale).  X11 has one scale
+   for the desktop, so the windows agree.  With per-monitor scales, as
+   on Wayland, the last change of the scale of a window wins, and GTK
+   enlarges or reduces the other windows; that case is out of scope.  */
 
 #ifndef REMOTE_CLIENT_VIEW_H
 #define REMOTE_CLIENT_VIEW_H
@@ -117,6 +123,21 @@ extern void rc_view_hide_menu (struct rc_view *view, uint32_t serial);
    choice for it.  Call this function when the connection of the menu
    ends.  */
 extern void rc_view_close_menu (struct rc_view *view);
+
+/* Send the scale message of the scale of VIEW.  Use this for a new
+   connection, before the input of the user.  The scale of a new view
+   is the scale of the desktop.  */
+extern void rc_view_send_scale (struct rc_view *view);
+
+/* Give VIEW the scale SCALE, from 1 to RD_MAX_SCALE.  The view does
+   this itself when the scale of one of its windows changes.  After a
+   change, send the scale message of SCALE, then a resize message for
+   each window, because its device size changes, and draw each window
+   again.  The frames of the server have device pixels, and GTK has
+   logical pixels: the view paints each pixel of a frame on one device
+   pixel, gives the pointer input in device pixels, and gives the
+   windows and the menus their logical size and position.  */
+extern void rc_view_set_scale (struct rc_view *view, int scale);
 
 /* Return the number of windows of VIEW.  */
 extern int rc_view_window_count (const struct rc_view *view);

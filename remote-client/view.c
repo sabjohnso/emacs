@@ -26,6 +26,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "compose.h"
 #include "input.h"
+#include "scale.h"
 #include "sizes.h"
 #include "stack.h"
 #include "table.h"
@@ -47,6 +48,9 @@ struct rc_view
   unsigned clipboard_sets;
   /* The popup menu that is open, or NULL.  */
   struct open_menu *menu;
+  /* The scale of the frames: the number of device pixels for each
+     logical pixel of GTK, on each axis (scale.h).  */
+  int scale;
 };
 
 /* The popup menu SERIAL of VIEW for FRAME, and its GTK menu.  The
@@ -125,6 +129,9 @@ static gboolean mouse_moved (GtkWidget *, GdkEventMotion *, gpointer);
 static gboolean scrolled (GtkWidget *, GdkEventScroll *, gpointer);
 static gboolean focus_changed (GtkWidget *, GdkEventFocus *, gpointer);
 static void area_resized (GtkWidget *, GdkRectangle *, gpointer);
+static void scale_changed (GObject *, GParamSpec *, gpointer);
+static void rescale_window (uint32_t, void *, void *);
+static void note_area_size (struct rc_window *, int, int);
 static void send (struct rc_window *, const struct rd_message *);
 static struct target pointer_target (const struct rc_window *, double,
 				     double);
@@ -184,6 +191,8 @@ rc_view_new (struct rc_renderer *renderer,
   view->functions = functions;
   view->connected = true;
   view->stack = rc_stack_new (rc_frame_size, renderer);
+  view->scale = rc_scale_clamp (gdk_window_get_scale_factor
+				(gdk_get_default_root_window ()));
   if (functions.clipboard)
     view->owner_handler
       = g_signal_connect (gtk_clipboard_get (GDK_SELECTION_CLIPBOARD),
@@ -293,6 +302,24 @@ rc_view_close_menu (struct rc_view *view)
   close_menu (view);
 }
 
+void
+rc_view_send_scale (struct rc_view *view)
+{
+  struct rd_message message =
+    { .type = RD_SCALE, .u.scale = { .scale = view->scale } };
+  view->functions.send (view->functions.data, &message);
+}
+
+void
+rc_view_set_scale (struct rc_view *view, int scale)
+{
+  if (scale == view->scale)
+    return;
+  view->scale = scale;
+  rc_view_send_scale (view);
+  rc_table_each (&view->windows, rescale_window, NULL);
+}
+
 int
 rc_view_window_count (const struct rc_view *view)
 {
@@ -302,7 +329,9 @@ rc_view_window_count (const struct rc_view *view)
 /* Make the window of the root FRAME, or give it the size of the
    frame.  The window does not take the size of an answer to a resize
    message, so that the user can change the size of the window.  A
-   child frame has no window, so draw its root again.  */
+   child frame has no window, so draw its root again.  The frame has
+   device pixels, and the window gets the logical size that has
+   them.  */
 static void
 show_frame (struct rc_view *view, uint32_t frame)
 {
@@ -317,8 +346,11 @@ show_frame (struct rc_view *view, uint32_t frame)
   if (!window)
     window = add_window (view, frame, size);
   else if (rc_sizes_note_definition (&window->sizes, size))
-    gtk_window_resize (GTK_WINDOW (window->window), size.width,
-		       size.height);
+    {
+      struct rc_size logical = rc_scale_to_logical (size, view->scale);
+      gtk_window_resize (GTK_WINDOW (window->window), logical.width,
+			 logical.height);
+    }
   gtk_widget_queue_draw (window->area);
 }
 
@@ -394,7 +426,8 @@ show_if_visible (struct rc_window *window)
 					      window->frame));
 }
 
-/* Make and show a window of the size SIZE for FRAME, and return it.  */
+/* Make and show a window for FRAME of SIZE device pixels, and return
+   it.  */
 static struct rc_window *
 add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
 {
@@ -412,6 +445,8 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
 		    G_CALLBACK (focus_changed), window);
   g_signal_connect (window->window, "focus-out-event",
 		    G_CALLBACK (focus_changed), window);
+  g_signal_connect (window->window, "notify::scale-factor",
+		    G_CALLBACK (scale_changed), window);
   gtk_widget_add_events (window->area, INPUT_EVENTS);
   for (size_t i = 0; i < G_N_ELEMENTS (input_signals); i++)
     g_signal_connect (window->area, input_signals[i].name,
@@ -420,8 +455,9 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
 		    G_CALLBACK (area_resized), window);
   set_title (frame, window, NULL);
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
-  gtk_window_set_default_size (GTK_WINDOW (window->window), size.width,
-			       size.height);
+  struct rc_size logical = rc_scale_to_logical (size, view->scale);
+  gtk_window_set_default_size (GTK_WINDOW (window->window), logical.width,
+			       logical.height);
   gtk_widget_show (window->area);
   show_if_visible (window);
   rc_table_set (&view->windows, frame, window);
@@ -461,13 +497,16 @@ destroy_window (void *data)
 }
 
 /* The draw signal of the drawing area of a root frame.  DATA is the
-   struct rc_window.  Paint the root and its visible children.  */
+   struct rc_window.  Paint the root and its visible children.  CR has
+   logical pixels, so scale it to device pixels: then each pixel of a
+   frame is one device pixel.  GTK restores CR after the signal.  */
 static gboolean
 draw_frame (GtkWidget *area, cairo_t *cr, gpointer data)
 {
   (void) area;
   struct rc_window *window = data;
   struct rc_view *view = window->view;
+  cairo_scale (cr, 1.0 / view->scale, 1.0 / view->scale);
   rc_compose (cr, view->stack, window->frame, rc_frame_surface_of,
 	      view->renderer);
   return true;
@@ -566,13 +605,17 @@ mouse_moved (GtkWidget *widget, GdkEventMotion *event, gpointer data)
   return true;
 }
 
-/* Return the target of a pointer event at X, Y in WINDOW: the frame of
-   the grab while it holds and its frame is shown, else the frame under
-   the pointer, else the root.  */
+/* Return the target of a pointer event at the logical point
+   LOGICAL_X, LOGICAL_Y in WINDOW: the frame of the grab while it holds
+   and its frame is shown, else the frame under the pointer, else the
+   root.  The point of the target has device pixels.  */
 static struct target
-pointer_target (const struct rc_window *window, double x, double y)
+pointer_target (const struct rc_window *window, double logical_x,
+		double logical_y)
 {
   const struct rc_stack *stack = window->view->stack;
+  double x = rc_scale_point (logical_x, window->view->scale);
+  double y = rc_scale_point (logical_y, window->view->scale);
   int64_t origin_x, origin_y;
   if (window->grabbed
       && rc_stack_origin (stack, window->frame, window->grab, &origin_x,
@@ -620,14 +663,49 @@ focus_changed (GtkWidget *widget, GdkEventFocus *event, gpointer data)
 }
 
 /* The size-allocate signal of the drawing area of a frame.  DATA is
-   the struct rc_window.  Send the resize message of the new size of
-   the area, if the server does not know the size.  */
+   the struct rc_window.  Note the new size of the area.  */
 static void
 area_resized (GtkWidget *widget, GdkRectangle *allocation, gpointer data)
 {
   (void) widget;
+  note_area_size (data, allocation->width, allocation->height);
+}
+
+/* The notify::scale-factor signal of a window.  DATA is the struct
+   rc_window.  Give the scale of the window to the view, so the window
+   moves to a monitor of another scale with no new connection.  */
+static void
+scale_changed (GObject *object, GParamSpec *spec, gpointer data)
+{
+  (void) spec;
   struct rc_window *window = data;
-  struct rc_size size = rc_size_of (allocation->width, allocation->height);
+  rc_view_set_scale (window->view,
+		     rc_scale_clamp (gtk_widget_get_scale_factor
+				     (GTK_WIDGET (object))));
+}
+
+/* Note the size of the area of WINDOW of FRAME at the new scale of
+   its view, and draw it again.  DATA is not used.  This is a function
+   of rc_table_each.  */
+static void
+rescale_window (uint32_t frame, void *window, void *data)
+{
+  (void) frame;
+  (void) data;
+  struct rc_window *w = window;
+  note_area_size (w, gtk_widget_get_allocated_width (w->area),
+		  gtk_widget_get_allocated_height (w->area));
+  gtk_widget_queue_draw (w->area);
+}
+
+/* Send the resize message of the area of WINDOW, of the logical size
+   WIDTH, HEIGHT, in device pixels, if the server does not know that
+   size.  */
+static void
+note_area_size (struct rc_window *window, int width, int height)
+{
+  struct rc_size size = rc_scale_to_device (rc_size_of (width, height),
+					    window->view->scale);
   if (!rc_sizes_note_allocation (&window->sizes, size))
     return;
   struct rd_message message = rc_resize_message (window->frame, size.width,
@@ -655,8 +733,8 @@ note_trigger (struct rc_window *window, GdkEvent *event)
 
 /* Find the window that shows the frame of SHOW: the window of its
    root.  Put the window in WINDOW, and the point of SHOW in the
-   coordinates of the window in POSITION, and return true.  Return
-   false if no window shows the frame.  */
+   logical coordinates of the window in POSITION, and return true.
+   Return false if no window shows the frame.  */
 static bool
 menu_anchor (const struct rc_view *view, const struct rd_show_menu *show,
 	     struct rc_window **window, GdkRectangle *position)
@@ -667,7 +745,9 @@ menu_anchor (const struct rc_view *view, const struct rd_show_menu *show,
   if (!*window
       || !rc_stack_origin (view->stack, root, show->frame, &x, &y))
     return false;
-  *position = (GdkRectangle) { x + show->x, y + show->y, 1, 1 };
+  int scale = view->scale;
+  *position = (GdkRectangle) { rc_scale_position (x + show->x, scale),
+			       rc_scale_position (y + show->y, scale), 1, 1 };
   return true;
 }
 
