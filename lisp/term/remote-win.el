@@ -215,6 +215,72 @@ others."
       (alist-get selection (terminal-parameter terminal
                                                'remote-selections)))))
 
+;;;; Scale
+
+;; A client sends its scale, and remoteterm.c gives the session the
+;; resolution of that scale.  After a change, the session gives a
+;; `config-changed-event' with the name of the session, as xsettings.c
+;; does for a change of Xft/DPI.  The arg is `remote-first-scale' for
+;; the first scale of a connection, before the client shows the frames,
+;; and `font-render' for a later change.  The event of another display
+;; goes to the handler that was bound before this file, for example
+;; that of dynamic-setting.el.
+
+(declare-function reconsider-frame-fonts "frame.c" (frame))
+
+(defvar remote-display--next-config-changed-handler
+  (lookup-key special-event-map [config-changed-event])
+  "The handler of `config-changed-event' before remote-win.el.
+`remote-display-handle-config-changed-event' gives it each event whose
+display is not a remote session.")
+
+(defun remote-display-handle-config-changed-event (event)
+  "Handle the `config-changed-event' EVENT.
+If the display of EVENT is a remote display session, open the fonts of
+each frame of the session again at its new resolution, and draw each
+frame again.  After the first scale of a connection (the arg
+`remote-first-scale'), each frame keeps its columns and lines, and the
+session sends its new pixel size to the client.  After a later change
+\(the arg `font-render'), each frame keeps its size in pixels, because
+the client sends the new size of its window.  Give each other event to
+`remote-display--next-config-changed-handler'."
+  (interactive "e")
+  (let ((display (nth 2 event)))
+    (if (remote-display--session-p display)
+        (pcase (nth 1 event)
+          ('remote-first-scale (remote-display--reopen-fonts display nil))
+          ('font-render (remote-display--reopen-fonts display 'force)))
+      (when (functionp remote-display--next-config-changed-handler)
+        (funcall remote-display--next-config-changed-handler event)))))
+
+(define-key special-event-map [config-changed-event]
+  #'remote-display-handle-config-changed-event)
+
+(defun remote-display--session-p (display)
+  "Return non-nil if DISPLAY is the name of an open remote session."
+  (seq-some (lambda (terminal)
+              (and (eq (terminal-live-p terminal) 'remote)
+                   (equal (terminal-name terminal) display)))
+            (terminal-list)))
+
+(defun remote-display--reopen-fonts (display inhibit-resize)
+  "Open the fonts of each frame of the session DISPLAY again, and redraw it.
+Bind `frame-inhibit-implied-resize' to INHIBIT-RESIZE: nil keeps the
+columns and the lines of each frame, and `force' keeps its size in
+pixels, also for a frame that does not have its first size yet."
+  (clear-font-cache)
+  (let ((frame-inhibit-implied-resize inhibit-resize))
+    (dolist (frame (remote-display--session-frames display))
+      (reconsider-frame-fonts frame)
+      (redraw-frame frame))))
+
+(defun remote-display--session-frames (display)
+  "Return the live frames of the session DISPLAY."
+  (filtered-frame-list
+   (lambda (frame)
+     (and (eq (framep frame) 'remote)
+          (equal (terminal-name (frame-terminal frame)) display)))))
+
 ;;;; Start
 
 (defun remote-display-start ()

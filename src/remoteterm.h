@@ -96,6 +96,10 @@ struct remote_display_info
   /* Resolution in dots per inch.  */
   double resx, resy;
 
+  /* True after the first scale message of the client of the current
+     attach (remote_set_scale).  */
+  bool scale_known;
+
   int grabbed;
   int n_planes;
   Window root_window;
@@ -250,6 +254,9 @@ extern Lisp_Object remote_font_file (const unsigned char *, uint32_t *);
 extern void remote_forget_fonts (struct remote_display_info *,
 				 const unsigned char *);
 extern void remote_redraw_frames (struct remote_display_info *);
+/* Give the session DPYINFO the resolution of the scale SCALE of its
+   client, from 1 to RD_MAX_SCALE.  */
+extern void remote_set_scale (struct remote_display_info *, int);
 extern void remote_output_drained (struct remote_display_info *);
 /* Fill the rectangle at X, Y with the size WIDTH, HEIGHT of the frame F
    with COLOR.  An empty rectangle sends nothing.  */

@@ -448,6 +448,29 @@
 ;;      1 pixel.  A part of `tool-bar-button-margin' that is not an
 ;;      integer from 1 to INT_MAX minus the relief gives no space, as
 ;;      in xdisp.c.
+;; 111. Scale resolution: after a scale message with a scale S from 1
+;;      to `remote-display--max-scale', the session has the resolution
+;;      96 times S dots per inch.  `display-mm-width' gives the width at
+;;      that resolution, and the default font of a new frame has the
+;;      pixel size of a 10 point font at that resolution.  A scale of 0
+;;      or above the maximum changes nothing.
+;; 112. Scale change: after each scale message of a sequence, the
+;;      default font of each frame of the session has the pixel size
+;;      of law 111 for the last scale that the session uses.  Each
+;;      frame keeps its size in pixels, because the client sends the
+;;      new size.  After a message that changes the scale, the next
+;;      redisplay draws each line of each frame again with a font of
+;;      that size.
+;; 113. Config routing: the handler of `config-changed-event' takes an
+;;      event only if its display is a remote session.  It gives each
+;;      other event to the handler that was bound before remote-win.el,
+;;      so the frames of another window system keep their settings.
+;; 114. First scale: after an attach, the first scale message with a
+;;      scale S from 1 to 3 gives each frame of the session the columns
+;;      and the lines that it had before.  Its default font has the
+;;      pixel size of law 111, its text area is its columns and lines
+;;      times the size of a character, and the client gets a
+;;      define-frame message with the new pixel size of the frame.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -2322,6 +2345,7 @@ at the end of a buffer, and a long text can need more than one run."
 
 (defvar remote-display--max-glyphs)
 (defvar remote-display--max-fringe-rows)
+(defvar remote-display--max-scale)
 
 (defun remoteterm-tests--split-lengths ()
   "Return text lengths at the limits of the glyphs of one draw-glyphs message."
@@ -11180,6 +11204,299 @@ Return the size of the frame after each step."
       (should (equal (remoteterm-tests--daemon-call
                       'remoteterm-tests--resize-limit-case)
                      `((,limit . 300) (,limit . 300) (,limit . 300)))))))
+
+;;;; Scale
+
+(defconst remoteterm-tests--scale-lines 3
+  "The number of lines of text in each frame of the scale tests.")
+
+(defun remoteterm-tests--random-scales ()
+  "Return a random list of the scales of scale messages.
+Most scales are from 1 to 3.  Some are 0 or above
+`remote-display--max-scale', and a session does not use them."
+  (cl-loop repeat (rd-gen-integer 1 4)
+           collect (if (zerop (rd-gen-integer 0 4))
+                       (rd-gen-element
+                        (list 0 (1+ remote-display--max-scale)))
+                     (rd-gen-integer 1 3))))
+
+(defun remoteterm-tests--used-scale (scales)
+  "Return the last scale of SCALES that a session uses, or 1."
+  (or (car (last (seq-filter
+                  (lambda (scale) (<= 1 scale remote-display--max-scale))
+                  scales)))
+      1))
+
+(defun remoteterm-tests--scale-font-size (scale)
+  "Return the pixel size of a 10 point font for the scale SCALE.
+The resolution is `remoteterm-tests--dots-per-inch' times SCALE.  The
+value is rounded as POINT_TO_PIXEL of font.h rounds it."
+  (truncate (+ (/ (* 10.0 remoteterm-tests--dots-per-inch scale) 72.27)
+               0.5)))
+
+(defun remoteterm-tests--font-size (frame)
+  "Return the pixel size of the default font of FRAME."
+  (font-get (face-attribute 'default :font frame) :size))
+
+(defun remoteterm-tests--pixel-size (frame)
+  "Return the size (WIDTH . HEIGHT) of FRAME in pixels."
+  (cons (frame-pixel-width frame) (frame-pixel-height frame)))
+
+(rd-daemon-deftest remoteterm-tests-scale-resolution
+  "After scale messages, the session has the resolution of law 111.
+The width in millimeters of the session is the width at 96 times the
+last scale that the session uses.  The default font of a new frame has
+the pixel size of a 10 point font at that resolution."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-scales
+     (lambda (scales)
+       (pcase-let ((`(,mm ,pixels ,size)
+                    (remoteterm-tests--run-scale-resolution scales))
+                   (scale (remoteterm-tests--used-scale scales)))
+         (should (= mm (round (/ (remoteterm-tests--mm pixels) scale))))
+         (should (= size (remoteterm-tests--scale-font-size scale))))))))
+
+(defun remoteterm-tests--run-scale-resolution (scales)
+  "Send scale messages with SCALES to a session, and then make a frame.
+Return (MM PIXELS SIZE).  MM and PIXELS are the width of the session
+in millimeters and in pixels, and SIZE is the pixel size of the
+default font of the new frame."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (remoteterm-tests--send-scales client-side frame scales)
+     (remoteterm-tests--with-frame new "remote-input" nil
+       (list (display-mm-width frame) (display-pixel-width frame)
+             (remoteterm-tests--font-size new))))))
+
+(defun remoteterm-tests--send-scales (client-side frame scales)
+  "Send a scale message for each of SCALES from CLIENT-SIDE.
+After each message, send a key for FRAME, and read events until the
+key comes, so the session handled the message and its events."
+  (dolist (scale scales)
+    (process-send-string client-side
+                         (concat (remote-display--encode
+                                  `(scale :scale ,scale))
+                                 (remoteterm-tests--z-key frame)))
+    (remoteterm-tests--read-events 1)))
+
+(rd-daemon-deftest remoteterm-tests-scale-change
+  "After each scale message, the frames of a session follow law 112.
+The default font of each frame has the pixel size for the last scale
+that the session uses.  Each frame keeps its size in pixels.  After a
+change of the scale, the next redisplay draws each line of each frame
+with a font of that size."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     #'remoteterm-tests--random-scales
+     (lambda (scales)
+       (cl-loop
+        for step in (remoteterm-tests--run-scale-change scales)
+        for count from 1
+        for scale = (remoteterm-tests--used-scale (seq-take scales count))
+        for old = 1 then new
+        for new = scale
+        do (let ((size (remoteterm-tests--scale-font-size scale)))
+             (pcase-dolist (`(,font ,before ,after ,lines) step)
+               (should (= font size))
+               (should (equal after before))
+               (unless (= new old)
+                 (should (>= (length (alist-get size lines))
+                             remoteterm-tests--scale-lines))))))))))
+
+(defun remoteterm-tests--run-scale-change (scales)
+  "Send scale messages with SCALES to a session with two frames.
+Return a list with one element for each scale: a list with one entry
+for each frame, after the message and a redisplay.  An entry is (FONT
+BEFORE AFTER LINES).  FONT is the pixel size of the default font of
+the frame.  BEFORE and AFTER are the sizes of the frame in pixels
+before and after the message.  LINES is an alist from a font size to
+the baselines of the draw-glyphs messages of the frame with a font of
+that size, after the message."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional server-side)
+     (remoteterm-tests--with-frame other "remote-input" nil
+       (let ((frames (list frame other))
+             (output (remoteterm-tests--output-reader client-side)))
+         ;; The reader sees each define-font message after the new
+         ;; attach.
+         (remote-display--detach "remote-input")
+         (remote-display-attach "remote-input" server-side)
+         ;; A client sends its scale first on each connection, so the
+         ;; scales of the case are changes of a live session.
+         (remoteterm-tests--send-scales client-side frame '(1))
+         (mapc #'remoteterm-tests--show-scale-text frames)
+         (redisplay t)
+         (funcall output)
+         (mapcar (lambda (scale)
+                   (remoteterm-tests--scale-step client-side frames output
+                                                 scale))
+                 scales))))))
+
+(defun remoteterm-tests--show-scale-text (frame)
+  "Show `remoteterm-tests--scale-lines' lines of text in FRAME."
+  (let ((buffer (get-buffer-create (format " *scale %s*" frame))))
+    (with-current-buffer buffer
+      (erase-buffer)
+      (dotimes (line remoteterm-tests--scale-lines)
+        (insert (format "line %d\n" line))))
+    (set-window-buffer (frame-root-window frame) buffer)))
+
+(defun remoteterm-tests--scale-step (client-side frames output scale)
+  "Send a scale message with SCALE from CLIENT-SIDE, and redisplay FRAMES.
+OUTPUT is a function of `remoteterm-tests--output-reader'.  Return the
+entry of `remoteterm-tests--run-scale-change' for each of FRAMES."
+  (let ((before (mapcar #'remoteterm-tests--pixel-size frames)))
+    (remoteterm-tests--send-scales client-side (car frames) (list scale))
+    (redisplay t)
+    (let ((messages (funcall output)))
+      (cl-mapcar (lambda (frame size)
+                   (list (remoteterm-tests--font-size frame) size
+                         (remoteterm-tests--pixel-size frame)
+                         (remoteterm-tests--lines-by-size frame messages)))
+                 frames before))))
+
+(defun remoteterm-tests--lines-by-size (frame messages)
+  "Return the baselines of the draws of FRAME in MESSAGES, by font size.
+The value is an alist from the pixel size of a font to the list of
+the different baselines of the draw-glyphs messages of FRAME with that
+font.  MESSAGES is the value of a `remoteterm-tests--output-reader'
+function."
+  (let ((id (remoteterm-tests--frame-id frame))
+        (lines nil))
+    (pcase-dolist (`(,size . ,fields) (cdr messages))
+      (when (= (plist-get fields :frame) id)
+        (cl-pushnew (plist-get fields :y) (alist-get size lines))))
+    lines))
+
+(defun remoteterm-tests--output-reader (client-side)
+  "Return a function that gives the new output of the session to CLIENT-SIDE.
+The function waits for the output, and returns (SIZES . DRAWS).
+SIZES is an alist from each font ID that a define-font message gave
+since the start of the reader to its pixel size.  DRAWS has the
+fields of each draw-glyphs message since the last call, with the
+pixel size of its font: (SIZE . FIELDS)."
+  (let ((bytes "")
+        (sizes nil))
+    (set-process-filter client-side
+                        (lambda (_process string)
+                          (setq bytes (concat bytes string))))
+    (lambda ()
+      (accept-process-output nil 0.2)
+      (let ((draws nil))
+        (pcase-let ((`(,messages . ,used)
+                     (remoteterm-tests--complete-messages bytes)))
+          (setq bytes (substring bytes used))
+          (pcase-dolist (`(,type . ,fields) messages)
+            (pcase type
+              ('define-font
+               (setf (alist-get (plist-get fields :font) sizes)
+                     (plist-get fields :size)))
+              ('draw-glyphs
+               (push (cons (alist-get (plist-get fields :font) sizes)
+                           fields)
+                     draws)))))
+        (cons sizes (nreverse draws))))))
+
+(defun remoteterm-tests--complete-messages (bytes)
+  "Return the complete messages at the start of BYTES.
+The value is (MESSAGES . USED): the messages in order, and the number
+of bytes that they use."
+  (let ((messages nil)
+        (start 0)
+        result)
+    (while (and (< start (length bytes))
+                (setq result (remote-display--decode bytes start)))
+      (push (car result) messages)
+      (setq start (+ start (cdr result))))
+    (cons (nreverse messages) start)))
+
+;;;; First scale and config routing
+
+(defvar remote-display--next-config-changed-handler)
+(declare-function remote-display-handle-config-changed-event "remote-win"
+                  (event))
+
+(rd-daemon-deftest remoteterm-tests-first-scale
+  "The first scale message after an attach keeps the lines (law 114).
+Each frame keeps its columns and lines.  Its font has the pixel size
+for the scale, its text area is its columns and lines times the size
+of a character, and the client gets the new pixel size of the frame."
+  (let ((rd-gen-trials 6))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 1 3))
+     (lambda (scale)
+       (pcase-let ((`(,before ,after ,font ,text ,char ,pixels ,defined)
+                    (remoteterm-tests--run-first-scale scale)))
+         (should (equal after before))
+         (should (= font (remoteterm-tests--scale-font-size scale)))
+         (should (equal text (cons (* (car after) (car char))
+                                   (* (cdr after) (cdr char)))))
+         (should (equal defined pixels)))))))
+
+(defun remoteterm-tests--run-first-scale (scale)
+  "Send a scale message with SCALE as the first message after an attach.
+Return (BEFORE AFTER FONT TEXT CHAR PIXELS DEFINED).  BEFORE and AFTER
+are the columns and the lines (COLUMNS . LINES) of the frame before and
+after the message.  FONT is the pixel size of its default font, TEXT
+the size of its text area, CHAR the size of a character, and PIXELS
+its size in pixels.  DEFINED is the size of the last define-frame
+message of the frame after the message."
+  (remoteterm-tests--with-input-session
+   (lambda (frame client-side &optional _server-side)
+     (let ((before (cons (frame-width frame) (frame-height frame)))
+           (bytes ""))
+       (set-process-filter client-side
+                           (lambda (_process string)
+                             (setq bytes (concat bytes string))))
+       (remoteterm-tests--send-scales client-side frame (list scale))
+       (redisplay t)
+       (accept-process-output nil 0.2)
+       (list before (cons (frame-width frame) (frame-height frame))
+             (remoteterm-tests--font-size frame)
+             (cons (frame-text-width frame) (frame-text-height frame))
+             (cons (frame-char-width frame) (frame-char-height frame))
+             (remoteterm-tests--pixel-size frame)
+             (remoteterm-tests--defined-size
+              frame (car (remoteterm-tests--complete-messages bytes))))))))
+
+(defun remoteterm-tests--defined-size (frame messages)
+  "Return the size of the last define-frame message of FRAME in MESSAGES.
+The value is (WIDTH . HEIGHT), or nil if MESSAGES have none."
+  (let ((id (remoteterm-tests--frame-id frame))
+        (size nil))
+    (pcase-dolist (`(,type . ,fields) messages)
+      (when (and (eq type 'define-frame) (= (plist-get fields :frame) id))
+        (setq size (cons (plist-get fields :width)
+                         (plist-get fields :height)))))
+    size))
+
+(ert-deftest remoteterm-tests-config-event-routing ()
+  "Only the config-changed event of a remote session stays (law 113).
+The handler gives the event of another display to the handler that was
+bound before remote-win.el.  The earlier handler is not the remote
+handler, so the two do not call each other."
+  (skip-unless (featurep 'remote-test))
+  (should (eq (lookup-key special-event-map [config-changed-event])
+              #'remote-display-handle-config-changed-event))
+  (should-not (eq remote-display--next-config-changed-handler
+                  #'remote-display-handle-config-changed-event))
+  (remoteterm-tests--with-display "remote-config"
+    (let* ((seen nil)
+           (remote-display--next-config-changed-handler
+            (lambda (event)
+              (interactive "e")
+              (push event seen)))
+           (events '((config-changed-event theme-name ":0")
+                     (config-changed-event font-render ":0")
+                     (config-changed-event font-render "remote-config")
+                     (config-changed-event remote-first-scale
+                                           "remote-config")
+                     (config-changed-event font-render "remote-none"))))
+      (mapc #'remote-display-handle-config-changed-event events)
+      (should (equal (reverse seen)
+                     (list (nth 0 events) (nth 1 events)
+                           (nth 4 events)))))))
 
 ;;;; Image types
 

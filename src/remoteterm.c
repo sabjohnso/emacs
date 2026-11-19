@@ -82,6 +82,9 @@ static Lisp_Object remote_frame_geometry (struct frame *);
 static Lisp_Object remote_size_pair (int, int);
 static struct remote_display_info *remote_open_session (Lisp_Object);
 static struct remote_display_info *remote_session_by_name (Lisp_Object);
+static double remote_scale_resolution (int);
+static void remote_store_resolution_event (struct remote_display_info *,
+					   Lisp_Object);
 static struct terminal *remote_create_terminal (struct remote_display_info *,
 						Lisp_Object);
 static Lisp_Object remote_create_frame (Lisp_Object);
@@ -513,7 +516,7 @@ remote_open_session (Lisp_Object name)
   dpyinfo->name_list_element = Fcons (name, Qnil);
   remote_display_name_list = Fcons (dpyinfo->name_list_element,
 				    remote_display_name_list);
-  dpyinfo->resx = dpyinfo->resy = 96;
+  dpyinfo->resx = dpyinfo->resy = remote_scale_resolution (1);
   dpyinfo->n_planes = 24;
   dpyinfo->smallest_char_width = 1;
   dpyinfo->smallest_font_height = 1;
@@ -526,6 +529,59 @@ remote_open_session (Lisp_Object name)
 
   remote_create_terminal (dpyinfo, name);
   return dpyinfo;
+}
+
+/* The resolution of a session with the scale 1, in dots per inch.  */
+enum { REMOTE_BASE_RESOLUTION = 96 };
+
+/* Give the session DPYINFO the resolution of the scale SCALE of its
+   client.  The positions and the sizes of the protocol are device
+   pixels, so the resolution grows with the scale, and a font of N
+   points has the correct physical size.  After a change, store a
+   config-changed event, so Lisp opens the fonts of the frames again
+   at the new resolution (remote-win.el).
+
+   The arg of the event tells Lisp who gives the new pixel size of a
+   frame.  A client sends its scale first on each connection, before
+   it shows the frames: then the arg is remote-first-scale, and each
+   frame keeps its columns and lines and gets a new pixel size, which
+   the session sends to the client.  A later scale message is a change
+   of a window that the client shows: then the arg is font-render, and
+   each frame keeps its pixel size, because the client sends the new
+   size of the window.  */
+void
+remote_set_scale (struct remote_display_info *dpyinfo, int scale)
+{
+  bool first = !dpyinfo->scale_known;
+  dpyinfo->scale_known = true;
+  double resolution = remote_scale_resolution (scale);
+  if (dpyinfo->resx == resolution && dpyinfo->resy == resolution)
+    return;
+  dpyinfo->resx = dpyinfo->resy = resolution;
+  remote_store_resolution_event (dpyinfo,
+				 first ? Qremote_first_scale : Qfont_render);
+}
+
+/* Return the resolution of a session with the scale SCALE.  */
+static double
+remote_scale_resolution (int scale)
+{
+  return REMOTE_BASE_RESOLUTION * scale;
+}
+
+/* Store the event of a change of the resolution of DPYINFO: a
+   config-changed event with the arg ARG and the name of the session,
+   as xsettings.c stores for a change of Xft/DPI.  */
+static void
+remote_store_resolution_event (struct remote_display_info *dpyinfo,
+			       Lisp_Object arg)
+{
+  struct input_event ie;
+  EVENT_INIT (ie);
+  ie.kind = CONFIG_CHANGED_EVENT;
+  ie.frame_or_window = XCAR (dpyinfo->name_list_element);
+  ie.arg = arg;
+  kbd_buffer_store_event (&ie);
 }
 
 static bool
@@ -789,6 +845,7 @@ remote_set_sink (struct remote_display_info *dpyinfo, struct remote_sink *sink)
 {
   struct remote_sink *old = dpyinfo->sink;
   dpyinfo->sink = sink;
+  dpyinfo->scale_known = false;
   remote_drop_font_transfers (dpyinfo);
   remote_drop_clipboard (dpyinfo);
   remote_reset_images (dpyinfo);
@@ -2426,6 +2483,10 @@ syms_of_remoteterm (void)
      remoteinput.c.  */
   DEFSYM (Qremote_tip, "remote-tip");
   DEFSYM (Qremote_display__hide_tip, "remote-display--hide-tip");
+  /* The args of the config-changed event of a change of the
+     resolution: see remote_set_scale.  */
+  DEFSYM (Qfont_render, "font-render");
+  DEFSYM (Qremote_first_scale, "remote-first-scale");
 
   remote_display_name_list = Qnil;
   staticpro (&remote_display_name_list);

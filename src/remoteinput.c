@@ -57,7 +57,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    redisplay sends the new size to the client.  A close-frame message
    gives the delete-frame event of its frame, as the WM_DELETE_WINDOW
    message of X does in xterm.c, so `handle-delete-frame' decides
-   whether to delete the frame.  */
+   whether to delete the frame.  A scale message gives the session the
+   resolution of the scale of the client (remoteterm.c).  */
 
 #include <config.h>
 
@@ -104,6 +105,8 @@ static void remote_resize_input (struct remote_display_info *,
 static int remote_windows_min_size (struct frame *, Lisp_Object);
 static void remote_close_input (struct remote_display_info *,
 				const struct rd_message *);
+static void remote_scale_input (struct remote_display_info *,
+				const struct rd_message *);
 static void remote_set_focus_frame (struct remote_display_info *,
 				    struct frame *);
 static void remote_focus_event (enum event_kind, struct frame *);
@@ -136,6 +139,7 @@ static void (*const remote_input_functions[RD_TYPE_LIMIT])
     [RD_WANT_FONT] = remote_want_font,
     [RD_CLIPBOARD_DATA] = remote_clipboard_input,
     [RD_MENU_CHOICE] = remote_menu_choice_input,
+    [RD_SCALE] = remote_scale_input,
   };
 
 void
@@ -349,6 +353,17 @@ remote_close_input (struct remote_display_info *dpyinfo,
   XSETFRAME (ie.frame_or_window, f);
   ie.arg = Qnil;
   kbd_buffer_store_event (&ie);
+}
+
+/* Give the session DPYINFO the scale of the scale MESSAGE.  A scale of
+   0 or above RD_MAX_SCALE has no effect.  */
+static void
+remote_scale_input (struct remote_display_info *dpyinfo,
+		    const struct rd_message *message)
+{
+  uint8_t scale = message->u.scale.scale;
+  if (scale >= 1 && scale <= RD_MAX_SCALE)
+    remote_set_scale (dpyinfo, scale);
 }
 
 void
