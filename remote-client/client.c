@@ -119,6 +119,19 @@ enum read_result
     READ_ERROR,
   };
 
+/* The state of the writes of a connection.  */
+enum write_state
+  {
+    /* Each write worked.  */
+    WRITE_OK,
+    /* A write failed because the server closed the connection.  The
+       bytes that the server sent before its close can still come.  */
+    WRITE_CLOSED,
+    /* A write failed for another cause, for example the timeout of the
+       write.  */
+    WRITE_FAILED,
+  };
+
 /* The options of the command line.  PNG is the file of --render-to,
    or NULL.  HOST is the host of --ssh, or NULL; then SOCKET is the
    session socket.  SSH is the program of --ssh-command.  LISTEN is
@@ -152,9 +165,9 @@ struct png_mode
 /* A connection of the mode with windows: its stream, the source of
    the GTK main loop that reads the socket of the stream, the reader of its
    messages, and its liveness.  HEARD is true after the first bytes
-   from the server.  BROKEN is true after a failed write.  A write
-   can come from a function that the reader calls, so the write does
-   not close the connection.  read_input or tick_link closes it
+   from the server.  WRITES is not WRITE_OK after a failed write.  A
+   write can come from a function that the reader calls, so the write
+   does not close the connection.  read_input or tick_link closes it
    later.  */
 struct connection
 {
@@ -163,7 +176,7 @@ struct connection
   struct rc_reader *reader;
   struct rc_link link;
   bool heard;
-  bool broken;
+  enum write_state writes;
 };
 
 /* The state of the mode with windows.  CONNECTOR connects to the
@@ -243,7 +256,8 @@ static void close_frame (void *, uint32_t);
 static void send_message (void *, const struct rd_message *);
 static void send_on (struct connection *, const struct rd_message *,
 		     int64_t);
-static bool write_all (struct rc_stream *, const unsigned char *, size_t,
+static enum write_state write_all (struct rc_stream *,
+				   const unsigned char *, size_t,
 		       int64_t);
 static enum read_result read_chunk (struct rc_reader *, struct rc_stream *);
 static int64_t now_ms (void);
@@ -590,8 +604,8 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
 
 /* Make STREAM the connection of MODE.  MODE must have no connection.
    Then it has no state of a connection, because a new mode has none,
-   and close_connection removes it.  Send the clipboard text to the new
-   connection.  */
+   and close_connection removes it.  Send the scale of the view and the
+   clipboard text to the new connection.  */
 static void
 open_connection (struct window_mode *mode, struct rc_stream *stream)
 {
@@ -605,6 +619,7 @@ open_connection (struct window_mode *mode, struct rc_stream *stream)
   connection->watch = g_unix_fd_add (fd, G_IO_IN | G_IO_HUP | G_IO_ERR,
 				     read_input, mode);
   mode->connection = connection;
+  rc_view_send_scale (mode->view);
   rc_view_request_clipboard (mode->view);
 }
 
@@ -705,7 +720,7 @@ tick_link (gpointer data)
   struct connection *connection = mode->connection;
   if (!connection)
     return G_SOURCE_CONTINUE;
-  if (connection->broken)
+  if (connection->writes == WRITE_FAILED)
     {
       lose_connection (mode, true);
       return G_SOURCE_CONTINUE;
@@ -877,7 +892,11 @@ receive_font (struct window_mode *mode, const struct rd_font_data *data)
    the struct window_mode.  Read one chunk, so that the main loop can
    draw between chunks.  The main loop calls this function again while
    bytes are ready.  At the end of the connection, at an error, or
-   after a failed write, lose the connection.  */
+   after a failed write, lose the connection.  A write that failed
+   because the server closed the connection is not an error: then read
+   the bytes that came before the close, until the end.  The server
+   can close after its last messages, for example while the client
+   sends its scale.  */
 static gboolean
 read_input (gint fd, GIOCondition condition, gpointer data)
 {
@@ -888,11 +907,12 @@ read_input (gint fd, GIOCondition condition, gpointer data)
 					mode->connection->stream);
   if (result == READ_MORE)
     note_input (mode);
-  bool broken = mode->connection->broken;
-  if (!broken && (result == READ_MORE || result == READ_WAIT))
+  enum write_state writes = mode->connection->writes;
+  if ((result == READ_MORE && writes != WRITE_FAILED)
+      || (result == READ_WAIT && writes == WRITE_OK))
     return G_SOURCE_CONTINUE;
   mode->connection->watch = 0;
-  lose_connection (mode, broken || result == READ_ERROR);
+  lose_connection (mode, result != READ_END || writes == WRITE_FAILED);
   return G_SOURCE_REMOVE;
 }
 
@@ -942,31 +962,30 @@ send_message (void *data, const struct rd_message *message)
 }
 
 /* Send MESSAGE on CONNECTION, with a wait of at most LIMIT
-   milliseconds.  After a failed write, report the error, and mark
-   CONNECTION as broken.  Do nothing on a broken connection.  */
+   milliseconds.  After a failed write, report the error, and keep
+   its cause in CONNECTION.  Do nothing after a failed write.  */
 static void
 send_on (struct connection *connection, const struct rd_message *message,
 	 int64_t limit)
 {
-  if (connection->broken)
+  if (connection->writes != WRITE_OK)
     return;
   size_t size = rd_encoded_size (message);
   unsigned char *bytes = g_malloc (size);
   rd_encode (message, bytes);
-  if (!write_all (connection->stream, bytes, size, limit))
-    {
-      fprintf (stderr, "remote-client: a write to the server failed\n");
-      connection->broken = true;
-    }
+  connection->writes = write_all (connection->stream, bytes, size, limit);
+  if (connection->writes != WRITE_OK)
+    fprintf (stderr, "remote-client: a write to the server failed\n");
   g_free (bytes);
 }
 
 /* Write the SIZE BYTES to STREAM, whose socket does not block.  When
    the stream cannot take more bytes now, wait until it can, but at
-   most LIMIT milliseconds in all.  Return false on an error or
-   after LIMIT.  An input message is small, so the wait is short on a
-   live connection.  */
-static bool
+   most LIMIT milliseconds in all.  Return WRITE_OK, WRITE_CLOSED if
+   the server closed the connection, or WRITE_FAILED on another error
+   or after LIMIT.  An input message is small, so the wait is short on
+   a live connection.  */
+static enum write_state
 write_all (struct rc_stream *stream, const unsigned char *bytes,
 	   size_t size, int64_t limit)
 {
@@ -980,15 +999,17 @@ write_all (struct rc_stream *stream, const unsigned char *bytes,
 	  struct pollfd ready = { .fd = rc_stream_fd (stream),
 				  .events = POLLOUT };
 	  if (left <= 0 || poll (&ready, 1, left) == 0)
-	    return false;
+	    return WRITE_FAILED;
 	  continue;
 	}
+      if (n == RC_STREAM_CLOSED)
+	return WRITE_CLOSED;
       if (n < 0)
-	return false;
+	return WRITE_FAILED;
       bytes += n;
       size -= n;
     }
-  return true;
+  return WRITE_OK;
 }
 
 /* Read one chunk from STREAM, and give it to READER.  Write an error

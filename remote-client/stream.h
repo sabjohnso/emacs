@@ -46,6 +46,9 @@ enum
     RC_STREAM_WAIT = -1,
     /* The stream has an error.  */
     RC_STREAM_FAIL = -2,
+    /* A write failed because the peer closed the connection.  The
+       bytes that the peer sent before its close can still come.  */
+    RC_STREAM_CLOSED = -3,
   };
 
 /* Return a new stream of the connected socket FD.  The stream owns
@@ -59,8 +62,10 @@ extern ptrdiff_t rc_stream_read (struct rc_stream *stream, void *bytes,
 				 size_t size);
 
 /* Write at most SIZE BYTES to STREAM.  Return the number of bytes,
-   RC_STREAM_WAIT, or RC_STREAM_FAIL.  After RC_STREAM_WAIT, write the
-   same bytes again.  */
+   RC_STREAM_WAIT, RC_STREAM_CLOSED, or RC_STREAM_FAIL.  After
+   RC_STREAM_WAIT, write the same bytes again.  A socket stream gives
+   RC_STREAM_CLOSED for a close of the peer; a TLS stream gives
+   RC_STREAM_FAIL for it.  */
 extern ptrdiff_t rc_stream_write (struct rc_stream *stream,
 				  const void *bytes, size_t size);
 

@@ -79,6 +79,20 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - Menu loss: the loss of the connection closes the menu, and the
      program sends no choice on the next connection.
      The menu examples send keys through the XTEST extension of X.
+   - Closed write: the server sends a define-font message for a file
+     that the program does not have, then removes the last frame, and
+     closes the connection before the program reads.  The write of
+     the want-font message then fails, because the server closed the
+     connection.  The program still reads the messages before the
+     close, and exits with the status 0.  The test stops the program
+     with SIGSTOP while it sends and closes, so the order is certain.
+   - Scale: the program runs with GDK_SCALE=2, as on a desktop with
+     the scale 2.  After it connects, it sends the scale message of
+     the scale 2, also after it connects again.  It paints each pixel
+     of a frame on one pixel of X: a child frame at a device position
+     shows at that position of X.  When the server defines the frame
+     with a new size, the window of X gets that size in device
+     pixels.
    - Usage: a timeout that is not a number, or that is less than
      RC_LINK_PINGS_PER_TIMEOUT, makes the program exit with the
      status 1.  */
@@ -171,6 +185,11 @@ static bool menu_choice_example (void);
 static bool menu_cancel_example (void);
 static bool menu_hide_example (void);
 static bool menu_loss_example (void);
+static bool scale_example (void);
+static bool closed_write_example (void);
+static bool start_scaled_run (struct run *);
+static bool wait_for_scale (int, int, uint8_t);
+static bool wait_for_window_size (pid_t, int, int);
 static bool send_menu (int, uint32_t);
 static bool send_show_menu (int, uint32_t);
 static bool wait_for_choice (int, int, uint32_t, bool, uint32_t);
@@ -242,6 +261,8 @@ static const struct
     { "menu cancel", menu_cancel_example },
     { "menu hide", menu_hide_example },
     { "menu loss", menu_loss_example },
+    { "scale", scale_example },
+    { "closed write", closed_write_example },
     { "usage", usage_example },
   };
 
@@ -467,6 +488,108 @@ offline_close_example (void)
    size, and the colors of the example.  */
 enum { CHILD = 8, CHILD_X = 20, CHILD_Y = 10, CHILD_WIDTH = 30,
        CHILD_HEIGHT = 20, ROOT_COLOR = 0xff0000, CHILD_COLOR = 0x0000ff };
+
+/* The scale example.  */
+static bool
+scale_example (void)
+{
+  struct run run;
+  if (!start_scaled_run (&run))
+    return false;
+  int x = CHILD_X + 5, y = CHILD_Y + 5;
+  bool passed = (wait_for_scale (run.connection, CONNECT_LIMIT, 2)
+		 && send_define_frame (run.connection)
+		 && send_clear (run.connection, FRAME, 200, 100, ROOT_COLOR)
+		 && send_child (run.connection)
+		 && wait_for_color (run.pid, x, y, CHILD_COLOR));
+  struct rd_message define
+    = { .type = RD_DEFINE_FRAME,
+	.u.define_frame = { .frame = FRAME, .width = 400, .height = 240 } };
+  passed = (passed && send_message (run.connection, &define)
+	    && wait_for_window_size (run.pid, 400, 240));
+  shutdown (run.connection, SHUT_RDWR);
+  passed = (passed && accept_next (&run)
+	    && wait_for_scale (run.connection, CONNECT_LIMIT, 2));
+  stop_run (&run);
+  return passed;
+}
+
+/* The closed write example.  */
+static bool
+closed_write_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  uint8_t font[FONT_SIZE], hash[RD_HASH_SIZE];
+  make_font (font, hash, 3);
+  struct rd_message remove = { .type = RD_DELETE_FRAME,
+			       .u.delete_frame = { .frame = FRAME } };
+  bool passed = (send_define_frame (run.connection)
+		 && wait_for_scale (run.connection, CONNECT_LIMIT, 1));
+  kill (run.pid, SIGSTOP);
+  passed = (passed && send_define_font (run.connection, 1, hash)
+	    && send_message (run.connection, &remove));
+  close (run.connection);
+  run.connection = -1;
+  kill (run.pid, SIGCONT);
+  passed = passed && wait_for_exit (run.pid) == 0;
+  run.pid = 0;
+  stop_run (&run);
+  return passed;
+}
+
+/* Start a run of the program with GDK_SCALE=2 in RUN, as start_run
+   does.  The other runs keep the environment of the test.  */
+static bool
+start_scaled_run (struct run *run)
+{
+  const char *old = getenv ("GDK_SCALE");
+  char *saved = old ? strdup (old) : NULL;
+  setenv ("GDK_SCALE", "2", 1);
+  bool started = start_run (run);
+  if (saved)
+    setenv ("GDK_SCALE", saved, 1);
+  else
+    unsetenv ("GDK_SCALE");
+  free (saved);
+  return started;
+}
+
+/* Wait until the window of the program PID has the size WIDTH,
+   HEIGHT in pixels of X, for at most CONNECT_LIMIT.  Return true if it
+   has that size.  */
+static bool
+wait_for_window_size (pid_t pid, int width, int height)
+{
+  Display *display = XOpenDisplay (NULL);
+  if (!display)
+    return false;
+  Window window = wait_for_window (display, pid);
+  int64_t end = now_ms () + CONNECT_LIMIT;
+  XWindowAttributes attributes = { 0 };
+  while (window && XGetWindowAttributes (display, window, &attributes)
+	 && (attributes.width != width || attributes.height != height)
+	 && now_ms () < end)
+    poll (NULL, 0, 20);
+  XCloseDisplay (display);
+  return attributes.width == width && attributes.height == height;
+}
+
+/* Read the messages from FD until a scale message of SCALE, for at
+   most LIMIT milliseconds.  Return true if it came.  */
+static bool
+wait_for_scale (int fd, int limit, uint8_t scale)
+{
+  int64_t end = now_ms () + limit;
+  struct rd_message message;
+  int64_t left;
+  while ((left = end - now_ms ()) > 0)
+    if (read_message (fd, &message, left) == 1
+	&& message.type == RD_SCALE && message.u.scale.scale == scale)
+      return true;
+  return false;
+}
 
 /* The places example.  */
 static bool

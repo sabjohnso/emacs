@@ -303,8 +303,10 @@ watch_pair (const struct relay *relay, struct pollfd *fds)
 
 /* Move the bytes of the pair of RELAY after the events of FDS.  Close
    the pair when the client or the session closes its connection.  A
-   direction reads only when it has no bytes, so the bytes that are
-   left go to a peer that has closed.  Return false when the relay
+   direction reads only when it has no bytes.  A direction toward a
+   socket peer that closed drops its bytes (drain_flow), so the other
+   direction still gives the last bytes of that peer, and then its
+   end closes the pair.  Return false when the relay
    must stop: after a close, if the session socket did not exist
    before the close.  A session that ends removes its socket before it
    closes the connection of its client.  */
@@ -532,16 +534,20 @@ fill_flow (struct rc_flow *flow, struct rc_stream *from)
 }
 
 /* Write the bytes of FLOW to the stream TO, as many as it takes now.
-   Return false when TO fails.  */
+   Return false when TO fails.  When TO closed its connection, drop the
+   bytes, and return true: the bytes that TO sent before its close go
+   on in the other direction, and the read of TO gives the end.  */
 static bool
 drain_flow (struct rc_flow *flow, struct rc_stream *to)
 {
   size_t size;
   const unsigned char *bytes = rc_flow_bytes (flow, &size);
   ptrdiff_t count = rc_stream_write (to, bytes, size);
+  if (count == RC_STREAM_CLOSED)
+    count = size;
   if (count > 0)
     rc_flow_drain (flow, count);
-  return count != RC_STREAM_FAIL;
+  return count >= 0 || count == RC_STREAM_WAIT;
 }
 
 /* Return true if PATH is a socket.  */

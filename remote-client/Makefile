@@ -62,7 +62,7 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
   test-fontstore test-rdchunk test-rdpng \
   test-images test-stack test-compose \
-  test-menu test-rdscrollbar test-scale
+  test-menu test-rdscrollbar test-scale test-stream
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -98,6 +98,7 @@ check: remote-client $(TESTS)
 	./test-flow
 	./test-pending
 	./test-unixsocket
+	./test-stream
 	./test-sshargs
 	./test-tls
 	./test-listenspec
@@ -188,6 +189,9 @@ test-pending: test-pending.o pending.o token.o
 test-unixsocket: test-unixsocket.o unixsocket.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
+test-stream: test-stream.o stream.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
 test-sshargs: test-sshargs.o sshargs.o listenspec.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
@@ -276,7 +280,7 @@ bootstrap.o client.o: bootstrap.h relayline.h token.h listenspec.h sshconfig.h
 direct.o client.o: direct.h relayline.h token.h stream.h
 clock.o relay.o bootstrap.o: clock.h
 child.o bootstrap.o: child.h
-stream.o relay.o client.o direct.o test-ssh.o: stream.h
+stream.o relay.o client.o direct.o test-ssh.o test-stream.o: stream.h
 stream.o tls.o: streamclass.h
 tls.o test-tls.o test-relay.o test-ssh.o relay.o direct.o: tls.h pin.h stream.h
 test-ssh.o: relayline.h token.h ../src/rdproto.h

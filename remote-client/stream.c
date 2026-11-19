@@ -90,19 +90,28 @@ rc_stream_close (struct rc_stream *stream)
     stream->class->close (stream);
 }
 
-/* The read function of a socket stream.  */
+/* The read function of a socket stream.  A peer that closed while
+   bytes that it did not read waited gives ECONNRESET after its last
+   bytes.  That is the end of the stream, as a write gives
+   RC_STREAM_CLOSED for it.  */
 static ptrdiff_t
 read_socket (struct rc_stream *stream, void *bytes, size_t size)
 {
-  return socket_result (read (stream->fd, bytes, size));
+  ssize_t count = read (stream->fd, bytes, size);
+  if (count < 0 && errno == ECONNRESET)
+    return 0;
+  return socket_result (count);
 }
 
 /* The write function of a socket stream.  A peer that has closed the
-   socket gives an error, and no signal.  */
+   socket gives RC_STREAM_CLOSED, and no signal.  */
 static ptrdiff_t
 write_socket (struct rc_stream *stream, const void *bytes, size_t size)
 {
-  return socket_result (send (stream->fd, bytes, size, MSG_NOSIGNAL));
+  ssize_t count = send (stream->fd, bytes, size, MSG_NOSIGNAL);
+  if (count < 0 && (errno == EPIPE || errno == ECONNRESET))
+    return RC_STREAM_CLOSED;
+  return socket_result (count);
 }
 
 /* The events function of a socket stream: the socket waits for the

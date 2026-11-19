@@ -54,6 +54,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      relay closes the old client and its connection to the session.
    - Session end: when the session closes the connection, the relay
      closes the client.
+   - Closed session: the client sends bytes until the session takes no
+     more.  Then the session sends its last bytes, and closes the
+     connection with the bytes of the client unread.  The client still
+     gets the last bytes of the session, and then the end.
    - Gone: when the session removes its socket and then closes the
      connection, as a session does when it ends, the relay exits.
    - End: when the relay cannot connect to the session, it closes the
@@ -159,6 +163,9 @@ static bool abandon_example (void);
 static bool overflow_example (void);
 static bool replace_example (void);
 static bool session_end_example (void);
+static bool closed_session_example (void);
+static bool fill_toward_session (struct rc_stream *);
+static bool reads_then_end (struct rc_stream *, const char *, size_t);
 static bool gone_example (void);
 static bool end_example (void);
 static bool loopback_example (void);
@@ -219,6 +226,7 @@ static const struct
     { "overflow", overflow_example },
     { "replace", replace_example },
     { "session end", session_end_example },
+    { "closed session", closed_session_example },
     { "gone", gone_example },
     { "end", end_example },
     { "loopback", loopback_example },
@@ -466,6 +474,72 @@ session_end_example (void)
   bool ok = client && session >= 0 && stream_closed_p (client, LIMIT);
   rc_stream_close (client);
   return stop_run (&run) && ok;
+}
+
+static bool
+closed_session_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  static const char last[] = "the last bytes of the session";
+  struct rc_stream *client = connect_client (&run, true);
+  int session = accept_session (&run, LIMIT);
+  bool ok = (client && session >= 0 && fill_toward_session (client)
+	     && write (session, last, sizeof last) == sizeof last);
+  if (session >= 0)
+    close (session);
+  ok = ok && reads_then_end (client, last, sizeof last);
+  rc_stream_close (client);
+  return stop_run (&run) && ok;
+}
+
+/* Write bytes to CLIENT until the relay takes no more for QUIET
+   milliseconds, because the session reads nothing.  Return false
+   after an error, or if the relay still takes bytes after LIMIT.  */
+static bool
+fill_toward_session (struct rc_stream *client)
+{
+  static const unsigned char bytes[4096];
+  int64_t start = now_ms ();
+  while (now_ms () - start < 4 * LIMIT)
+    {
+      ptrdiff_t count = rc_stream_write (client, bytes, sizeof bytes);
+      if (count == RC_STREAM_FAIL)
+	return false;
+      struct pollfd ready = { rc_stream_fd (client),
+			      rc_stream_events (client, POLLOUT), 0 };
+      if (count == RC_STREAM_WAIT && poll (&ready, 1, QUIET) == 0)
+	return true;
+    }
+  return false;
+}
+
+/* Return true if the next bytes of CLIENT are the SIZE bytes EXPECTED,
+   and then the stream ends.  Wait at most LIMIT for each.  */
+static bool
+reads_then_end (struct rc_stream *client, const char *expected, size_t size)
+{
+  char got[256];
+  size_t have = 0;
+  int64_t start = now_ms ();
+  while (have < size && have < sizeof got && now_ms () - start < LIMIT)
+    {
+      ptrdiff_t count = rc_stream_read (client, got + have,
+					sizeof got - have);
+      if (count == 0 || count == RC_STREAM_FAIL)
+	return false;
+      if (count > 0)
+	have += count;
+      else
+	{
+	  struct pollfd ready = { rc_stream_fd (client),
+				  rc_stream_events (client, POLLIN), 0 };
+	  poll (&ready, 1, LIMIT);
+	}
+    }
+  return (have == size && memcmp (got, expected, size) == 0
+	  && stream_closed_p (client, LIMIT));
 }
 
 static bool
