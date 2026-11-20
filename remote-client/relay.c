@@ -86,11 +86,6 @@ enum daemon
    takes them.  */
 enum { BACKLOG = 16 };
 
-/* The longest time of a refusal: the relay sends the end of the
-   session to the client, and waits for the close of the client, for at
-   most this number of milliseconds.  */
-enum { END_LIMIT = 1000 };
-
 /* The positions of the descriptors in the array of poll.  */
 enum
   {
@@ -570,7 +565,7 @@ refuse_client (struct relay *relay, struct rc_stream *client)
   rc_flow_fill (&relay->bye,
 		rd_encode_end_session (RD_END_NO_SESSION, space, size));
   relay->refused = client;
-  relay->bye_deadline = rc_now_ms () + END_LIMIT;
+  relay->bye_deadline = rc_now_ms () + RC_RELAY_END_LIMIT;
   relay->stopping = true;
 }
 

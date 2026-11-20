@@ -45,6 +45,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 struct rc_listen_spec;
 
+/* The longest time of a refusal: the relay sends the end of the
+   session to the client, and waits for the close of the client, for at
+   most this number of milliseconds.  */
+enum { RC_RELAY_END_LIMIT = 1000 };
+
 /* Run the relay of the session socket SESSION at the place of SPEC.
    Return the exit status of the program.  The process that returns is
    not the process that called this function: the relay starts a new

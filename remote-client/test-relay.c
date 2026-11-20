@@ -90,6 +90,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      MODEL_TRIALS.  Each run also has the trial of the seed
      11294005353004319, which found a defect.  A failed trial writes
      its seed, and "test-relay SEED" runs that trial only.
+   - Sequence: the steps of a trial depend on its seed alone: two
+     sequences of one seed are the same.  Each step can come in the
+     state of the model before it, a refusal lasts at most
+     MODEL_REFUSAL_STEPS steps, and a sequence ends when the model
+     stops, or with no refused client and no waiting client.  This
+     example needs no relay.
    - Loopback: the relay refuses connections to an address that is
      not the loopback address.
    - Default: with no --listen, the port of the relay is in the
@@ -200,6 +206,8 @@ static bool end_example (void);
 static bool refuse_two_example (void);
 static bool pending_refusal_example (void);
 static bool model_example (void);
+static bool sequence_example (void);
+static bool sequence_law (uint64_t);
 static bool model_trial (uint64_t);
 static bool parse_seed (const char *, uint64_t *);
 static bool return_example (void);
@@ -271,6 +279,7 @@ static const struct
     { "return", return_example },
     { "pending refusal", pending_refusal_example },
     { "model", model_example },
+    { "sequence", sequence_example },
     { "loopback", loopback_example },
     { "default", default_example },
     { "range", range_example },
@@ -714,14 +723,21 @@ enum { MODEL_TRIALS = 50, MODEL_PARALLEL = 8,
        MODEL_MIN_STEPS = 2, MODEL_STEPS = 12 };
 static const uint64_t MODEL_SEED = 11294005353004319u;
 
-/* The longest time of a refusal, in milliseconds, after which a trial
-   makes no more random steps.  The relay closes a refused client after
-   END_LIMIT (1000) milliseconds of relay.c, and the model has no
-   clock.  */
-enum { MODEL_REFUSAL_MARGIN = 600 };
+/* The relay closes a refused client after RC_RELAY_END_LIMIT
+   milliseconds, and the model has no clock.  So a sequence closes a
+   refused client after MODEL_REFUSAL_STEPS steps.  MODEL_STEP_TIME is
+   the longest time of a step that a trial expects, in milliseconds,
+   and the refusal then ends before half of the limit.  */
+enum { MODEL_STEP_TIME = 100,
+       MODEL_REFUSAL_STEPS = RC_RELAY_END_LIMIT / (2 * MODEL_STEP_TIME) };
+
+/* The most steps of a sequence: the random steps, the steps of the end,
+   and the closes of old refusals.  */
+enum { MODEL_SEQUENCE_SIZE = 64 };
 
 static bool model_trial_count (int *);
 static bool run_trials (const uint64_t *, int);
+static void reap_all (int);
 
 static bool
 model_example (void)
@@ -782,13 +798,24 @@ run_trials (const uint64_t *seeds, int count)
 	  if (pid == 0)
 	    _exit (model_trial (seeds[next]) ? 0 : 1);
 	  if (pid < 0)
-	    return false;
+	    {
+	      perror ("test-relay: fork");
+	      reap_all (nrunning);
+	      return false;
+	    }
 	  running[nrunning].pid = pid;
 	  running[nrunning++].seed = seeds[next++];
 	  continue;
 	}
       int status;
       pid_t pid = wait (&status);
+      if (pid < 0 && errno == EINTR)
+	continue;
+      if (pid < 0)
+	{
+	  perror ("test-relay: wait");
+	  return false;
+	}
       for (int i = 0; i < nrunning; i++)
 	if (running[i].pid == pid)
 	  {
@@ -803,6 +830,17 @@ run_trials (const uint64_t *seeds, int count)
 	  }
     }
   return ok;
+}
+
+/* Wait for COUNT child processes.  */
+static void
+reap_all (int count)
+{
+  while (count > 0)
+    if (wait (NULL) >= 0)
+      count--;
+    else if (errno != EINTR)
+      return;
 }
 
 /* Put the number TEXT in *SEED.  Return false if TEXT is not a
@@ -845,19 +883,24 @@ struct model
   int waiting;
 };
 
+/* The steps of a trial, in order.  */
+struct sequence
+{
+  enum model_step steps[MODEL_SEQUENCE_SIZE];
+  int count;
+};
+
 /* The real side of a trial: the run, the client and the session side
-   of the working pair, and the refused client.  REFUSED_AT is the time
-   of rc_now_ms when the refusal of REFUSED started.  OLD holds the
-   refused clients that the relay replaced, and WAITING the clients
-   with no token, the oldest first.  */
+   of the working pair, and the refused client.  OLD holds the refused
+   clients that the relay replaced, and WAITING the clients with no
+   token, the oldest first.  */
 struct real
 {
   struct run run;
   struct rc_stream *pair_client;
   int pair_session;
   struct rc_stream *refused;
-  int64_t refused_at;
-  struct rc_stream *old[MODEL_STEPS + RC_PENDING_SIZE];
+  struct rc_stream *old[MODEL_SEQUENCE_SIZE];
   int nold;
   struct rc_stream *waiting[RC_PENDING_SIZE];
   int nwaiting;
@@ -871,6 +914,10 @@ struct observation
   bool got_end, pair_works;
 };
 
+static struct sequence model_sequence (uint64_t);
+static enum model_step next_step (const struct model *, uint64_t *, int,
+				  bool);
+static bool new_refusal_p (const struct model *, enum model_step);
 static enum model_step random_step (const struct model *, uint64_t *);
 static bool model_step_valid_p (const struct model *, enum model_step);
 static void model_apply (struct model *, enum model_step);
@@ -878,35 +925,30 @@ static void model_connect (struct model *);
 static enum model_step final_step (const struct model *);
 static bool real_apply (struct real *, enum model_step);
 static bool real_connect (struct real *, struct rc_stream *);
-static bool refusal_young_p (const struct real *);
+static bool relay_runs_p (const struct run *);
 static struct observation observe_real (struct real *, bool);
 static bool pair_works_p (struct real *);
 static bool agrees_p (const struct model *, const struct observation *);
 static void close_real (struct real *);
 static uint64_t next_random (uint64_t *);
 
-/* Run the trial of SEED.  Return true if the relay agrees with the
-   model after each step and at the end.  HEARD is true after the
-   refused client got the end-session message, so the trial reads the
-   message only one time.  */
+/* Run the trial of SEED: the steps of model_sequence (SEED).  Return
+   true if the relay agrees with the model after each step and at the
+   end.  HEARD is true after the refused client got the end-session
+   message, so the trial reads the message only one time.  At the end,
+   the relay exits if the model stops, and else it still runs.  */
 static bool
 model_trial (uint64_t seed)
 {
-  uint64_t state = seed;
+  struct sequence sequence = model_sequence (seed);
   struct model model = { .up = true };
   struct real real = { .pair_session = -1 };
   if (!start_run (&real.run))
     return false;
   bool ok = true, heard = false;
-  int steps = (MODEL_MIN_STEPS
-	       + next_random (&state) % (MODEL_STEPS - MODEL_MIN_STEPS + 1));
-  for (int i = 0; ok && !model.exited; i++)
+  for (int i = 0; ok && i < sequence.count; i++)
     {
-      bool random = i < steps && refusal_young_p (&real);
-      enum model_step step = (random ? random_step (&model, &state)
-			      : final_step (&model));
-      if (step == STEP_COUNT)
-	break;
+      enum model_step step = sequence.steps[i];
       struct rc_stream *refused = real.refused;
       model_apply (&model, step);
       ok = real_apply (&real, step);
@@ -917,9 +959,57 @@ model_trial (uint64_t seed)
       ok = ok && agrees_p (&model, &seen);
     }
   ok = ok && (model.exited ? refuses_p (&real.run)
-	      : (poll (NULL, 0, QUIET), pair_works_p (&real) == model.pair));
+	      : (poll (NULL, 0, QUIET), relay_runs_p (&real.run)
+		 && pair_works_p (&real) == model.pair));
   close_real (&real);
   return stop_run (&real.run) && ok;
+}
+
+/* Return the steps of the trial of SEED.  They depend on SEED alone:
+   the generator of SEED gives the number of random steps and each
+   random step, and the model gives the steps of the end.  A refused
+   client closes after MODEL_REFUSAL_STEPS steps.  */
+static struct sequence
+model_sequence (uint64_t seed)
+{
+  uint64_t state = seed;
+  struct model model = { .up = true };
+  struct sequence sequence = { .count = 0 };
+  int random = (MODEL_MIN_STEPS
+		+ next_random (&state) % (MODEL_STEPS - MODEL_MIN_STEPS + 1));
+  int age = 0;
+  while (!model.exited && sequence.count < MODEL_SEQUENCE_SIZE)
+    {
+      enum model_step step = next_step (&model, &state, age,
+					sequence.count < random);
+      if (step == STEP_COUNT)
+	break;
+      age = new_refusal_p (&model, step) ? 0 : age + 1;
+      model_apply (&model, step);
+      sequence.steps[sequence.count++] = step;
+    }
+  return sequence;
+}
+
+/* Return the next step in the state MODEL.  AGE is the number of steps
+   since the last refusal started.  Close a refused client
+   when AGE reaches MODEL_REFUSAL_STEPS.  Else take a random step from the generator
+   with the state STATE if RANDOM, or the next step of the end.  */
+static enum model_step
+next_step (const struct model *model, uint64_t *state, int age,
+	   bool random)
+{
+  if (model->refused && age >= MODEL_REFUSAL_STEPS)
+    return STEP_CLOSE_REFUSED;
+  return random ? random_step (model, state) : final_step (model);
+}
+
+/* Return true if STEP in the state MODEL starts a refusal: a client
+   sends its token while the session is down.  */
+static bool
+new_refusal_p (const struct model *model, enum model_step step)
+{
+  return (!model->up && (step == STEP_CONNECT || step == STEP_TOKEN));
 }
 
 /* Return a random step that can come in the state MODEL.  */
@@ -1095,7 +1185,6 @@ real_connect (struct real *real, struct rc_stream *client)
       if (real->refused)
 	real->old[real->nold++] = real->refused;
       real->refused = client;
-      real->refused_at = now_ms ();
       return true;
     }
   rc_stream_close (real->pair_client);
@@ -1106,13 +1195,16 @@ real_connect (struct real *real, struct rc_stream *client)
   return real->pair_session >= 0;
 }
 
-/* Return true if REAL has no refused client, or if its refusal is
-   younger than MODEL_REFUSAL_MARGIN milliseconds.  */
+/* Return true if the relay of RUN still runs: its port takes a
+   connection.  */
 static bool
-refusal_young_p (const struct real *real)
+relay_runs_p (const struct run *run)
 {
-  return (!real->refused
-	  || now_ms () - real->refused_at < MODEL_REFUSAL_MARGIN);
+  int fd = connect_run (run);
+  if (fd < 0)
+    return false;
+  close (fd);
+  return true;
 }
 
 /* Return what REAL shows now.  HEARD is true if the refused client got
@@ -1168,6 +1260,48 @@ close_real (struct real *real)
     rc_stream_close (real->waiting[i]);
   if (real->pair_session >= 0)
     close (real->pair_session);
+}
+
+/* The sequence example: the law of the sequences for SEQUENCE_SEEDS
+   seeds.  */
+enum { SEQUENCE_SEEDS = 10000 };
+
+static bool
+sequence_example (void)
+{
+  uint64_t base = ((uint64_t) time (NULL) << 20 ^ getpid ()) * SEQUENCE_SEEDS;
+  if (!sequence_law (MODEL_SEED))
+    return false;
+  for (int i = 0; i < SEQUENCE_SEEDS; i++)
+    if (!sequence_law (base + i))
+      {
+	fprintf (stderr, "test-relay: the sequence law fails with seed %llu\n",
+		 (unsigned long long) (base + i));
+	return false;
+      }
+  return true;
+}
+
+/* Return true if the law of the sequence example holds for SEED.  */
+static bool
+sequence_law (uint64_t seed)
+{
+  struct sequence first = model_sequence (seed);
+  struct sequence second = model_sequence (seed);
+  if (memcmp (&first, &second, sizeof first) != 0)
+    return false;
+  struct model model = { .up = true };
+  int age = 0;
+  for (int i = 0; i < first.count; i++)
+    {
+      enum model_step step = first.steps[i];
+      if (!model_step_valid_p (&model, step) || model.exited
+	  || (model.refused && age > MODEL_REFUSAL_STEPS))
+	return false;
+      age = new_refusal_p (&model, step) ? 0 : age + 1;
+      model_apply (&model, step);
+    }
+  return model.exited || (!model.refused && model.waiting == 0);
 }
 
 /* Return the next number of the generator with the state STATE
