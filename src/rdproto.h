@@ -98,7 +98,8 @@ enum rd_cursor_kind
   RD_IMAGE_MESSAGES (MESSAGE)						\
   RD_CHILD_FRAME_MESSAGES (MESSAGE)					\
   RD_MENU_MESSAGES (MESSAGE)						\
-  RD_SCALE_MESSAGES (MESSAGE)
+  RD_SCALE_MESSAGES (MESSAGE)						\
+  RD_SESSION_MESSAGES (MESSAGE)
 
 /* The messages of the base protocol.  */
 #define RD_BASE_MESSAGES(MESSAGE)					\
@@ -516,6 +517,30 @@ enum { RD_MAX_SCALE = 8 };
    of 0 or more than RD_MAX_SCALE.  */
 #define RD_SCALE_FIELDS(FIELD, ARRAY, M)				\
   FIELD (M, uint8, scale)
+
+/* The messages of the end of a session.  When a session ends, the
+   server sends this message, and then closes the connection.  Thus the
+   client can tell the end of the session from the loss of the
+   connection.  The relay of remote-client also sends it when the
+   session does not exist.  */
+#define RD_SESSION_MESSAGES(MESSAGE)					\
+  MESSAGE (END_SESSION, end_session, RD_END_SESSION_FIELDS)
+
+/* The reasons of an end-session message.  A client takes a reason
+   that it does not know as RD_END_NO_SESSION.  */
+enum rd_end_reason
+  {
+    /* The session ended on purpose.  */
+    RD_END_CLOSED = 0,
+    /* The session does not exist, for example because Emacs stopped.  */
+    RD_END_NO_SESSION = 1,
+  };
+
+/* A server message: the session ended for the reason REASON, an enum
+   rd_end_reason value.  The client closes its windows, and does not
+   connect again.  The connection closes after this message.  */
+#define RD_END_SESSION_FIELDS(FIELD, ARRAY, M)				\
+  FIELD (M, uint8, reason)
 
 /* The chunked message types (rdchunk.h).  A row is CHUNKED (ENUM,
    NAME, SERIAL): the type RD_ENUM, and the member NAME of the union of

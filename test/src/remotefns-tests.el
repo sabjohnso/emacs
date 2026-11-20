@@ -183,6 +183,16 @@
 ;;     logical pixel of the desktop.  S is an integer.  The server
 ;;     uses only an S from 1 to `remote-display--max-scale'.
 ;;
+;; The message of the session block (Session end).  The server, or
+;; the relay of remote-client, sends this message to the client:
+;;
+;; (end-session :reason R)
+;;     The session ended, and the connection closes after this
+;;     message.  The client closes its windows, and does not connect
+;;     again.  R is 0 when the session ended on purpose, and 1 when the
+;;     session does not exist.  The client exits with the status 0 for
+;;     R 0, and with the status 1 for each other R.
+;;
 ;; Each X, Y, CX, CY, TX, and TY is a signed 32-bit integer.  Each W, H,
 ;; CW, and CH is an unsigned 32-bit integer, but W of `draw-fringe' has
 ;; 16 bits, because a row of a fringe bitmap has 16 bits.  Each color
@@ -266,12 +276,18 @@ feature-menus).")
   "The message types of the scale block, each with its generator.
 The block is for the feature HiDPI scale.")
 
+(defconst remotefns-tests--session-generators
+  '((end-session . remotefns-tests--end-session))
+  "The message types of the session block, each with its generator.
+The block is for the feature Session end.")
+
 (defconst remotefns-tests--generators
   (append remotefns-tests--base-generators
           remotefns-tests--image-generators
           remotefns-tests--child-frame-generators
           remotefns-tests--menu-generators
-          remotefns-tests--scale-generators)
+          remotefns-tests--scale-generators
+          remotefns-tests--session-generators)
   "The message types, each with the function that generates a message.
 The blocks come in the order of the blocks of RD_MESSAGES in
 src/rdproto.h.")
@@ -495,6 +511,10 @@ src/rdproto.h.")
 (defun remotefns-tests--scale ()
   "Return a random `scale' message."
   (list 'scale :scale (rd-gen-integer 0 255)))
+
+(defun remotefns-tests--end-session ()
+  "Return a random `end-session' message."
+  (list 'end-session :reason (rd-gen-integer 0 255)))
 
 (ert-deftest remotefns-tests-each-type-has-generator ()
   "Each message type of the codec has a generator."
@@ -946,6 +966,20 @@ The label and the title have SIZE bytes, and the key is empty."
                  '(scale :scale 255)))
   (should-error (remote-display--encode '(scale :scale 256))
                 :type 'args-out-of-range))
+
+(ert-deftest remotefns-tests-end-session-wire-format ()
+  (skip-unless (featurep 'remote-display))
+  ;; Length 2, the type, reason 1.
+  (should (equal (remote-display--encode '(end-session :reason 1))
+                 (unibyte-string 0 0 0 2
+                                 (remotefns-tests--type-byte 'end-session)
+                                 1))))
+
+(ert-deftest remotefns-tests-end-session-is-last-type ()
+  "The session block is the last block, so no type number changes."
+  (skip-unless (featurep 'remote-display))
+  (should (= (remotefns-tests--type-byte 'end-session)
+             (1+ (remotefns-tests--type-byte 'scale)))))
 
 (ert-deftest remotefns-tests-font-chunk-limits ()
   "A font-data message has at most `remote-display--max-font-chunk' bytes."
