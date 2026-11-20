@@ -474,6 +474,18 @@
 ;; 115. Client no query: Emacs does not ask about the connection of a
 ;;      client when it exits.  Each connection that a session attaches
 ;;      has no query flag, so a quit of Emacs does not ask about it.
+;; 116. End message: when a session ends, by a delete of its last
+;;      frame, of its terminal, or by `x-close-connection', its client
+;;      gets the message (end-session :reason 0) as its last message,
+;;      and then the connection closes.  The socket is gone before the
+;;      close.
+;; 117. Quit end: the function `remote-display--end-all-sessions' is in
+;;      `kill-emacs-hook'.  The client of each session gets the message
+;;      (end-session :reason 0) as its last message, and then its
+;;      connection closes.  The socket of each session is gone.  The
+;;      sessions share one deadline: with clients that read nothing,
+;;      the function returns before 1.5 times
+;;      `remote-display--end-limit' seconds.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -9687,6 +9699,193 @@ connection of its client."
                 (accept-process-output nil 0.05)))
             (list (process-status (car connection)) socket-at-close))
         (delete-process (car connection))))))
+
+(defconst remoteterm-tests--endings
+  (append (cl-loop for ending in '(last-frame delete-terminal)
+                   append (cl-loop for frames from 1 to 3
+                                   collect (list ending frames)))
+          '((close 0)))
+  "Each way to end a session, with a number of frames.
+A delete of each frame and a delete of the terminal have 1 to 3
+frames.  `x-close-connection' needs a session with no frame.")
+
+(ert-deftest remoteterm-tests-end-message ()
+  "When a session ends, its client gets an end-session message (law 116).
+The message is the last message before the close, so the client can
+tell the end of the session from the loss of the connection.  Each run
+checks each ending of `remoteterm-tests--endings'."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (should (equal (remoteterm-tests--daemon-call
+                    'remoteterm-tests--each-ending-case)
+                   (mapcar (lambda (case)
+                             (cons case '(closed (end-session :reason 0) nil)))
+                           remoteterm-tests--endings)))))
+
+(defun remoteterm-tests--each-ending-case ()
+  "Return (CASE . RESULT) for each case of `remoteterm-tests--endings'.
+RESULT is the value of `remoteterm-tests--end-message-case'."
+  (mapcar (lambda (case)
+            (cons case (apply #'remoteterm-tests--end-message-case case)))
+          remoteterm-tests--endings))
+
+(defun remoteterm-tests--end-message-case (ending frames)
+  "End a session with FRAMES frames and a client in the way ENDING.
+ENDING is `last-frame' (delete each frame), `delete-terminal', or
+`close' (`x-close-connection').  Return (STATUS LAST SOCKET): STATUS
+is the status of the client side of the connection after the end, or
+after 10 seconds.  LAST is the last message that the client got.
+SOCKET is non-nil if the socket existed when the session deleted the
+connection of its client."
+  (remoteterm-tests--with-display "remote-end"
+    (let* ((socket (remote-display-listen "remote-end"))
+           (made (cl-loop repeat frames
+                          collect (remoteterm-tests--make-frame "remote-end"
+                                                                nil)))
+           (connection (remoteterm-tests--connect socket))
+           (socket-at-close 'not-closed))
+      (unwind-protect
+          (progn
+            (remoteterm-tests--reset-and-ping connection 7)
+            (remoteterm-tests--pong-of (car connection) (cdr connection))
+            (let ((client (remote-display-client "remote-end")))
+              (cl-letf* ((delete (symbol-function 'delete-process))
+                         ((symbol-function 'delete-process)
+                          (lambda (&optional process)
+                            (when (eq process client)
+                              (setq socket-at-close (file-exists-p socket)))
+                            (funcall delete process))))
+                (pcase-exhaustive ending
+                  ('last-frame (mapc #'delete-frame made))
+                  ('delete-terminal
+                   (delete-terminal (remoteterm-tests--terminal "remote-end")))
+                  ('close (x-close-connection "remote-end")))))
+            (list (remoteterm-tests--wait-for-close (car connection))
+                  (remoteterm-tests--last-message (cdr connection))
+                  socket-at-close))
+        (delete-process (car connection))
+        (mapc (lambda (frame)
+                (when (frame-live-p frame)
+                  (delete-frame frame)))
+              made)))))
+
+(defun remoteterm-tests--wait-for-close (process)
+  "Wait at most 10 seconds until PROCESS is not open, and return its status."
+  (with-timeout (10)
+    (while (eq (process-status process) 'open)
+      (accept-process-output nil 0.05)))
+  (process-status process))
+
+(defun remoteterm-tests--last-message (received)
+  "Return the last complete message in RECEIVED, or nil.
+RECEIVED is a list whose car has the strings that a process got, the
+newest first."
+  (car (last (car (remoteterm-tests--complete-messages
+                   (apply #'concat (reverse (car received))))))))
+
+(declare-function remote-display--end-all-sessions "remote-win" ())
+
+(rd-daemon-deftest remoteterm-tests-quit-ends-sessions
+  "Law 117: a quit of Emacs ends the client of each session.
+The function of `kill-emacs-hook' sends an end-session message to each
+client before it closes the connection, and removes each socket."
+  (should (memq 'remote-display--end-all-sessions kill-emacs-hook))
+  (let ((rd-gen-trials 5))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 1 3))
+     (lambda (count)
+       (should (equal (remoteterm-tests--quit-end-case count)
+                      (make-list count
+                                 '(closed (end-session :reason 0) nil))))))))
+
+(defvar remote-display--end-limit)
+
+(ert-deftest remoteterm-tests-quit-one-deadline ()
+  "The sessions of a quit share one deadline (law 117).
+Two clients read nothing, and each session has more bytes for its
+client than the socket takes.  Then the function of `kill-emacs-hook'
+waits for the clients, but returns before 1.5 times
+`remote-display--end-limit' seconds.  It waits at least half of the
+limit, so the clients did not get all the bytes."
+  (skip-unless (featurep 'remote-test))
+  (rd-with-daemon
+    (pcase-let ((`(,elapsed ,limit)
+                 (remoteterm-tests--daemon-call
+                  'remoteterm-tests--quit-deadline-two-case)))
+      (should (>= elapsed (* 0.5 limit)))
+      (should (< elapsed (* 1.5 limit))))))
+
+(defun remoteterm-tests--quit-deadline-two-case ()
+  "Return (ELAPSED LIMIT) for two clients that read nothing.
+ELAPSED is the value of `remoteterm-tests--quit-deadline-case', and
+LIMIT is `remote-display--end-limit'."
+  (list (remoteterm-tests--quit-deadline-case 2) remote-display--end-limit))
+
+(defun remoteterm-tests--quit-deadline-case (count)
+  "Run the function of `kill-emacs-hook' with COUNT clients that read nothing.
+Before the function, each session has a large clipboard text for its
+client, so the socket and the queue of the connection are full.
+Return the time of the function in seconds."
+  (let* ((displays (cl-loop for i from 1 to count
+                            collect (format "remote-stuck-%d" i)))
+         (sockets (mapcar (lambda (display)
+                            (x-open-connection display)
+                            (remote-display-listen display))
+                          displays))
+         (frames (mapcar (lambda (display)
+                           (remoteterm-tests--make-frame display nil))
+                         displays))
+         (connections (mapcar #'remoteterm-tests--connect sockets)))
+    (unwind-protect
+        (progn
+          (cl-loop for connection in connections for serial from 1 do
+                   (remoteterm-tests--reset-and-ping connection serial)
+                   (remoteterm-tests--pong-of (car connection)
+                                              (cdr connection))
+                   (stop-process (car connection)))
+          (dolist (display displays)
+            (remote-display--send-clipboard display
+                                            (make-string (* 4 1024 1024) ?x)))
+          (accept-process-output nil 0.5)
+          (let ((start (float-time)))
+            (remote-display--end-all-sessions)
+            (- (float-time) start)))
+      (dolist (connection connections)
+        (delete-process (car connection)))
+      (mapc #'delete-frame frames))))
+
+(defun remoteterm-tests--quit-end-case (count)
+  "Run the function of `kill-emacs-hook' with COUNT sessions and clients.
+Each session has a frame.  Return (STATUS LAST SOCKET) for each
+session: STATUS is the status of the client side of the connection,
+LAST is the last message that the client got, and SOCKET is non-nil if
+the socket exists after the function."
+  (let* ((displays (cl-loop for i from 1 to count
+                            collect (format "remote-quit-%d" i)))
+         (sockets (mapcar (lambda (display)
+                            (x-open-connection display)
+                            (remote-display-listen display))
+                          displays))
+         (frames (mapcar (lambda (display)
+                           (remoteterm-tests--make-frame display nil))
+                         displays))
+         (connections (mapcar #'remoteterm-tests--connect sockets)))
+    (unwind-protect
+        (progn
+          (cl-loop for connection in connections for serial from 1 do
+                   (remoteterm-tests--reset-and-ping connection serial)
+                   (remoteterm-tests--pong-of (car connection)
+                                              (cdr connection)))
+          (remote-display--end-all-sessions)
+          (cl-mapcar (lambda (connection socket)
+                       (list (remoteterm-tests--wait-for-close
+                              (car connection))
+                             (remoteterm-tests--last-message (cdr connection))
+                             (file-exists-p socket)))
+                     connections sockets))
+      (dolist (connection connections)
+        (delete-process (car connection)))
+      (mapc #'delete-frame frames))))
 
 (ert-deftest remoteterm-tests-listen-kill-emacs ()
   "When Emacs exits, the socket of each session and its directory go away."

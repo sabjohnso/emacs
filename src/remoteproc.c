@@ -29,7 +29,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
    The client sends its input messages on the same connection.  The
    filter of the process, remote-display--receive, decodes them, and
-   gives each one to remoteinput.c.  */
+   gives each one to remoteinput.c.
+
+   When sessions end on purpose, remote-win.el ends their clients in
+   three steps: remote-display--queue-end puts the end-session message
+   in the queue of each client, remote-display--drain waits for all the
+   queues with one deadline, and then each connection closes.  Thus
+   each client gets the end before the close, and the knowledge that
+   the session ended.  */
 
 #include <config.h>
 
@@ -38,6 +45,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "lisp.h"
 #include "process.h"
+#include "sysselect.h"
+#include "systime.h"
 #include "rdproto.h"
 #include "remoteinput.h"
 #include "remoteterm.h"
@@ -81,6 +90,9 @@ static void remote_connection_receive (struct remote_connection *,
 				       const unsigned char *, ptrdiff_t);
 static void remote_connection_pong (struct remote_connection *,
 				    const struct rd_ping *);
+static void remote_connection_put (struct remote_connection *,
+				   const struct rd_message *);
+static int remote_drain_set (Lisp_Object, fd_set *);
 static void remote_input_add (struct remote_input *, const unsigned char *,
 			      ptrdiff_t);
 static bool remote_input_next (struct remote_input *, struct rd_message *);
@@ -144,6 +156,50 @@ DISPLAY.  */)
     = remote_sink_data (check_x_display_info (display),
 			&remote_connection_ops);
   return connection ? connection->process : Qnil;
+}
+
+DEFUN ("remote-display--queue-end", Fremote_display__queue_end,
+       Sremote_display__queue_end, 1, 1, 0,
+       doc: /* Put the end of the session DISPLAY in the queue of its client.
+The client gets an end-session message after all the messages before
+it.  The connection sends the bytes that it can take now, and keeps
+the others in its queue: see `remote-display--drain'.  Return the
+network connection of the client, or nil if DISPLAY has no client.  */)
+  (Lisp_Object display)
+{
+  struct remote_connection *connection
+    = remote_sink_data (check_x_display_info (display),
+			&remote_connection_ops);
+  if (!connection)
+    return Qnil;
+  struct rd_message end = rd_end_session_message (RD_END_CLOSED);
+  remote_connection_put (connection, &end);
+  remote_connection_send (connection);
+  return connection->process;
+}
+
+DEFUN ("remote-display--drain", Fremote_display__drain,
+       Sremote_display__drain, 2, 2, 0,
+       doc: /* Wait until each client of CLIENTS sent its queue.
+CLIENTS is a list of the network connections of clients.  Wait at most
+LIMIT seconds in all, for all the clients together.  The wait runs no
+Lisp, so no input of a client changes its session.  A connection that
+closes or fails discards its queue, so the wait for it stops then.
+Return nil.  */)
+  (Lisp_Object clients, Lisp_Object limit)
+{
+  CHECK_LIST (clients);
+  struct timespec end = timespec_add (current_timespec (),
+				      dtotimespec (extract_float (limit)));
+  for (;;)
+    {
+      fd_set writable;
+      int last = remote_drain_set (clients, &writable);
+      struct timespec left = timespec_sub (end, current_timespec ());
+      if (last < 0 || timespec_sign (left) <= 0)
+	return Qnil;
+      pselect (last + 1, NULL, &writable, NULL, &left, NULL);
+    }
 }
 
 DEFUN ("remote-display--closed", Fremote_display__closed,
@@ -210,13 +266,48 @@ remote_connection_pong (struct remote_connection *connection,
 {
   struct rd_message pong = { .type = RD_PONG,
 			     .u.pong = { .serial = ping->serial } };
-  USE_SAFE_ALLOCA;
-  ptrdiff_t size = rd_encoded_size (&pong);
-  unsigned char *bytes = SAFE_ALLOCA (size);
-  rd_encode (&pong, bytes);
-  remote_connection_write (connection, bytes, size);
+  remote_connection_put (connection, &pong);
   remote_connection_send (connection);
+}
+
+/* Add MESSAGE to the queue of CONNECTION.  */
+static void
+remote_connection_put (struct remote_connection *connection,
+		       const struct rd_message *message)
+{
+  USE_SAFE_ALLOCA;
+  ptrdiff_t size = rd_encoded_size (message);
+  unsigned char *bytes = SAFE_ALLOCA (size);
+  rd_encode (message, bytes);
+  remote_connection_write (connection, bytes, size);
   SAFE_FREE ();
+}
+
+/* Send the queue of each connection of the processes CLIENTS that it
+   can take now.  Put the descriptor of each connection that still has
+   bytes in WRITABLE.  Return the largest such descriptor, or -1 if no
+   connection has bytes.  An element of CLIENTS that is not the client
+   of a session has no bytes.  */
+static int
+remote_drain_set (Lisp_Object clients, fd_set *writable)
+{
+  int last = -1;
+  FD_ZERO (writable);
+  FOR_EACH_TAIL (clients)
+    {
+      struct remote_connection *connection
+	= remote_find_connection (XCAR (clients));
+      if (!connection)
+	continue;
+      remote_connection_send (connection);
+      int fd = remote_connection_fd (connection);
+      if (fd >= 0 && remote_connection_queued (connection) > 0)
+	{
+	  FD_SET (fd, writable);
+	  last = max (last, fd);
+	}
+    }
+  return last;
 }
 
 /* Add the SIZE BYTES to INPUT, after the bytes of an unknown message
@@ -434,5 +525,7 @@ syms_of_remoteproc (void)
   defsubr (&Sremote_display_attach);
   defsubr (&Sremote_display_client);
   defsubr (&Sremote_display__receive);
+  defsubr (&Sremote_display__queue_end);
+  defsubr (&Sremote_display__drain);
   defsubr (&Sremote_display__closed);
 }

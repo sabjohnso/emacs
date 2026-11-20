@@ -60,6 +60,8 @@ DISPLAY is the name of the first session."
 
 (declare-function remote-display-attach "remoteproc.c" (display process))
 (declare-function remote-display-client "remoteproc.c" (display))
+(declare-function remote-display--queue-end "remoteproc.c" (display))
+(declare-function remote-display--drain "remoteproc.c" (clients limit))
 
 (defvar remote-display--listeners nil
   "The listeners of the sessions.
@@ -120,36 +122,66 @@ does not ask about the server when it exits."
    :log (lambda (_server connection _message)
           (remote-display-attach display connection))))
 
-(defun remote-display--close-client (terminal)
-  "Close the connection of the client of TERMINAL, if TERMINAL is a session.
-Thus the client knows that the session ended, and can stop."
-  (when (eq (terminal-live-p terminal) 'remote)
-    (let ((client (remote-display-client (terminal-name terminal))))
-      (when client
-        (delete-process client)))))
-
 (defun remote-display--end-session (terminal)
-  "Stop the listener of TERMINAL, and then close the connection of its client.
-The relay of \"remote-client --ssh\" exits when the session closes the
-connection and the socket does not exist, so the socket goes first.
-This function is in `delete-terminal-functions', so it runs for each
+  "End the session TERMINAL: stop its listener, and then end its client.
+Do nothing if TERMINAL is not a session.  The relay of
+\"remote-client --ssh\" exits when the session closes the connection
+and the socket does not exist, so the socket goes first.  This
+function is in `delete-terminal-functions', so it runs for each
 terminal."
-  (remote-display--stop-listening terminal)
-  (remote-display--close-client terminal))
+  (when (eq (terminal-live-p terminal) 'remote)
+    (remote-display--stop-listening terminal)
+    (remote-display--end-clients (list terminal))))
 
 (add-hook 'delete-terminal-functions #'remote-display--end-session)
 
+(defun remote-display--end-all-sessions ()
+  "End each session as `remote-display--end-session' does.
+`kill-emacs' does not delete the terminals, so this function is in
+`kill-emacs-hook'.  Thus the client of each session gets the end of
+the session, and each socket and its directory go away.  The clients
+share one deadline, so a quit waits at most
+`remote-display--end-limit' seconds for all of them.  An error for one
+session does not stop the others."
+  (let ((sessions (seq-filter (lambda (terminal)
+                                (eq (terminal-live-p terminal) 'remote))
+                              (terminal-list))))
+    (dolist (terminal sessions)
+      (with-demoted-errors "remote-display: %S"
+        (remote-display--stop-listening terminal)))
+    (remote-display--end-clients sessions))
+  (remote-display--stop-all-listeners))
+
+(defconst remote-display--end-limit 2
+  "The longest wait in seconds for the clients to get the end of a session.")
+
+(defun remote-display--end-clients (terminals)
+  "Send the end of the session to the client of each of TERMINALS.
+First put the end-session message in the queue of each client.  Then
+wait until each client got all its bytes, but at most
+`remote-display--end-limit' seconds for all of them.  Then close each
+connection.  Thus each client gets the end before the close, and
+knows that the session ended.  An error for one client does not stop
+the others."
+  (let ((clients (delq nil (mapcar (lambda (terminal)
+                                     (with-demoted-errors "remote-display: %S"
+                                       (remote-display--queue-end
+                                        (terminal-name terminal))))
+                                   terminals))))
+    (remote-display--drain clients remote-display--end-limit)
+    (dolist (client clients)
+      (with-demoted-errors "remote-display: %S"
+        (delete-process client)))))
+
 (defun remote-display--stop-all-listeners ()
   "Delete the server, the socket, and the directory of each session.
-`kill-emacs' does not delete the terminals, so this function is in
-`kill-emacs-hook'.  An error for one session does not stop the
-others."
+An error for one session does not stop the others."
   (dolist (listener remote-display--listeners)
     (with-demoted-errors "remote-display: %S"
       (remote-display--delete-listener listener)))
   (setq remote-display--listeners nil))
 
-(add-hook 'kill-emacs-hook #'remote-display--stop-all-listeners)
+(add-hook 'kill-emacs-hook #'remote-display--end-all-sessions)
 
 ;;;; Selections
 

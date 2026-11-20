@@ -691,6 +691,10 @@ extern size_t rd_encoded_size (const struct rd_message *message);
 extern void rd_encode (const struct rd_message *message,
 		       unsigned char *buf);
 
+/* Return the end-session message with REASON, an enum rd_end_reason
+   value.  Each sender of the end of a session makes it here.  */
+extern struct rd_message rd_end_session_message (uint8_t reason);
+
 /* Decode the first message in the LEN bytes at BUF.  If the result
    is RD_OK, set *MESSAGE to the message and *USED to the number of
    bytes that it occupies.  If the result is RD_UNKNOWN_TYPE, set *USED

@@ -89,6 +89,13 @@ rd_encode (const struct rd_message *message, unsigned char *buf)
     p = put_field (p, &format->fields[i], message);
 }
 
+struct rd_message
+rd_end_session_message (uint8_t reason)
+{
+  return (struct rd_message) { .type = RD_END_SESSION,
+			       .u.end_session = { .reason = reason } };
+}
+
 enum rd_status
 rd_decode (const unsigned char *buf, size_t len,
 	   struct rd_message *message, size_t *used)
