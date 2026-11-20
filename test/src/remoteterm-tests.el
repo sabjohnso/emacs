@@ -471,6 +471,9 @@
 ;;      pixel size of law 111, its text area is its columns and lines
 ;;      times the size of a character, and the client gets a
 ;;      define-frame message with the new pixel size of the frame.
+;; 115. Client no query: Emacs does not ask about the connection of a
+;;      client when it exits.  Each connection that a session attaches
+;;      has no query flag, so a quit of Emacs does not ask about it.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -9765,6 +9768,35 @@ LATER-ERROR is the error of a later listen with a short name."
     (should (equal (remoteterm-tests--daemon-call
                     'remoteterm-tests--listen-query-case)
                    '(nil)))))
+
+(rd-daemon-deftest remoteterm-tests-client-no-exit-query
+  "Each attached connection of a client has no query flag (law 115).
+Thus a quit of Emacs does not ask about the connection of a client."
+  (let ((rd-gen-trials 5))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 1 3))
+     (lambda (count)
+       (should (equal (remoteterm-tests--client-query-case count)
+                      (make-list count nil)))))))
+
+(defun remoteterm-tests--client-query-case (count)
+  "Connect COUNT clients one after the other to a listening session.
+Return the query flag of the attached connection after each connect."
+  (remoteterm-tests--with-display "remote-listen-a"
+    (let ((socket (remote-display-listen "remote-listen-a"))
+          (connections nil))
+      (unwind-protect
+          (cl-loop
+           for serial from 1 to count
+           collect (let ((connection (remoteterm-tests--connect socket)))
+                     (push connection connections)
+                     (remoteterm-tests--reset-and-ping connection serial)
+                     (remoteterm-tests--pong-of (car connection)
+                                                (cdr connection))
+                     (process-query-on-exit-flag
+                      (remote-display-client "remote-listen-a"))))
+        (dolist (connection connections)
+          (delete-process (car connection)))))))
 
 (defun remoteterm-tests--listen-query-case ()
   "Return the exit query flags of the servers of a listening session."

@@ -117,8 +117,9 @@ After this call, the session sends its messages to PROCESS.  The last
 client of the session is detached.  PROCESS must be a live network
 connection, and not a server.  A process can be the client of only
 one session.  This function sets the filter and the sentinel of
-PROCESS.  When PROCESS closes, the session has no client, and keeps
-its frames.  */)
+PROCESS, and clears its query flag, so a quit of Emacs does not ask
+about the client.  When PROCESS closes, the session has no client, and
+keeps its frames.  */)
   (Lisp_Object display, Lisp_Object process)
 {
   struct remote_display_info *dpyinfo = check_x_display_info (display);
@@ -128,6 +129,7 @@ its frames.  */)
   Fset_process_coding_system (process, Qno_conversion, Qno_conversion);
   Fset_process_filter (process, Qremote_display__receive);
   Fset_process_sentinel (process, Qremote_display__closed);
+  Fset_process_query_on_exit_flag (process, Qnil);
   return Qnil;
 }
 
