@@ -29,7 +29,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    frame, and the server decides, as Emacs does for a window of X.  The
    program stops when the connection ends and the program has no
    window, or when the user asks to close a window while the program
-   has no connection.
+   has no connection.  It also stops, and closes its windows, when an
+   end-session message comes: then the session ended, or does not
+   exist, so the program does not connect again.
 
    When the connection ends, or no bytes come from the server for MS
    milliseconds, the program keeps its windows and connects to SOCKET
@@ -60,7 +62,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    listen spec SPEC of listenspec.h.  With no --listen, it listens on
    the server address of $SSH_CONNECTION, which SSH sets.
 
-   The exit status is 0 on success, and 1 on an error.  */
+   The exit status is 0 on success, and 1 on an error.  An end-session
+   message for a session that does not exist is an error.  */
 
 #include <config.h>
 
@@ -82,6 +85,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "compose.h"
 #include "connector.h"
 #include "direct.h"
+#include "ending.h"
 #include "fonts.h"
 #include "fontstore.h"
 #include "hashcache.h"
@@ -117,6 +121,8 @@ enum read_result
     READ_END,
     /* The read or the stream has an error.  */
     READ_ERROR,
+    /* An end-session message came, and the program stops.  */
+    READ_SESSION_END,
   };
 
 /* The state of the writes of a connection.  */
@@ -197,6 +203,10 @@ struct window_mode
   guint retry;
   /* True if the last connection had an error.  */
   bool failed;
+  /* True after an end-session message.  END_REASON is its reason, an
+     enum rd_end_reason value.  */
+  bool ended;
+  uint8_t end_reason;
   /* The clipboard text that comes from the server, the clipboard text
      that goes to it, and the last text that went between the client and
      the server, or NULL.  The client does not send that text back.
@@ -235,6 +245,9 @@ static struct rc_stream *connect_socket (void *);
 static void open_connection (struct window_mode *, struct rc_stream *);
 static void reset_connection_state (struct window_mode *);
 static void lose_connection (struct window_mode *, bool);
+static void end_session (struct window_mode *);
+static int exit_status (const struct window_mode *);
+static enum read_result read_session (struct window_mode *);
 static void close_connection (struct window_mode *);
 static void schedule_retry (struct window_mode *);
 static gboolean retry_connect (gpointer);
@@ -248,6 +261,7 @@ static void receive_clipboard (struct window_mode *,
 			       const struct rd_message *);
 static void show_menu (struct window_mode *, const struct rd_show_menu *);
 static void hide_menu (struct window_mode *, const struct rd_hide_menu *);
+static void note_end (struct window_mode *, const struct rd_end_session *);
 static void clipboard_changed (void *, const char *);
 static gboolean send_clipboard (gint, GIOCondition, gpointer);
 static gboolean read_input (gint, GIOCondition, gpointer);
@@ -599,7 +613,18 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
   rd_chunks_free (&mode.clipboard);
   rd_chunk_queue_clear (&mode.clipboard_out);
   g_free (mode.clipboard_text);
-  return mode.failed ? 1 : 0;
+  return exit_status (&mode);
+}
+
+/* Return the exit status of the mode MODE after its main loop: the
+   status of its end-session message, if one came, or else 1 if the
+   last connection had an error.  */
+static int
+exit_status (const struct window_mode *mode)
+{
+  if (mode->ended)
+    return rc_end_status (mode->end_reason);
+  return mode->failed ? 1 : 0;
 }
 
 /* Make STREAM the connection of MODE.  MODE must have no connection.
@@ -665,6 +690,18 @@ lose_connection (struct window_mode *mode, bool failed)
 	   "the program connects again\n");
   rc_view_set_connected (mode->view, false);
   schedule_retry (mode);
+}
+
+/* Stop the program after the end-session message of MODE: close the
+   connection, and stop the main loop, so the program closes its
+   windows.  A session that does not exist is an error.  */
+static void
+end_session (struct window_mode *mode)
+{
+  close_connection (mode);
+  if (exit_status (mode) != 0)
+    fprintf (stderr, "remote-client: the session does not exist\n");
+  gtk_main_quit ();
 }
 
 /* Close the connection of MODE, if it has one, and forget its
@@ -760,7 +797,9 @@ network_changed (GNetworkMonitor *monitor, gboolean available,
    struct window_mode.  Apply MESSAGE, and show its change.  Ask the
    server for the file of a font that has no face, keep the bytes
    of a font file, and give the place of a frame to the view.  Give
-   the messages of a popup menu to the menu model and to the view.  */
+   the messages of a popup menu to the menu model and to the view.
+   Record an end-session message: read_session stops the program after
+   the chunk, because the reader still uses the connection.  */
 static void
 show_message (void *data, const struct rd_message *message)
 {
@@ -780,6 +819,18 @@ show_message (void *data, const struct rd_message *message)
     show_menu (mode, &message->u.show_menu);
   else if (message->type == RD_HIDE_MENU)
     hide_menu (mode, &message->u.hide_menu);
+  else if (message->type == RD_END_SESSION)
+    note_end (mode, &message->u.end_session);
+}
+
+/* Record the first end-session message END of MODE.  */
+static void
+note_end (struct window_mode *mode, const struct rd_end_session *end)
+{
+  if (mode->ended)
+    return;
+  mode->ended = true;
+  mode->end_reason = end->reason;
 }
 
 /* Show the popup menu of SHOW with the entries of its serial in the
@@ -896,15 +947,17 @@ receive_font (struct window_mode *mode, const struct rd_font_data *data)
    because the server closed the connection is not an error: then read
    the bytes that came before the close, until the end.  The server
    can close after its last messages, for example while the client
-   sends its scale.  */
+   sends its scale.  After an end-session message, the program
+   stops.  */
 static gboolean
 read_input (gint fd, GIOCondition condition, gpointer data)
 {
   (void) fd;
   (void) condition;
   struct window_mode *mode = data;
-  enum read_result result = read_chunk (mode->connection->reader,
-					mode->connection->stream);
+  enum read_result result = read_session (mode);
+  if (result == READ_SESSION_END)
+    return G_SOURCE_REMOVE;
   if (result == READ_MORE)
     note_input (mode);
   enum write_state writes = mode->connection->writes;
@@ -914,6 +967,22 @@ read_input (gint fd, GIOCondition condition, gpointer data)
   mode->connection->watch = 0;
   lose_connection (mode, result != READ_END || writes == WRITE_FAILED);
   return G_SOURCE_REMOVE;
+}
+
+/* Read one chunk from the connection of MODE, and give it to the
+   reader.  If the chunk has an end-session message, stop the program,
+   and return READ_SESSION_END.  The watch of the connection calls this
+   function, and stops after READ_SESSION_END.  */
+static enum read_result
+read_session (struct window_mode *mode)
+{
+  enum read_result result = read_chunk (mode->connection->reader,
+					mode->connection->stream);
+  if (!mode->ended)
+    return result;
+  mode->connection->watch = 0;
+  end_session (mode);
+  return READ_SESSION_END;
 }
 
 /* Record that bytes came on the connection of MODE.  After the first

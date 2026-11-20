@@ -39,6 +39,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      reset, the third wait is 4 * RC_BACKOFF_FIRST.
    - End: when the server removes the last frame and then closes the
      connection, the program exits with the status 0.
+   - End session: when the server sends the end-session message of a
+     session that ended, the program exits with the status 0, also
+     while it has a window and the connection is open.  It does not
+     connect again.
+   - No session: when the end-session message says that the session
+     does not exist, the program exits with the status 1, and does not
+     connect again.
    - Error: when a message with an error comes and the program has no
      window, the program exits with the status 1.
    - Close: when the user asks to close the window, the program sends
@@ -171,6 +178,9 @@ static bool closed_example (void);
 static bool retry_example (void);
 static bool reset_example (void);
 static bool end_example (void);
+static bool end_session_example (void);
+static bool no_session_example (void);
+static bool ends_with (uint8_t, int);
 static bool error_example (void);
 static bool close_example (void);
 static bool offline_close_example (void);
@@ -251,6 +261,8 @@ static const struct
     { "retry", retry_example },
     { "reset", reset_example },
     { "end", end_example },
+    { "end session", end_session_example },
+    { "no session", no_session_example },
     { "error", error_example },
     { "close", close_example },
     { "offline close", offline_close_example },
@@ -443,6 +455,41 @@ end_example (void)
   run.connection = -1;
   passed = passed && wait_for_exit (run.pid) == 0;
   run.pid = 0;
+  stop_run (&run);
+  return passed;
+}
+
+/* The end session example.  */
+static bool
+end_session_example (void)
+{
+  return ends_with (RD_END_CLOSED, 0);
+}
+
+/* The no session example.  */
+static bool
+no_session_example (void)
+{
+  return ends_with (RD_END_NO_SESSION, 1);
+}
+
+/* Send a define-frame message and then an end-session message with
+   REASON, and keep the connection open.  Return true if the program
+   exits with the status STATUS, and does not connect again.  */
+static bool
+ends_with (uint8_t reason, int status)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  struct rd_message end = { .type = RD_END_SESSION,
+			    .u.end_session = { .reason = reason } };
+  bool passed = (send_define_frame (run.connection)
+		 && send_message (run.connection, &end)
+		 && wait_for_exit (run.pid) == status);
+  run.pid = 0;
+  struct pollfd other = { .fd = run.listener, .events = POLLIN };
+  passed = passed && poll (&other, 1, QUIET_LIMIT) == 0;
   stop_run (&run);
   return passed;
 }
