@@ -37,6 +37,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "flow.h"
 #include "listenspec.h"
 #include "pending.h"
+#include "rdproto.h"
 #include "relay.h"
 #include "relayline.h"
 #include "stream.h"
@@ -49,7 +50,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    their streams, or NULL.  CLIENT and SERVER are the connected client
    and its connection to the session, or NULL.  UP holds the bytes of
    the client for the session, and DOWN the bytes of the session for
-   the client.  */
+   the client.  REFUSED is a client that the relay refuses because it
+   cannot connect to the session, or NULL.  BYE holds the bytes of the
+   end-session message that REFUSED did not get yet.  At BYE_DEADLINE
+   of rc_now_ms, the relay closes REFUSED.  After a refusal, STOPPING
+   is true, and the relay exits when it has no refused client.  */
 struct relay
 {
   const char *session;
@@ -60,6 +65,10 @@ struct relay
   struct rc_stream *waiting[RC_PENDING_SIZE];
   struct rc_stream *client, *server;
   struct rc_flow up, down;
+  struct rc_stream *refused;
+  struct rc_flow bye;
+  int64_t bye_deadline;
+  bool stopping;
 };
 
 /* The process after start_daemon.  */
@@ -77,12 +86,18 @@ enum daemon
    takes them.  */
 enum { BACKLOG = 16 };
 
+/* The longest time of a refusal: the relay sends the end of the
+   session to the client, and waits for the close of the client, for at
+   most this number of milliseconds.  */
+enum { END_LIMIT = 1000 };
+
 /* The positions of the descriptors in the array of poll.  */
 enum
   {
     WATCH_LISTENER,
     WATCH_CLIENT,
     WATCH_SERVER,
+    WATCH_REFUSED,
     WATCH_PENDING,
     WATCH_SIZE = WATCH_PENDING + RC_PENDING_SIZE,
   };
@@ -96,7 +111,7 @@ static int watch (const struct relay *, struct pollfd *);
 static void watch_pair (const struct relay *, struct pollfd *);
 static bool client_buffered_p (const struct relay *);
 static bool move_pair (struct relay *, const struct pollfd *, bool);
-static bool read_tokens (struct relay *, const struct pollfd *);
+static void read_tokens (struct relay *, const struct pollfd *);
 static void accept_client (struct relay *);
 static void expire_pending (struct relay *);
 static enum rc_pending_result read_token (struct relay *, int);
@@ -106,8 +121,14 @@ static struct rc_stream *next_expired (struct relay *, int64_t);
 static struct rc_stream *waiting_stream (const struct relay *, int);
 static struct rc_stream *take_waiting (struct relay *, int);
 static void close_all (struct relay *);
-static bool open_pair (struct relay *, struct rc_stream *);
+static void open_pair (struct relay *, struct rc_stream *);
 static void close_pair (struct relay *);
+static void refuse_client (struct relay *, struct rc_stream *);
+static void watch_refused (const struct relay *, struct pollfd *);
+static int64_t refusal_wait (const struct relay *, int64_t);
+static void move_refused (struct relay *, const struct pollfd *);
+static bool ended_p (struct rc_stream *);
+static void end_refusal (struct relay *);
 static bool move (struct rc_flow *, struct rc_stream *, short,
 		  struct rc_stream *, short);
 static bool fill_flow (struct rc_flow *, struct rc_stream *);
@@ -175,6 +196,8 @@ prepare (struct relay *relay, const char *session,
   rc_pending_init (&relay->pending);
   memset (relay->waiting, 0, sizeof relay->waiting);
   relay->client = relay->server = NULL;
+  relay->refused = NULL;
+  relay->stopping = false;
   return true;
 }
 
@@ -215,11 +238,12 @@ announce (const struct rc_relay_line *line)
     close (null);
 }
 
-/* Serve the clients of RELAY until the session stops.  */
+/* Serve the clients of RELAY until the session stops.  After a
+   refusal, serve until the relay has no refused client.  */
 static void
 serve (struct relay *relay)
 {
-  for (;;)
+  while (!(relay->stopping && !relay->refused))
     {
       struct pollfd fds[WATCH_SIZE];
       int wait = watch (relay, fds);
@@ -233,8 +257,10 @@ serve (struct relay *relay)
 	 the events of the old pair are no longer valid.  */
       if (!move_pair (relay, fds, client_buffered_p (relay)))
 	return;
-      if (!read_tokens (relay, fds))
-	return;
+      /* The refused client goes before the tokens: a token can
+	 replace the refused client.  */
+      move_refused (relay, fds);
+      read_tokens (relay, fds);
       if (fds[WATCH_LISTENER].revents)
 	accept_client (relay);
       expire_pending (relay);
@@ -243,13 +269,14 @@ serve (struct relay *relay)
 
 /* Fill FDS with the descriptors of RELAY and their events.  Return the
    wait of poll in milliseconds: 0 if the client has buffered bytes to
-   read, or else the time to the first deadline of a pending
-   connection, or -1 for no limit.  */
+   read, or else the time to the first deadline of a pending connection
+   or of the refused client, or -1 for no limit.  */
 static int
 watch (const struct relay *relay, struct pollfd *fds)
 {
   fds[WATCH_LISTENER] = (struct pollfd) { relay->listener, POLLIN, 0 };
   watch_pair (relay, fds);
+  watch_refused (relay, fds);
   for (int i = 0; i < RC_PENDING_SIZE; i++)
     {
       int fd = rc_pending_fd (&relay->pending, i);
@@ -258,9 +285,10 @@ watch (const struct relay *relay, struct pollfd *fds)
 	   : rc_stream_events (waiting_stream (relay, fd), POLLIN));
       fds[WATCH_PENDING + i] = (struct pollfd) { fd, events, 0 };
     }
-  int64_t wait = rc_pending_wait (&relay->pending, rc_now_ms ());
+  int64_t now = rc_now_ms ();
+  int64_t wait = rc_pending_wait (&relay->pending, now);
   assert (wait <= RC_RELAY_TOKEN_LIMIT);
-  return client_buffered_p (relay) ? 0 : wait;
+  return client_buffered_p (relay) ? 0 : refusal_wait (relay, wait);
 }
 
 /* Return true if the client of RELAY holds bytes that poll does not
@@ -327,9 +355,8 @@ move_pair (struct relay *relay, const struct pollfd *fds, bool buffered)
 
 /* Read the tokens of the pending connections of RELAY after the events
    of FDS.  Remove each connection with a complete token or an end from
-   the table.  Return false when the relay must stop, because it cannot
-   connect to the session.  */
-static bool
+   the table, and make a connection with the token the client.  */
+static void
 read_tokens (struct relay *relay, const struct pollfd *fds)
 {
   for (int i = 0; i < RC_PENDING_SIZE; i++)
@@ -343,10 +370,9 @@ read_tokens (struct relay *relay, const struct pollfd *fds)
       struct rc_stream *stream = stop_waiting (relay, fd);
       if (result == RC_PENDING_BAD)
 	rc_stream_close (stream);
-      else if (!open_pair (relay, stream))
-	return false;
+      else
+	open_pair (relay, stream);
     }
-  return true;
 }
 
 /* Accept a new connection of RELAY, start its TLS session, and make it
@@ -467,22 +493,24 @@ close_all (struct relay *relay)
   for (int i = 0; i < RC_PENDING_SIZE; i++)
     rc_stream_close (relay->waiting[i]);
   close_pair (relay);
+  end_refusal (relay);
   close (relay->listener);
   rc_tls_key_free (relay->key);
 }
 
 /* Make the stream CLIENT the client of RELAY, and connect it to the
    session.  Close the old pair.  If the relay cannot connect to the
-   session, close CLIENT and return false.  */
-static bool
+   session, the session has stopped: refuse CLIENT, and stop the
+   relay after the refusal.  A pair that opens cancels that stop.  */
+static void
 open_pair (struct relay *relay, struct rc_stream *client)
 {
   close_pair (relay);
   int server = rc_connect_unix (relay->session, false);
   if (server < 0)
     {
-      rc_stream_close (client);
-      return false;
+      refuse_client (relay, client);
+      return;
     }
   fcntl (server, F_SETFL, O_NONBLOCK);
   relay->client = client;
@@ -490,11 +518,13 @@ open_pair (struct relay *relay, struct rc_stream *client)
   if (!relay->server)
     {
       close_pair (relay);
-      return true;
+      return;
     }
   rc_flow_init (&relay->up);
   rc_flow_init (&relay->down);
-  return true;
+  /* The session works again, so the relay does not stop after a
+     refusal.  */
+  relay->stopping = false;
 }
 
 /* Close the client of RELAY and its connection to the session.  */
@@ -504,6 +534,100 @@ close_pair (struct relay *relay)
   rc_stream_close (relay->client);
   rc_stream_close (relay->server);
   relay->client = relay->server = NULL;
+}
+
+/* The refusal of a client: the relay tells the client that the
+   session does not exist, so the client does not connect again.  The
+   client closes its side after the message.  The relay waits for that
+   close before its own close, because a close with bytes of the client
+   unread can make the client lose the message.  The poll loop of the
+   relay runs the refusal, so the relay serves the other connections
+   meanwhile.  */
+
+/* Make CLIENT the refused client of RELAY, put the end-session message
+   in the flow BYE, and stop the relay after the refusal.  Close the
+   refused client before CLIENT, if any.  */
+static void
+refuse_client (struct relay *relay, struct rc_stream *client)
+{
+  end_refusal (relay);
+  rc_flow_init (&relay->bye);
+  size_t size;
+  unsigned char *space = rc_flow_space (&relay->bye, &size);
+  rc_flow_fill (&relay->bye,
+		rd_encode_end_session (RD_END_NO_SESSION, space, size));
+  relay->refused = client;
+  relay->bye_deadline = rc_now_ms () + END_LIMIT;
+  relay->stopping = true;
+}
+
+/* Fill the entry of the refused client of RELAY in FDS.  While BYE has
+   bytes, wait until the client can take them.  Then wait for its
+   close.  */
+static void
+watch_refused (const struct relay *relay, struct pollfd *fds)
+{
+  struct rc_stream *refused = relay->refused;
+  short events = rc_flow_empty_p (&relay->bye) ? POLLIN : POLLOUT;
+  fds[WATCH_REFUSED]
+    = (refused
+       ? (struct pollfd) { rc_stream_fd (refused),
+			   rc_stream_events (refused, events), 0 }
+       : (struct pollfd) { -1, 0, 0 });
+}
+
+/* Return the wait WAIT of poll in milliseconds, or the time to the
+   deadline of the refused client of RELAY if that is shorter.  -1 is
+   no limit.  */
+static int64_t
+refusal_wait (const struct relay *relay, int64_t wait)
+{
+  if (!relay->refused)
+    return wait;
+  int64_t left = relay->bye_deadline - rc_now_ms ();
+  left = left < 0 ? 0 : left;
+  return wait < 0 || left < wait ? left : wait;
+}
+
+/* Send the bytes of BYE to the refused client of RELAY after the events
+   of FDS, or read the bytes of the client until its close.  Close the
+   client at its close, at an error, or at its deadline.  */
+static void
+move_refused (struct relay *relay, const struct pollfd *fds)
+{
+  struct rc_stream *refused = relay->refused;
+  if (!refused)
+    return;
+  bool done = rc_now_ms () >= relay->bye_deadline;
+  if (!done && fds[WATCH_REFUSED].revents)
+    done = (rc_flow_empty_p (&relay->bye) ? ended_p (refused)
+	    : !drain_flow (&relay->bye, refused));
+  if (done)
+    end_refusal (relay);
+}
+
+/* Read and drop the bytes of STREAM that are ready.  Return true if
+   STREAM ends or fails.  */
+static bool
+ended_p (struct rc_stream *stream)
+{
+  for (;;)
+    {
+      unsigned char bytes[RC_STREAM_RECORD_SIZE];
+      ptrdiff_t count = rc_stream_read (stream, bytes, sizeof bytes);
+      if (count == 0 || count == RC_STREAM_FAIL)
+	return true;
+      if (count == RC_STREAM_WAIT)
+	return false;
+    }
+}
+
+/* Close the refused client of RELAY, if any.  */
+static void
+end_refusal (struct relay *relay)
+{
+  rc_stream_close (relay->refused);
+  relay->refused = NULL;
 }
 
 /* Move bytes of FLOW from the stream FROM to the stream TO after the

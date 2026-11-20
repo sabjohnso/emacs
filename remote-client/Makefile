@@ -164,7 +164,7 @@ test-client: test-client.o $(RENDER_OBJS) $(FONTS_OBJS)
 test-sizes: test-sizes.o sizes.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-ending: test-ending.o ending.o
+test-ending: test-ending.o ending.o rdproto.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-scale: test-scale.o scale.o
@@ -180,8 +180,8 @@ test-relayline: test-relayline.o relayline.o token.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 # The test runs the program, so the program must be current.
-test-relay: test-relay.o relayline.o token.o tls.o stream.o listenspec.o \
-  | remote-client
+test-relay: test-relay.o rdproto.o relayline.o token.o tls.o stream.o \
+  listenspec.o | remote-client
 	$(CC) $(LDFLAGS) -o $@ $^ $(TLS_LIBS)
 
 test-flow: test-flow.o flow.o
@@ -289,6 +289,7 @@ stream.o relay.o client.o direct.o test-ssh.o test-stream.o: stream.h
 stream.o tls.o: streamclass.h
 tls.o test-tls.o test-relay.o test-ssh.o relay.o direct.o: tls.h pin.h stream.h
 test-ssh.o: relayline.h token.h ../src/rdproto.h
+relay.o test-relay.o: ../src/rdproto.h
 listenspec.o test-listenspec.o relay.o client.o test-relay.o: listenspec.h
 sshconfig.o test-sshconfig.o bootstrap.o client.o: sshconfig.h
 menu.o test-menu.o: menu.h ../src/rdproto.h

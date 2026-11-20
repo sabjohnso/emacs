@@ -60,8 +60,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      gets the last bytes of the session, and then the end.
    - Gone: when the session removes its socket and then closes the
      connection, as a session does when it ends, the relay exits.
-   - End: when the relay cannot connect to the session, it closes the
-     client and exits.
+   - End: when the relay cannot connect to the session, it sends the
+     client an end-session message with the reason RD_END_NO_SESSION,
+     closes the client, and exits.  Thus the client knows that the
+     session does not exist, and does not connect again.
+   - Refuse two: the client of the end example gets the end message,
+     but does not close.  While the relay waits for that close, a next
+     client with the token also gets the end message and then the end.
+     Then the relay exits.
+   - Return: while the relay waits for the close of a refused client,
+     the session comes back, and a next client with the token connects
+     to it.  The relay keeps that pair after the refused client closes,
+     and does not exit.
    - Loopback: the relay refuses connections to an address that is
      not the loopback address.
    - Default: with no --listen, the port of the relay is in the
@@ -112,6 +122,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "listenspec.h"
 #include "pending.h"
+#include "rdproto.h"
 #include "relay.h"
 #include "relayline.h"
 #include "stream.h"
@@ -168,6 +179,11 @@ static bool fill_toward_session (struct rc_stream *);
 static bool reads_then_end (struct rc_stream *, const char *, size_t);
 static bool gone_example (void);
 static bool end_example (void);
+static bool refuse_two_example (void);
+static bool return_example (void);
+static bool listen_session (struct run *);
+static bool reads_bytes (struct rc_stream *, const char *, size_t);
+static size_t end_bytes (char *);
 static bool loopback_example (void);
 static bool default_example (void);
 static bool range_example (void);
@@ -229,6 +245,8 @@ static const struct
     { "closed session", closed_session_example },
     { "gone", gone_example },
     { "end", end_example },
+    { "refuse two", refuse_two_example },
+    { "return", return_example },
     { "loopback", loopback_example },
     { "default", default_example },
     { "range", range_example },
@@ -520,6 +538,15 @@ fill_toward_session (struct rc_stream *client)
 static bool
 reads_then_end (struct rc_stream *client, const char *expected, size_t size)
 {
+  return (reads_bytes (client, expected, size)
+	  && stream_closed_p (client, LIMIT));
+}
+
+/* Return true if the next bytes of CLIENT are the SIZE bytes EXPECTED.
+   Wait at most LIMIT.  */
+static bool
+reads_bytes (struct rc_stream *client, const char *expected, size_t size)
+{
   char got[256];
   size_t have = 0;
   int64_t start = now_ms ();
@@ -538,8 +565,7 @@ reads_then_end (struct rc_stream *client, const char *expected, size_t size)
 	  poll (&ready, 1, LIMIT);
 	}
     }
-  return (have == size && memcmp (got, expected, size) == 0
-	  && stream_closed_p (client, LIMIT));
+  return have == size && memcmp (got, expected, size) == 0;
 }
 
 static bool
@@ -560,7 +586,7 @@ gone_example (void)
 
 /* stop_run is the end example: each other example uses it.  This
    example also checks that a client of a relay with no session gets
-   nothing.  */
+   only the end-session message of a session that does not exist.  */
 static bool
 end_example (void)
 {
@@ -568,10 +594,75 @@ end_example (void)
   if (!start_run (&run))
     return false;
   unlink (run.socket);
+  char expected[16];
+  size_t size = end_bytes (expected);
   struct rc_stream *client = connect_client (&run, true);
-  bool ok = client && stream_closed_p (client, LIMIT);
+  bool ok = client && reads_then_end (client, expected, size);
   rc_stream_close (client);
   return stop_run (&run) && ok;
+}
+
+static bool
+refuse_two_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  unlink (run.socket);
+  char expected[16];
+  size_t size = end_bytes (expected);
+  struct rc_stream *first = connect_client (&run, true);
+  bool ok = first && reads_bytes (first, expected, size);
+  struct rc_stream *second = ok ? connect_client (&run, true) : NULL;
+  ok = ok && second && reads_then_end (second, expected, size)
+    && refuses_p (&run);
+  rc_stream_close (first);
+  rc_stream_close (second);
+  return stop_run (&run) && ok;
+}
+
+static bool
+return_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  close (run.session);
+  unlink (run.socket);
+  char expected[16];
+  size_t size = end_bytes (expected);
+  struct rc_stream *refused = connect_client (&run, true);
+  bool ok = refused && reads_bytes (refused, expected, size)
+    && listen_session (&run);
+  struct rc_stream *client = ok ? connect_client (&run, true) : NULL;
+  int session = client ? accept_session (&run, LIMIT) : -1;
+  rc_stream_close (refused);
+  static const char bytes[] = "after the refusal";
+  poll (NULL, 0, QUIET);
+  ok = ok && session >= 0 && write_stream (client, bytes, sizeof bytes);
+  struct pollfd ready = { .fd = session, .events = POLLIN };
+  char got[sizeof bytes];
+  ok = (ok && poll (&ready, 1, LIMIT) == 1
+	&& read (session, got, sizeof got) == sizeof got
+	&& memcmp (got, bytes, sizeof got) == 0);
+  rc_stream_close (client);
+  if (session >= 0)
+    close (session);
+  return stop_run (&run) && ok;
+}
+
+/* Put the end-session message of a session that does not exist in
+   BYTES, which has room for 16 bytes, and return its size.  */
+static size_t
+end_bytes (char *bytes)
+{
+  struct rd_message end = { .type = RD_END_SESSION,
+			    .u.end_session = { .reason = RD_END_NO_SESSION } };
+  size_t size = rd_encoded_size (&end);
+  if (size > 16)
+    abort ();
+  rd_encode (&end, (unsigned char *) bytes);
+  return size;
 }
 
 static bool
@@ -821,6 +912,14 @@ make_session (struct run *run)
   if (!mkdtemp (run->directory))
     return false;
   snprintf (run->socket, sizeof run->socket, "%s/socket", run->directory);
+  return listen_session (run);
+}
+
+/* Listen as the session of RUN at its socket.  Return false on an
+   error.  */
+static bool
+listen_session (struct run *run)
+{
   run->session = socket (AF_UNIX, SOCK_STREAM, 0);
   struct sockaddr_un address = { .sun_family = AF_UNIX };
   snprintf (address.sun_path, sizeof address.sun_path, "%s", run->socket);

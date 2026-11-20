@@ -695,6 +695,13 @@ extern void rd_encode (const struct rd_message *message,
    value.  Each sender of the end of a session makes it here.  */
 extern struct rd_message rd_end_session_message (uint8_t reason);
 
+/* Write the end-session message with REASON to BUF, which has room for
+   SIZE bytes.  Return the number of bytes of the message, or 0 with
+   nothing written if SIZE is too small.  A program that is not a
+   session, for example a relay, can thus end a client.  */
+extern size_t rd_encode_end_session (uint8_t reason, unsigned char *buf,
+				     size_t size);
+
 /* Decode the first message in the LEN bytes at BUF.  If the result
    is RD_OK, set *MESSAGE to the message and *USED to the number of
    bytes that it occupies.  If the result is RD_UNKNOWN_TYPE, set *USED

@@ -28,8 +28,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    connects to the Unix-domain socket of the session, and copies the
    bytes between the client and the session.  A new client with the
    token replaces the old client, as the session also does.  When the
-   relay cannot connect to the session, the session has stopped, so
-   the relay exits.  The relay also exits when the session closes the
+   relay cannot connect to the session, the session has stopped: the
+   relay sends the client an end-session message that says so, and
+   exits after the close of that client, or after at most 1 second.
+   The relay also exits when the session closes the
    connection and its socket does not exist, because a session that
    ends removes its socket first.
 

@@ -96,6 +96,17 @@ rd_end_session_message (uint8_t reason)
 			       .u.end_session = { .reason = reason } };
 }
 
+size_t
+rd_encode_end_session (uint8_t reason, unsigned char *buf, size_t size)
+{
+  struct rd_message end = rd_end_session_message (reason);
+  size_t needed = rd_encoded_size (&end);
+  if (size < needed)
+    return 0;
+  rd_encode (&end, buf);
+  return needed;
+}
+
 enum rd_status
 rd_decode (const unsigned char *buf, size_t len,
 	   struct rd_message *message, size_t *used)

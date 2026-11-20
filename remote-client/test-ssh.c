@@ -39,6 +39,12 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    - Reconnect: when another client with the token replaces the
      client, the client connects again, and the session gets its new
      connection.
+   - Gone: when Emacs stops with no end of the session, the socket of
+     the session stays, but refuses connections.  The client loses its
+     connection, and connects to the relay again.  The relay cannot
+     connect to the session, so it sends an end-session message that
+     says that the session does not exist.  The client then exits with
+     the status 1, and does not connect again.
    - Fail: when the bootstrap gives no line, the client exits with the
      status 1.
    - No host name: when "ssh -G" gives no host name, the client exits
@@ -121,6 +127,7 @@ struct setup
 
 static bool start_example (void);
 static bool reconnect_example (void);
+static bool gone_example (void);
 static bool fail_example (void);
 static bool no_hostname_example (void);
 static bool unreachable_example (void);
@@ -163,6 +170,7 @@ static const struct
   {
     { "start", start_example },
     { "reconnect", reconnect_example },
+    { "gone", gone_example },
     { "fail", fail_example },
     { "no host name", no_hostname_example },
     { "unreachable", unreachable_example },
@@ -224,6 +232,22 @@ reconnect_example (void)
   rc_stream_close (other);
   if (for_other >= 0)
     close (for_other);
+  stop_run (&run);
+  return ok;
+}
+
+static bool
+gone_example (void)
+{
+  struct run run;
+  if (!start_run (&run, (struct setup) { 0 }))
+    return false;
+  close (run.listener);
+  run.listener = -1;
+  close (run.connection);
+  run.connection = -1;
+  bool ok = wait_for_exit (run.pid) == 1;
+  run.pid = 0;
   stop_run (&run);
   return ok;
 }
@@ -345,7 +369,9 @@ start_run (struct run *run, struct setup setup)
   if (snprintf (address.sun_path, sizeof address.sun_path, "%s",
 		run->session) >= (int) sizeof address.sun_path)
     return false;
-  run->listener = socket (AF_UNIX, SOCK_STREAM, 0);
+  /* The program and the relay must not get the listener: then it
+     stays open after the close of the gone example.  */
+  run->listener = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (run->listener < 0
       || bind (run->listener, (struct sockaddr *) &address,
 	       sizeof address) != 0
