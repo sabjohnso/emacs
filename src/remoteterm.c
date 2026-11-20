@@ -517,6 +517,9 @@ remote_open_session (Lisp_Object name)
   remote_display_name_list = Fcons (dpyinfo->name_list_element,
 				    remote_display_name_list);
   dpyinfo->resx = dpyinfo->resy = remote_scale_resolution (1);
+  /* As x_term_init does.  Else `baud-rate' stays 0 in a daemon, and
+     isearch uses its slow-terminal mode, which splits the window.  */
+  baud_rate = 19200;
   dpyinfo->n_planes = 24;
   dpyinfo->smallest_char_width = 1;
   dpyinfo->smallest_font_height = 1;

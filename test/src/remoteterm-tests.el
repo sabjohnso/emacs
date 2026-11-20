@@ -495,6 +495,11 @@
 ;;      Emacs, the command calls `kill-emacs' with no other question.
 ;;      On a frame that is not remote, the command still calls
 ;;      `save-buffers-kill-emacs'.
+;; 119. Baud rate: after a session opens, `baud-rate' is at least
+;;      `search-slow-speed', as after the X backend opens a display.
+;;      Thus an isearch on a remote frame, for a match in view or out
+;;      of view, keeps one window and does not use the small window of
+;;      a slow terminal.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -9895,6 +9900,36 @@ the socket exists after the function."
       (dolist (connection connections)
         (delete-process (car connection)))
       (mapc #'delete-frame frames))))
+
+(rd-daemon-deftest remoteterm-tests-baud-rate
+  "A remote session gives a baud rate that is not slow (law 119).
+After a session opens, `baud-rate' is at least `search-slow-speed'.  An
+isearch for a word at a random line of a remote window, in view or out
+of view, then keeps one window in the frame, and isearch does not use
+its small window of a slow terminal."
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda () (rd-gen-integer 0 199))
+     (lambda (target)
+       (remoteterm-tests--with-place-root root
+         (should (>= baud-rate search-slow-speed))
+         (with-selected-frame root
+           (with-temp-buffer
+             (dotimes (line 200)
+               (insert (if (= line target) "needle\n"
+                         (format "line %d\n" line))))
+             (goto-char (point-min))
+             (set-window-buffer (frame-root-window root) (current-buffer))
+             (redisplay t)
+             (unwind-protect
+                 (progn
+                   (isearch-mode t)
+                   (isearch-yank-string "needle")
+                   (redisplay t)
+                   (should (= (line-number-at-pos) (1+ target)))
+                   (should-not isearch-small-window)
+                   (should (= (length (window-list root 'never)) 1)))
+               (isearch-done)))))))))
 
 (rd-daemon-deftest remoteterm-tests-kill-terminal
   "C-x C-c on a remote frame ends only its session (law 118).
