@@ -486,6 +486,15 @@
 ;;      sessions share one deadline: with clients that read nothing,
 ;;      the function returns before 1.5 times
 ;;      `remote-display--end-limit' seconds.
+;; 118. Kill terminal: on a remote frame, `save-buffers-kill-terminal'
+;;      (C-x C-c) asks about the unsaved buffers with its prefix
+;;      argument, and then ends only the session of the frame, as on a
+;;      frame of emacsclient.  The client of that session gets the end
+;;      of the session.  Emacs does not exit, and each other session
+;;      and its client stay.  When the session is the only terminal of
+;;      Emacs, the command calls `kill-emacs' with no other question.
+;;      On a frame that is not remote, the command still calls
+;;      `save-buffers-kill-emacs'.
 ;;
 ;; Redisplay does not run in batch mode, so the drawing tests run
 ;; their frames in a daemon.  A property test runs its loop of trials
@@ -9886,6 +9895,131 @@ the socket exists after the function."
       (dolist (connection connections)
         (delete-process (car connection)))
       (mapc #'delete-frame frames))))
+
+(rd-daemon-deftest remoteterm-tests-kill-terminal
+  "C-x C-c on a remote frame ends only its session (law 118).
+The command asks about the unsaved buffers first, and Emacs does not
+exit.  When the session is the only terminal, the command calls
+`kill-emacs'.  On a frame that is not remote, the command calls
+`save-buffers-kill-emacs'.  Each run checks the case of the only
+terminal, also when no trial generates it."
+  (should (eq (lookup-key global-map (kbd "C-x C-c"))
+              'save-buffers-kill-terminal))
+  (let ((rd-gen-trials 8))
+    (rd-gen-for-all
+     (lambda ()
+       (let ((count (rd-gen-integer 1 3)))
+         (list count (rd-gen-random count) (rd-gen-element '(nil (4)))
+               (rd-gen-element '(nil t)))))
+     (lambda (case)
+       (should (equal (apply #'remoteterm-tests--kill-terminal-case case)
+                      (apply #'remoteterm-tests--kill-terminal-expected
+                             case))))))
+  (dolist (arg '(nil (4)))
+    (should (equal (remoteterm-tests--kill-terminal-case 1 0 arg t)
+                   (remoteterm-tests--kill-terminal-expected 1 0 arg t))))
+  (should (equal (remoteterm-tests--kill-other-terminal-case)
+                 '(:asked nil :killed ((4)) :exited nil))))
+
+(defun remoteterm-tests--kill-terminal-expected (count chosen arg alone)
+  "Return the value of `remoteterm-tests--kill-terminal-case' by law 118.
+COUNT, CHOSEN, ARG, and ALONE are the arguments of the case.  Emacs
+exits only if ALONE and the session is the only one.  Then the session
+and its client stay until `kill-emacs-hook'."
+  (let ((exits (and alone (= count 1))))
+    (list :asked (list arg) :killed nil :exited (and exits '(t))
+          :live (cl-loop for i below count collect (or exits (/= i chosen)))
+          :clients (cl-loop for i below count
+                            collect (if (and (= i chosen) (not exits))
+                                        '(closed (end-session :reason 0))
+                                      '(open (pong :serial 1)))))))
+
+(defmacro remoteterm-tests--with-kill-stubs (asked killed exited &rest body)
+  "Evaluate BODY with stubs of the questions and of the exit of Emacs.
+The stub of `save-some-buffers' pushes its argument on ASKED, the stub
+of `save-buffers-kill-emacs' pushes its argument on KILLED, and the
+stub of `kill-emacs' pushes t on EXITED."
+  (declare (indent 3))
+  `(cl-letf (((symbol-function 'save-some-buffers)
+              (lambda (&optional arg _pred) (push arg ,asked)))
+             ((symbol-function 'save-buffers-kill-emacs)
+              (lambda (&optional arg _restart) (push arg ,killed)))
+             ((symbol-function 'kill-emacs)
+              (lambda (&rest _) (push t ,exited))))
+     ,@body))
+
+(defun remoteterm-tests--kill-terminal-case (count chosen arg alone)
+  "Run C-x C-c with the prefix ARG on a frame of one of COUNT sessions.
+Each session has a frame and a client.  CHOSEN is the index of the
+session of the selected frame.  If ALONE, `terminal-list' gives only
+the sessions, as in an Emacs that is not a daemon and has no other
+terminal.  Return a plist: :asked has the arguments of
+`save-some-buffers', :killed the arguments of
+`save-buffers-kill-emacs', :exited has t for each call of
+`kill-emacs', :live is non-nil for each session whose terminal is live
+after the command, and :clients has (STATUS LAST) for the client of
+each session: the status of its connection and the last message that
+it got."
+  (let* ((displays (cl-loop for i below count
+                            collect (format "remote-kill-%d" i)))
+         (sockets (mapcar (lambda (display)
+                            (x-open-connection display)
+                            (remote-display-listen display))
+                          displays))
+         (frames (mapcar (lambda (display)
+                           (remoteterm-tests--make-frame display nil))
+                         displays))
+         (connections (mapcar #'remoteterm-tests--connect sockets))
+         (all-terminals (symbol-function 'terminal-list))
+         (asked nil) (killed nil) (exited nil))
+    (unwind-protect
+        (progn
+          (dolist (connection connections)
+            (remoteterm-tests--reset-and-ping connection 1)
+            (remoteterm-tests--pong-of (car connection) (cdr connection)))
+          (cl-letf (((symbol-function 'terminal-list)
+                     (lambda ()
+                       (if alone
+                           (seq-filter (lambda (terminal)
+                                         (eq (terminal-live-p terminal)
+                                             'remote))
+                                       (funcall all-terminals))
+                         (funcall all-terminals)))))
+            (remoteterm-tests--with-kill-stubs asked killed exited
+              (with-selected-frame (nth chosen frames)
+                (let ((current-prefix-arg arg))
+                  (call-interactively #'save-buffers-kill-terminal)))))
+          (unless exited
+            (remoteterm-tests--wait-for-close (car (nth chosen connections))))
+          (accept-process-output nil 0.1)
+          (list :asked asked :killed killed :exited exited
+                :live (mapcar (lambda (display)
+                                (and (remoteterm-tests--terminal display) t))
+                              displays)
+                :clients (mapcar (lambda (connection)
+                                   (list (process-status (car connection))
+                                         (remoteterm-tests--last-message
+                                          (cdr connection))))
+                                 connections)))
+      (dolist (connection connections)
+        (delete-process (car connection)))
+      (dolist (frame frames)
+        (when (frame-live-p frame)
+          (delete-frame frame))))))
+
+(defun remoteterm-tests--kill-other-terminal-case ()
+  "Run C-x C-c with the prefix argument (4) on a frame that is not remote.
+Return a plist: :asked has the arguments of `save-some-buffers',
+:killed the arguments of `save-buffers-kill-emacs', and :exited has t
+for each call of `kill-emacs'."
+  (let ((asked nil) (killed nil) (exited nil))
+    (remoteterm-tests--with-kill-stubs asked killed exited
+      (with-selected-frame (seq-find (lambda (frame)
+                                       (not (eq (framep frame) 'remote)))
+                                     (frame-list))
+        (let ((current-prefix-arg '(4)))
+          (call-interactively #'save-buffers-kill-terminal))))
+    (list :asked asked :killed killed :exited exited)))
 
 (ert-deftest remoteterm-tests-listen-kill-emacs ()
   "When Emacs exits, the socket of each session and its directory go away."

@@ -2464,12 +2464,23 @@ remote_create_terminal (struct remote_display_info *dpyinfo, Lisp_Object name)
     = remote_set_scroll_bar_default_width;
   terminal->set_vertical_scroll_bar_hook = remote_set_vertical_scroll_bar;
   terminal->change_tool_bar_height_hook = remote_change_tool_bar_height;
+
+  /* C-x C-c on a frame of the session ends only the session, as on a
+     frame of emacsclient: see remote-win.el.  */
+  Lisp_Object object;
+  XSETTERMINAL (object, terminal);
+  Fset_terminal_parameter (object, Qsave_buffers_kill_terminal_function,
+			   Qremote_display_save_buffers_kill_terminal);
   return terminal;
 }
 
 void
 syms_of_remoteterm (void)
 {
+  DEFSYM (Qsave_buffers_kill_terminal_function,
+	  "save-buffers-kill-terminal-function");
+  DEFSYM (Qremote_display_save_buffers_kill_terminal,
+	  "remote-display-save-buffers-kill-terminal");
   /* The rows of frame_parms depend on the configuration, so only
      frame.c knows their number, and the compiler cannot compare it.
      This check stops Emacs when it starts, so it also stops the dump

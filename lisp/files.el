@@ -8724,7 +8724,10 @@ If RESTART, restart Emacs after killing the current Emacs process."
 
 (defun save-buffers-kill-terminal (&optional arg)
   "Offer to save each buffer, then kill the current connection.
-If the current frame has no client, kill Emacs itself using
+If the terminal of the current frame has the terminal parameter
+`save-buffers-kill-terminal-function', call that function with ARG
+instead: a window system can thus end only its terminal.  If the
+current frame has no client, kill Emacs itself using
 `save-buffers-kill-emacs'.
 
 With prefix ARG, silently save all file-visiting buffers, then kill.
@@ -8732,9 +8735,12 @@ With prefix ARG, silently save all file-visiting buffers, then kill.
 If emacsclient was started with a list of file names to edit, then
 only these files will be asked to be saved."
   (interactive "P")
-  (if (frame-parameter nil 'client)
-      (server-save-buffers-kill-terminal arg)
-    (save-buffers-kill-emacs arg)))
+  (let ((function (terminal-parameter nil
+                                      'save-buffers-kill-terminal-function)))
+    (cond ((frame-parameter nil 'client)
+           (server-save-buffers-kill-terminal arg))
+          (function (funcall function arg))
+          (t (save-buffers-kill-emacs arg)))))
 
 (defun restart-emacs ()
   "Kill the current Emacs process and start a new one.

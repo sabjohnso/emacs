@@ -336,6 +336,28 @@ form.")
       (setenv "FOO" foo-env)
       (setenv "BAR" bar-env))))
 
+(ert-deftest files-tests-save-buffers-kill-terminal-function ()
+  "The terminal parameter `save-buffers-kill-terminal-function' wins.
+`save-buffers-kill-terminal' calls the function of the parameter of
+the terminal of the selected frame with its argument, and does not
+call `save-buffers-kill-emacs'."
+  (let* ((terminal (frame-terminal))
+         (old (terminal-parameter terminal
+                                  'save-buffers-kill-terminal-function))
+         (calls nil))
+    (unwind-protect
+        (progn
+          (set-terminal-parameter terminal
+                                  'save-buffers-kill-terminal-function
+                                  (lambda (arg) (push (list 'terminal arg)
+                                                      calls)))
+          (cl-letf (((symbol-function 'save-buffers-kill-emacs)
+                     (lambda (&rest args) (push (cons 'emacs args) calls))))
+            (save-buffers-kill-terminal '(4)))
+          (should (equal calls '((terminal (4))))))
+      (set-terminal-parameter terminal 'save-buffers-kill-terminal-function
+                              old))))
+
 (ert-deftest files-tests-save-buffers-kill-emacs--confirm-kill-processes ()
   "Test that `save-buffers-kill-emacs' honors
 `confirm-kill-processes'."

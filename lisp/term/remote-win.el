@@ -183,6 +183,29 @@ An error for one session does not stop the others."
 
 (add-hook 'kill-emacs-hook #'remote-display--end-all-sessions)
 
+;;;; Kill terminal
+
+(defun remote-display-save-buffers-kill-terminal (arg)
+  "Offer to save each buffer, then end the session of the selected frame.
+This is what `save-buffers-kill-terminal' does on a remote frame, as
+on a frame of emacsclient: Emacs does not exit, and the other sessions
+stay.  The client of the session gets the end of the session, and
+stops.  If the session is the only terminal of Emacs, Emacs cannot
+delete it, so call `kill-emacs': `kill-emacs-hook' ends the session.
+Each session has this function in its terminal parameter
+`save-buffers-kill-terminal-function'.  With ARG non-nil, save all
+file-visiting buffers with no question."
+  (save-some-buffers arg)
+  (let ((terminal (frame-terminal)))
+    (if (remote-display--only-terminal-p terminal)
+        (kill-emacs)
+      (delete-terminal terminal))))
+
+(defun remote-display--only-terminal-p (terminal)
+  "Return non-nil if TERMINAL is the only live terminal.
+A daemon keeps its initial terminal, so it always has another one."
+  (equal (terminal-list) (list terminal)))
+
 ;;;; Selections
 
 ;; The client sends each change of its clipboard, and remoteclip.c
