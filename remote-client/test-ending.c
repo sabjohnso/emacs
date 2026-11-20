@@ -23,6 +23,11 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      message is 0 for the reason RD_END_CLOSED, and 1 for each other
      reason.  A reason that the program does not know is an error.
 
+   - Exit: the exit status of the window mode after an end-session
+     message with a reason is the status of that reason, whatever the
+     error of the last connection is.  With no end-session message, the
+     status is 1 after an error of the last connection, and 0 else.
+
    - Encode: rd_encode_end_session with a buffer of at least
      rd_encoded_size bytes writes the end-session message of the
      reason, and returns that size.  With a smaller buffer, it writes
@@ -42,6 +47,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 static bool status_law (void);
 static bool encode_law (void);
+static bool exit_law (void);
 static bool encodes_reason (uint8_t);
 
 /* A law and its name.  */
@@ -53,6 +59,7 @@ static const struct
   {
     { "status", status_law },
     { "encode", encode_law },
+    { "exit", exit_law },
   };
 
 int
@@ -119,5 +126,26 @@ encodes_reason (uint8_t reason)
       if (!ok)
 	return false;
     }
+  return true;
+}
+
+/* The exit law, for each combination of an end, a reason, and an
+   error.  */
+static bool
+exit_law (void)
+{
+  for (int ended = 0; ended <= 1; ended++)
+    for (int reason = 0; reason <= UINT8_MAX; reason++)
+      for (int failed = 0; failed <= 1; failed++)
+	{
+	  int expected = ended ? rc_end_status (reason) : failed;
+	  int status = rc_exit_status (ended, reason, failed);
+	  if (status != expected)
+	    {
+	      fprintf (stderr, "test-ending: ended %d, reason %d, failed %d "
+		       "give status %d\n", ended, reason, failed, status);
+	      return false;
+	    }
+	}
   return true;
 }

@@ -72,6 +72,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      the session comes back, and a next client with the token connects
      to it.  The relay keeps that pair after the refused client closes,
      and does not exit.
+   - Pending refusal: a next client makes its TLS session while the
+     relay refuses a client, and sends its token only after the refused
+     client closed.  The relay does not exit before that token, and the
+     next client also gets the end message and then the end.
+   - Model: random short sequences of steps.  A step takes the session
+     down or up, connects a client with the token, closes the refused
+     client, or closes the client of the working pair.  After each
+     step, and at the end, the relay agrees with a reference model of
+     its stop rule: it refuses a client while the session is down, and
+     the bytes of a client reach a session that is up.  At the end, the
+     relay exits if and only if the model stops.  A failed trial writes
+     its seed, and "test-relay SEED" runs that trial only.
    - Loopback: the relay refuses connections to an address that is
      not the loopback address.
    - Default: with no --listen, the port of the relay is in the
@@ -180,6 +192,9 @@ static bool reads_then_end (struct rc_stream *, const char *, size_t);
 static bool gone_example (void);
 static bool end_example (void);
 static bool refuse_two_example (void);
+static bool pending_refusal_example (void);
+static bool model_example (void);
+static bool model_trial (uint64_t);
 static bool return_example (void);
 static bool listen_session (struct run *);
 static bool reads_bytes (struct rc_stream *, const char *, size_t);
@@ -247,6 +262,8 @@ static const struct
     { "end", end_example },
     { "refuse two", refuse_two_example },
     { "return", return_example },
+    { "pending refusal", pending_refusal_example },
+    { "model", model_example },
     { "loopback", loopback_example },
     { "default", default_example },
     { "range", range_example },
@@ -264,9 +281,14 @@ static const struct
 /* Each example has its own relay, port, and directory, so the
    examples run at the same time, each in its own process.  */
 int
-main (void)
+main (int argc, char **argv)
 {
   enum { COUNT = sizeof examples / sizeof *examples };
+  if (argc == 2)
+    {
+      signal (SIGPIPE, SIG_IGN);
+      return model_trial (strtoull (argv[1], NULL, 10)) ? 0 : 1;
+    }
   pid_t pids[COUNT];
   signal (SIGPIPE, SIG_IGN);
   for (size_t i = 0; i < COUNT; i++)
@@ -649,6 +671,279 @@ return_example (void)
   if (session >= 0)
     close (session);
   return stop_run (&run) && ok;
+}
+
+static bool
+pending_refusal_example (void)
+{
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  unlink (run.socket);
+  char expected[16];
+  size_t size = end_bytes (expected);
+  struct rc_stream *refused = connect_client (&run, true);
+  bool ok = refused && reads_bytes (refused, expected, size);
+  struct rc_stream *next = ok ? connect_tls (&run) : NULL;
+  rc_stream_close (refused);
+  poll (NULL, 0, QUIET);
+  ok = (ok && next && write_stream (next, run.line.token, RC_TOKEN_SIZE)
+	&& reads_then_end (next, expected, size));
+  rc_stream_close (next);
+  return stop_run (&run) && ok;
+}
+
+/* The model example: a few trials, each with a seed from the clock.  */
+enum { MODEL_TRIALS = 6, MODEL_STEPS = 6 };
+
+static bool
+model_example (void)
+{
+  uint64_t base = ((uint64_t) time (NULL) << 20 ^ getpid ()) * MODEL_TRIALS;
+  for (int trial = 0; trial < MODEL_TRIALS; trial++)
+    if (!model_trial (base + trial))
+      {
+	fprintf (stderr, "test-relay: the model fails with seed %llu\n",
+		 (unsigned long long) (base + trial));
+	return false;
+      }
+  return true;
+}
+
+/* The steps of a trial of the model example.  */
+enum model_step
+  {
+    STEP_DOWN,
+    STEP_UP,
+    STEP_CONNECT,
+    STEP_CLOSE_REFUSED,
+    STEP_CLOSE_PAIR,
+    STEP_COUNT,
+  };
+
+/* The reference model of the stop rule of the relay.  UP is true while
+   the session listens.  PAIR is true while a client is connected to
+   the session, and REFUSED while the relay refuses a client.  STOPPING
+   is true after a refusal, until a pair opens.  The relay exits when it
+   stops and has no refused client, or when the session ends the pair
+   and its socket is gone.  */
+struct model
+{
+  bool up, pair, refused, stopping, exited;
+};
+
+/* The real side of a trial: the run, the client and the session side
+   of the working pair, and the refused client.  HEARD is true after the
+   refused client got the end-session message.  */
+struct real
+{
+  struct run run;
+  struct rc_stream *pair_client;
+  int pair_session;
+  struct rc_stream *refused;
+  bool heard;
+  struct rc_stream *old[MODEL_STEPS];
+  int nold;
+};
+
+static bool model_step_valid_p (const struct model *, enum model_step);
+static void model_apply (struct model *, enum model_step);
+static bool real_apply (struct real *, enum model_step);
+static bool real_agrees_p (struct real *, const struct model *);
+static uint64_t next_random (uint64_t *);
+
+/* Run the trial of SEED.  Return true if the relay agrees with the
+   model after each step and at the end.  */
+static bool
+model_trial (uint64_t seed)
+{
+  uint64_t state = seed;
+  struct model model = { .up = true };
+  struct real real = { .pair_session = -1 };
+  if (!start_run (&real.run))
+    return false;
+  bool ok = true;
+  int steps = 1 + next_random (&state) % MODEL_STEPS;
+  for (int i = 0; ok && i < steps && !model.exited; i++)
+    {
+      enum model_step step;
+      do
+	step = next_random (&state) % STEP_COUNT;
+      while (!model_step_valid_p (&model, step));
+      model_apply (&model, step);
+      ok = real_apply (&real, step) && real_agrees_p (&real, &model);
+    }
+  /* A refusal ends at its deadline, so the end closes the refused
+     client, and the model then gives the final state.  */
+  if (ok && !model.exited && model.refused)
+    {
+      model_apply (&model, STEP_CLOSE_REFUSED);
+      ok = real_apply (&real, STEP_CLOSE_REFUSED);
+    }
+  ok = ok && (model.exited ? refuses_p (&real.run)
+	      : (poll (NULL, 0, QUIET), real_agrees_p (&real, &model)));
+  rc_stream_close (real.pair_client);
+  rc_stream_close (real.refused);
+  for (int i = 0; i < real.nold; i++)
+    rc_stream_close (real.old[i]);
+  if (real.pair_session >= 0)
+    close (real.pair_session);
+  return stop_run (&real.run) && ok;
+}
+
+/* Return true if STEP can come in the state MODEL.  */
+static bool
+model_step_valid_p (const struct model *model, enum model_step step)
+{
+  switch (step)
+    {
+    case STEP_DOWN:
+      return model->up;
+    case STEP_UP:
+      return !model->up;
+    case STEP_CONNECT:
+      return true;
+    case STEP_CLOSE_REFUSED:
+      return model->refused;
+    case STEP_CLOSE_PAIR:
+      return model->pair;
+    case STEP_COUNT:
+      break;
+    }
+  return false;
+}
+
+/* Change MODEL as the relay changes after STEP.  */
+static void
+model_apply (struct model *model, enum model_step step)
+{
+  switch (step)
+    {
+    case STEP_DOWN:
+      /* A session that ends removes its socket, and then closes its
+	 connection.  */
+      model->up = false;
+      model->exited = model->pair;
+      model->pair = false;
+      break;
+    case STEP_UP:
+      model->up = true;
+      break;
+    case STEP_CONNECT:
+      model->pair = model->up;
+      if (model->up)
+	model->stopping = false;
+      else
+	model->refused = model->stopping = true;
+      break;
+    case STEP_CLOSE_REFUSED:
+      model->refused = false;
+      model->exited = model->stopping;
+      break;
+    case STEP_CLOSE_PAIR:
+      model->pair = false;
+      break;
+    case STEP_COUNT:
+      break;
+    }
+}
+
+/* Do STEP on the real side REAL.  Return false on an error of the
+   test.  */
+static bool
+real_apply (struct real *real, enum model_step step)
+{
+  struct run *run = &real->run;
+  switch (step)
+    {
+    case STEP_DOWN:
+      close (run->session);
+      run->session = -1;
+      unlink (run->socket);
+      if (real->pair_session >= 0)
+	close (real->pair_session);
+      real->pair_session = -1;
+      rc_stream_close (real->pair_client);
+      real->pair_client = NULL;
+      return true;
+    case STEP_UP:
+      return listen_session (run);
+    case STEP_CONNECT:
+      {
+	struct rc_stream *client = connect_client (run, true);
+	if (!client)
+	  return false;
+	if (run->session < 0)
+	  {
+	    /* The relay closes the refused client before CLIENT.  */
+	    if (real->refused)
+	      real->old[real->nold++] = real->refused;
+	    real->refused = client;
+	    real->heard = false;
+	    return true;
+	  }
+	rc_stream_close (real->pair_client);
+	if (real->pair_session >= 0)
+	  close (real->pair_session);
+	real->pair_client = client;
+	real->pair_session = accept_session (run, LIMIT);
+	return real->pair_session >= 0;
+      }
+    case STEP_CLOSE_REFUSED:
+      rc_stream_close (real->refused);
+      real->refused = NULL;
+      return true;
+    case STEP_CLOSE_PAIR:
+      rc_stream_close (real->pair_client);
+      real->pair_client = NULL;
+      {
+	bool closed = closed_p (real->pair_session, LIMIT);
+	close (real->pair_session);
+	real->pair_session = -1;
+	return closed;
+      }
+    case STEP_COUNT:
+      break;
+    }
+  return false;
+}
+
+/* Return true if REAL shows what MODEL says: a refused client got the
+   end-session message, and the bytes of the client of a pair reach the
+   session.  A refused client reads the message one time.  */
+static bool
+real_agrees_p (struct real *real, const struct model *model)
+{
+  if (model->exited)
+    return true;
+  char expected[16];
+  size_t size = end_bytes (expected);
+  if (model->refused && !real->heard)
+    {
+      if (!real->refused || !reads_bytes (real->refused, expected, size))
+	return false;
+      real->heard = true;
+    }
+  if (!model->pair)
+    return true;
+  static const char bytes[] = "pair";
+  struct pollfd ready = { .fd = real->pair_session, .events = POLLIN };
+  char got[sizeof bytes];
+  return (write_stream (real->pair_client, bytes, sizeof bytes)
+	  && poll (&ready, 1, LIMIT) == 1
+	  && read (real->pair_session, got, sizeof got) == sizeof got
+	  && memcmp (got, bytes, sizeof got) == 0);
+}
+
+/* Return the next number of the generator with the state STATE
+   (splitmix64).  */
+static uint64_t
+next_random (uint64_t *state)
+{
+  uint64_t z = (*state += 0x9e3779b97f4a7c15);
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+  return z ^ (z >> 31);
 }
 
 /* Put the end-session message of a session that does not exist in

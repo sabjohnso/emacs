@@ -107,6 +107,7 @@ static bool prepare (struct relay *, const char *,
 static enum daemon start_daemon (void);
 static void announce (const struct rc_relay_line *);
 static void serve (struct relay *);
+static bool stopped_p (const struct relay *);
 static int watch (const struct relay *, struct pollfd *);
 static void watch_pair (const struct relay *, struct pollfd *);
 static bool client_buffered_p (const struct relay *);
@@ -239,11 +240,12 @@ announce (const struct rc_relay_line *line)
 }
 
 /* Serve the clients of RELAY until the session stops.  After a
-   refusal, serve until the relay has no refused client.  */
+   refusal, serve until the relay has no refused client and no
+   connection that waits for its token (stopped_p).  */
 static void
 serve (struct relay *relay)
 {
-  while (!(relay->stopping && !relay->refused))
+  while (!stopped_p (relay))
     {
       struct pollfd fds[WATCH_SIZE];
       int wait = watch (relay, fds);
@@ -265,6 +267,17 @@ serve (struct relay *relay)
 	accept_client (relay);
       expire_pending (relay);
     }
+}
+
+/* Return true if RELAY must stop after a refusal: it has no refused
+   client, and no connection waits for its token.  A connection that
+   waits can be a client of the stopped session, and that client must
+   get its own refusal.  */
+static bool
+stopped_p (const struct relay *relay)
+{
+  return (relay->stopping && !relay->refused
+	  && rc_pending_count (&relay->pending) == 0);
 }
 
 /* Fill FDS with the descriptors of RELAY and their events.  Return the

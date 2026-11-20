@@ -24,11 +24,18 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef REMOTE_CLIENT_ENDING_H
 #define REMOTE_CLIENT_ENDING_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Return the exit status of the program after an end-session message
    with the reason REASON: 0 for a session that ended on purpose, and
    1 for each other reason.  */
 extern int rc_end_status (uint8_t reason);
+
+/* Return the exit status of the window mode at its end.  ENDED is true
+   after an end-session message with the reason REASON; then the status
+   is that of REASON.  Else the status is 1 if FAILED, that is, if the
+   last connection had an error, and 0 if not.  */
+extern int rc_exit_status (bool ended, uint8_t reason, bool failed);
 
 #endif /* REMOTE_CLIENT_ENDING_H */

@@ -27,3 +27,11 @@ rc_end_status (uint8_t reason)
 {
   return reason == RD_END_CLOSED ? 0 : 1;
 }
+
+int
+rc_exit_status (bool ended, uint8_t reason, bool failed)
+{
+  if (ended)
+    return rc_end_status (reason);
+  return failed ? 1 : 0;
+}

@@ -622,9 +622,7 @@ show_frames (struct rc_renderer *renderer, struct rc_font_store *store,
 static int
 exit_status (const struct window_mode *mode)
 {
-  if (mode->ended)
-    return rc_end_status (mode->end_reason);
-  return mode->failed ? 1 : 0;
+  return rc_exit_status (mode->ended, mode->end_reason, mode->failed);
 }
 
 /* Make STREAM the connection of MODE.  MODE must have no connection.
