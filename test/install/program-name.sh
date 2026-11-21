@@ -42,14 +42,18 @@
 # A failure prints the seed and the options of the trial.
 
 main () {
-  local srcdir trials=${2:-150} seed=${3:-$$}
+  local srcdir trials=${2:-250} seed=${3:-$$}
   srcdir=$(cd "$1" && pwd) || exit 1
   work=$(mktemp -d) || exit 1
   trap 'rm -rf "$work"' EXIT
+  check_build_files "$srcdir" || exit 1
   make_configure "$srcdir" || exit 1
   RANDOM=$seed
   local i
   count_emacs=0 count_renamed=0 count_rejected=0
+  declare -gA count_class
+  local class
+  for class in "${invalid_classes[@]}"; do count_class["$class"]=0; done
   for ((i = 0; i < trials; i++)); do
     make_case
     check_case || {
@@ -66,8 +70,52 @@ main () {
 	 "$count_rejected rejected)" >&2
     exit 1
   fi
+  # Each class of invalid name must have a rejected trial.
+  local fewest=$trials
+  for class in "${invalid_classes[@]}"; do
+    if [ "${count_class["$class"]}" = 0 ]; then
+      echo "program-name.sh: seed $seed: no rejected trial has the" \
+	   "class [$class]" >&2
+      exit 1
+    fi
+    ((count_class["$class"] < fewest)) && fewest=${count_class["$class"]}
+  done
   echo "program-name.sh: $trials trials pass ($count_emacs emacs," \
-       "$count_renamed renamed, $count_rejected rejected), seed $seed"
+       "$count_renamed renamed, $count_rejected rejected; each class of" \
+       "invalid name has at least $fewest), seed $seed"
+}
+
+# The classes of invalid names: the empty name, and a name with one of
+# these characters.
+invalid_classes=(empty '$' '&' '\' ' ' ';' '*' "'" '`' '#' '%' '(' '!' '/')
+
+# The characters that the generator puts in a name to make it invalid.
+# A prefix or a suffix cannot have "&" or "\" (see make_case).
+specials=' ;*'"'"'`#%(!/'
+
+# Check that the real build files use the macros as the small
+# configure script of this check does: configure.ac calls
+# emacs_PROGRAM_NAME and then emacs_ETCDOCDIR after AC_ARG_PROGRAM,
+# and Makefile.in takes etcdocdir from configure and compares it with
+# etcdir for SHARED_PREFIX.
+check_build_files () {
+  local srcdir=$1
+  awk '
+    /^AC_ARG_PROGRAM$/ { arg = NR }
+    /^emacs_PROGRAM_NAME$/ { if (arg && !name) name = NR }
+    /^emacs_ETCDOCDIR$/ { if (name && !doc) doc = NR }
+    END { exit !(arg && name && doc) }
+  ' "$srcdir/configure.ac" || {
+    echo "program-name.sh: configure.ac does not call emacs_PROGRAM_NAME" \
+	 "and then emacs_ETCDOCDIR after AC_ARG_PROGRAM" >&2
+    return 1
+  }
+  grep -qx 'etcdocdir=@etcdocdir@' "$srcdir/Makefile.in" \
+    && grep -qxF 'ifeq (${etcdocdir},${etcdir})' "$srcdir/Makefile.in" || {
+    echo "program-name.sh: Makefile.in does not take etcdocdir from" \
+	 "configure for SHARED_PREFIX" >&2
+    return 1
+  }
 }
 
 # Make the small configure script and its Makefile.in in $work, from
@@ -111,17 +159,53 @@ EOF
 # because AC_ARG_PROGRAM puts them in an "s&...&" command of sed.
 # The generators set REPLY and do not run in a subshell, because a
 # subshell gets a new seed of RANDOM.
+#
+# A special character (see specials) goes in a prefix, in a suffix, or
+# in a last command that adds it at the end of the name.  Make cannot
+# read some of them in TRANSFORM, so a case with a special character
+# has no command that can remove it (".*"), and configure must reject
+# the name before make runs.
 make_case () {
   random_word 'gx1-._$+'
   prefix=$REPLY
+  random_special "$prefix"
+  prefix=$REPLY
   random_word 'rmt2-._$+'
   suffix=$REPLY
+  random_special "$suffix"
+  suffix=$REPLY
+  local special=
+  case $prefix$suffix in *[$specials]*) special=yes ;; esac
   transform=
   local n=$((RANDOM % 3)) j
   for ((j = 0; j < n; j++)); do
-    random_command
+    random_command "$special"
     transform+=${transform:+;}$REPLY
   done
+  if [ $((RANDOM % 6)) = 0 ]; then
+    special_command
+    transform+=${transform:+;}$REPLY
+  fi
+}
+
+# Set REPLY to the word $1, with a random special character at a random
+# place in one of six cases.
+random_special () {
+  REPLY=$1
+  if [ $((RANDOM % 6)) = 0 ]; then
+    local c=${specials:$((RANDOM % ${#specials})):1}
+    local at=$((RANDOM % (${#REPLY} + 1)))
+    REPLY=${REPLY:0:at}$c${REPLY:at}
+  fi
+}
+
+# Set REPLY to an "s" command of sed that adds a random special
+# character at the end of the name.  The delimiter of the command is
+# not that character.
+special_command () {
+  local c=${specials:$((RANDOM % ${#specials})):1} d
+  for d in ',' '|' '@'; do [ "$d" != "$c" ] && break; done
+  REPLY=s$d'$'$d$c$d
 }
 
 # Set REPLY to a word of 1 to 3 characters from the set $1, or to an
@@ -139,7 +223,10 @@ random_word () {
 # (one "\"), "\&" (one "&"), "&" (the match), "$", and a back
 # reference.
 random_command () {
-  local regexes=('e' '^e' 's$' 'ma' '\(ma\)' 'x' 'emacs' '[cs]' '.*')
+  local regexes=('e' '^e' 's$' 'ma' '\(ma\)' 'x' 'emacs' '[cs]')
+  # Only ".*" and "^.*$" can remove all of the name, so a case with a
+  # special character does not get them.
+  [ -z "$1" ] && regexes+=('.*' '^.*$')
   local pieces=('a' 'Z' '-' '$' '\\' '&' '\&' '_')
   local delimiters=',/|'
   local d=${delimiters:$((RANDOM % 3)):1}
@@ -180,6 +267,7 @@ check_case () {
       return 1
     fi
     count_rejected=$((count_rejected + 1))
+    count_classes "$expected"
     return 0
   fi
   local result
@@ -209,6 +297,19 @@ check_case () {
 	 "expected [$expected_doc]" >&2
     return 1
   fi
+}
+
+# Count the classes of the invalid name $1.
+count_classes () {
+  local class count
+  for class in "${invalid_classes[@]}"; do
+    case $class in
+      empty) [ -z "$1" ] || continue ;;
+      *) case $1 in *"$class"*) ;; *) continue ;; esac ;;
+    esac
+    count=${count_class["$class"]}
+    count_class["$class"]=$((count + 1))
+  done
 }
 
 # Return true if configure must accept the name $1.

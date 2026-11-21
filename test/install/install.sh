@@ -45,8 +45,11 @@
 #   files that the builds share (emacs-module.h, the manuals, lisp,
 #   etc/DOC, and the programs in archlibdir), and the files of the
 #   other "emacs".
-# - default: an install with etcdocdir equal to etcdir (as for the
-#   name "emacs") replaces etc/DOC.
+# - default: with etcdocdir equal to etcdir (as for the name "emacs"),
+#   install-arch-indep deletes etc/DOC, and install-etcdoc puts the
+#   DOC file of the build there.
+# - fingerprint, dump: the build has a fingerprint, and the install
+#   puts its dump file in archlibdir.
 
 main () {
   builddir=$(cd "$1" && pwd) || exit 1
@@ -64,6 +67,7 @@ main () {
   trap 'chmod -R u+w "$destdir"; rm -rf "$destdir"' EXIT
   log=$destdir.log
   check name [ "$etcdocdir" = "$etcdir-$emacs_name" ]
+  check fingerprint [ -n "$fingerprint" ]
   check built [ -x "$builddir/remote-client/$client" ]
   check missing missing_client_fails
   plant_other_emacs
@@ -71,8 +75,10 @@ main () {
   check client [ -x "$destdir$bindir/$client" ]
   check doc same_as_planted
   check doc [ -f "$destdir$etcdocdir/DOC" ]
+  check dump [ -f "$destdir$archlibdir/emacs-$fingerprint.pdmp" ]
   for mode in c x; do
     check "tar -$mode" install_with_failed_tar $mode
+    check "tar -$mode" [ -f "$destdir/tar-failed-$mode" ]
     check "tar -$mode" same_as_planted
   done
   make -C "$builddir" uninstall DESTDIR="$destdir" >> "$log" 2>&1 \
@@ -88,8 +94,10 @@ main () {
   check uninstall same_as_planted
   check uninstall [ -e "$destdir$bindir/emacs" ]
   check uninstall [ -e "$destdir$archlibdir/emacs-other.pdmp" ]
+  check default install_default_etc
+  check default [ ! -e "$destdir$etcdir/DOC" ]
   check default install_default_doc
-  check default not_same_as_planted
+  check default cmp -s "$builddir/etc/DOC" "$destdir$etcdir/DOC"
   rm -f "$log"
   echo "install.sh: all checks pass"
 }
@@ -159,10 +167,6 @@ same_as_planted () {
   cmp -s "$destdir/DOC.planted" "$destdir$etcdir/DOC"
 }
 
-not_same_as_planted () {
-  ! same_as_planted
-}
-
 # Return true if the install of a client program that does not exist
 # fails with a message that tells the user to run "make".
 missing_client_fails () {
@@ -177,7 +181,9 @@ missing_client_fails () {
 
 # Return true if "make install" fails when tar fails in the copy of
 # etc.  If $1 is "c", the fake tar fails when it makes an archive; if
-# $1 is "x", it fails when it extracts one.  It runs the real tar in
+# $1 is "x", it fails when it extracts one.  Before it fails, it makes
+# the file tar-failed-$1 in the DESTDIR, so the check can see that the
+# install failed because of the fake tar.  It runs the real tar in
 # other cases.
 install_with_failed_tar () {
   local bin=$destdir/fake-bin-$1 real
@@ -186,7 +192,7 @@ install_with_failed_tar () {
   cat > "$bin/tar" <<EOF
 #!/bin/sh
 case \$PWD in
-  */etc) case \$1 in -$1*) exit 1 ;; esac ;;
+  */etc) case \$1 in -$1*) : > "$destdir/tar-failed-$1"; exit 1 ;; esac ;;
 esac
 exec "$real" "\$@"
 EOF
@@ -196,11 +202,18 @@ EOF
 
 # Copy etc as a build with the name "emacs" does: etcdocdir is etcdir.
 # Only install-arch-indep runs; "-o" stops make from making the targets
-# that it depends on.
-install_default_doc () {
+# that it depends on.  It must not keep etc/DOC.
+install_default_etc () {
   make -C "$builddir" install-arch-indep DESTDIR="$destdir" \
        etcdocdir="$etcdir" -o lisp -o install-info -o install-man \
        -o install-etc >> "$log" 2>&1
+}
+
+# Install the DOC file as a build with the name "emacs" does.  Then
+# etc/DOC must be the DOC file of the build.
+install_default_doc () {
+  make -C "$builddir" install-etcdoc DESTDIR="$destdir" \
+       etcdocdir="$etcdir" -o src -o install-arch-indep >> "$log" 2>&1
 }
 
 main "$@"
