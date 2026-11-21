@@ -20,71 +20,96 @@
 
 # Usage: install.sh BUILDDIR
 #
-# BUILDDIR is a build that "make" made, configured with
-# --with-remote-display and with a program name that is not "emacs",
-# for example with --program-suffix=-remote.  For another build, the
-# check prints SKIP and exits with the status 0.
+# BUILDDIR is a build that "make" made, with the client program of the
+# remote display (HAVE_REMOTE_CLIENT is "yes").  For another build,
+# the check prints SKIP and exits with the status 0.
 #
 # The check installs the build in a temporary DESTDIR, and removes the
-# DESTDIR at the end.  The DESTDIR first gets the files of the "emacs"
-# of another configuration: an etc/DOC file with random bytes, a dump
-# file, and a program in bindir.  These are the facts that it checks:
+# DESTDIR at the end.  These are the facts that it checks in each
+# build:
 #
-# - name: etcdocdir is etcdir with "-NAME" after it.
+# - fingerprint, dump: the build has a fingerprint, and the install
+#   puts its dump file in archlibdir.
 # - built: "make" made the client program in BUILDDIR/remote-client.
 # - missing: the install of a client program that does not exist
 #   fails, and tells the user to run "make".
-# - client: "make install" puts the client program in bindir.
+# - client: "make install" puts the client program in bindir, with the
+#   name emacs-remote-client.
+# - uninstall: "make uninstall" removes the client program and the
+#   program of Emacs, and keeps a file of another program in bindir.
+#
+# A build with the name "emacs" also checks this fact:
+#
+# - doc: etc/DOC is the DOC file of the build.
+#
+# A build with another name (for example from --program-suffix=-remote)
+# shares the prefix with the "emacs" of another configuration.  The
+# DESTDIR first gets the files of that "emacs": an etc/DOC file with
+# random bytes, a dump file, and a program in bindir.  The check then
+# also checks these facts:
+#
+# - name: etcdocdir is etcdir with "-NAME" after it.
 # - doc: the install keeps the bytes of the planted etc/DOC.  The DOC
 #   file of the build goes in etcdocdir.
 # - tar: when tar fails in the copy of etc, the install fails, and
 #   etc/DOC keeps its bytes.  One pass fails the creation of the
 #   archive, and one pass fails its extraction.
-# - uninstall: "make uninstall" removes the files of the build (the
-#   client, the program, etcdocdir, and the dump file).  It keeps the
-#   files that the builds share (emacs-module.h, the manuals, lisp,
-#   etc/DOC, and the programs in archlibdir), and the files of the
-#   other "emacs".
+# - uninstall: "make uninstall" also removes etcdocdir and the dump
+#   file.  It keeps the files that the builds share (emacs-module.h,
+#   the manuals, lisp, etc/DOC, and the programs in archlibdir), and
+#   the files of the other "emacs".
 # - default: with etcdocdir equal to etcdir (as for the name "emacs"),
 #   install-arch-indep deletes etc/DOC, and install-etcdoc puts the
 #   DOC file of the build there.
-# - fingerprint, dump: the build has a fingerprint, and the install
-#   puts its dump file in archlibdir.
 
 main () {
   builddir=$(cd "$1" && pwd) || exit 1
   read_variables
-  case $have_remote_display in
+  case $have_remote_client in
     yes | no) ;;
-    *) fail "cannot read HAVE_REMOTE_DISPLAY: [$have_remote_display]" ;;
+    *) fail "cannot read HAVE_REMOTE_CLIENT: [$have_remote_client]" ;;
   esac
-  if [ "$have_remote_display" != yes ] || [ "$emacs_name" = emacs ]; then
-    echo "SKIP install.sh: the build must have the remote display and" \
-	 "a program name that is not \"emacs\""
+  if [ "$have_remote_client" != yes ]; then
+    echo "SKIP install.sh: the build does not make the client program"
     exit 0
   fi
   destdir=$(mktemp -d) || exit 1
   trap 'chmod -R u+w "$destdir"; rm -rf "$destdir"' EXIT
   log=$destdir.log
-  check name [ "$etcdocdir" = "$etcdir-$emacs_name" ]
   check fingerprint [ -n "$fingerprint" ]
   check built [ -x "$builddir/remote-client/$client" ]
   check missing missing_client_fails
+  if [ "$emacs_name" = emacs ]; then
+    check_default_name
+  else
+    check_other_name
+  fi
+  rm -f "$log"
+  echo "install.sh: all checks pass (program name $emacs_name)"
+}
+
+# Check the install and the uninstall of a build with the name "emacs".
+check_default_name () {
+  plant_other_program
+  install_and_check
+  check doc cmp -s "$builddir/etc/DOC" "$destdir$etcdir/DOC"
+  uninstall_and_check
+}
+
+# Check the install and the uninstall of a build with another name, in
+# a prefix that has the files of another "emacs".
+check_other_name () {
+  check name [ "$etcdocdir" = "$etcdir-$emacs_name" ]
   plant_other_emacs
-  install_quiet || fail "make install failed (see $log)"
-  check client [ -x "$destdir$bindir/$client" ]
+  install_and_check
   check doc same_as_planted
   check doc [ -f "$destdir$etcdocdir/DOC" ]
-  check dump [ -f "$destdir$archlibdir/emacs-$fingerprint.pdmp" ]
   for mode in c x; do
     check "tar -$mode" install_with_failed_tar $mode
     check "tar -$mode" [ -f "$destdir/tar-failed-$mode" ]
     check "tar -$mode" same_as_planted
   done
-  make -C "$builddir" uninstall DESTDIR="$destdir" >> "$log" 2>&1 \
-    || fail "make uninstall failed (see $log)"
-  check uninstall [ ! -e "$destdir$bindir/$client" ]
-  check uninstall [ ! -e "$destdir$bindir/$emacs_name" ]
+  uninstall_and_check
   check uninstall [ ! -e "$destdir$etcdocdir" ]
   check uninstall [ ! -e "$destdir$archlibdir/emacs-$fingerprint.pdmp" ]
   check uninstall [ -f "$destdir$includedir/emacs-module.h" ]
@@ -98,13 +123,29 @@ main () {
   check default [ ! -e "$destdir$etcdir/DOC" ]
   check default install_default_doc
   check default cmp -s "$builddir/etc/DOC" "$destdir$etcdir/DOC"
-  rm -f "$log"
-  echo "install.sh: all checks pass"
+}
+
+# Install the build, and check the files that each build installs.
+install_and_check () {
+  install_quiet || fail "make install failed (see $log)"
+  check client [ -x "$destdir$bindir/$client" ]
+  check client [ "$client" = emacs-remote-client ]
+  check dump [ -f "$destdir$archlibdir/emacs-$fingerprint.pdmp" ]
+}
+
+# Uninstall the build, and check the files that each uninstall
+# removes or keeps.
+uninstall_and_check () {
+  make -C "$builddir" uninstall DESTDIR="$destdir" >> "$log" 2>&1 \
+    || fail "make uninstall failed (see $log)"
+  check uninstall [ ! -e "$destdir$bindir/$client" ]
+  check uninstall [ ! -e "$destdir$bindir/$emacs_name" ]
+  check uninstall [ -e "$destdir$bindir/other-program" ]
 }
 
 # Set the variables of the Makefile of the build that the check uses.
 read_variables () {
-  have_remote_display=$(variable HAVE_REMOTE_DISPLAY)
+  have_remote_client=$(variable HAVE_REMOTE_CLIENT)
   emacs_name=$(variable EMACS_NAME)
   bindir=$(variable bindir)
   lispdir=$(variable lispdir)
@@ -143,11 +184,18 @@ install_quiet () {
   make -C "$builddir" install DESTDIR="$destdir" >> "$log" 2>&1
 }
 
+# Put a file of another program in bindir of the DESTDIR.
+plant_other_program () {
+  mkdir -p "$destdir$bindir"
+  : > "$destdir$bindir/other-program"
+}
+
 # Put the files of the "emacs" of another configuration in the
 # DESTDIR: etc/DOC with random bytes (and a copy), a dump file, and the
-# program.
+# program.  Also put a file of another program in bindir.
 plant_other_emacs () {
-  mkdir -p "$destdir$etcdir" "$destdir$archlibdir" "$destdir$bindir"
+  plant_other_program
+  mkdir -p "$destdir$etcdir" "$destdir$archlibdir"
   head -c 4096 /dev/urandom > "$destdir/DOC.planted"
   cp "$destdir/DOC.planted" "$destdir$etcdir/DOC"
   : > "$destdir$archlibdir/emacs-other.pdmp"

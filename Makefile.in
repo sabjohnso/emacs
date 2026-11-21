@@ -343,13 +343,13 @@ EMACS = ${EMACS_NAME}${EXEEXT}
 EMACSFULL = `echo emacs-${version} | sed '$(TRANSFORM)'`${EXEEXT}
 EMACS_PDMP = `./src/emacs${EXEEXT} --fingerprint`.pdmp
 
-# "yes" if the remote display is the window system.  Such a build also
-# makes and installs the client program of the remote display in
-# remote-client.  The install does not change the name of the client
-# program, because the client runs the relay on the host with that
-# name.
-HAVE_REMOTE_DISPLAY = @HAVE_REMOTE_DISPLAY@
-ifeq (${HAVE_REMOTE_DISPLAY},yes)
+# "yes" if configure decided to make the client program of the remote
+# display in remote-client (see m4/emacs-remote-client.m4).  Then
+# "make" makes it, and "make install" installs it.  The install does
+# not change the name of the client program, because the client runs
+# the relay on the host with that name.
+HAVE_REMOTE_CLIENT = @HAVE_REMOTE_CLIENT@
+ifeq (${HAVE_REMOTE_CLIENT},yes)
 REMOTE_CLIENT = remote-client
 endif
 
@@ -646,7 +646,7 @@ write_subdir=if [ -f "$${subdir}/subdirs.el" ]; \
 install-arch-dep: src install-arch-indep install-etcdoc install-$(NTDIR)
 	umask 022; ${MKDIR_P} "$(DESTDIR)${bindir}"
 	$(MAKE) -C lib-src install
-ifeq (${HAVE_REMOTE_DISPLAY},yes)
+ifeq (${HAVE_REMOTE_CLIENT},yes)
 	$(MAKE) -C remote-client install
 endif
 ifeq (${ns_self_contained},no)
@@ -976,7 +976,7 @@ UNINSTALL_SHARED = uninstall-doc uninstall-gsettings-schemas
 endif
 
 uninstall: uninstall-$(NTDIR) $(UNINSTALL_SHARED)
-ifeq (${HAVE_REMOTE_DISPLAY},yes)
+ifeq (${HAVE_REMOTE_CLIENT},yes)
 	$(MAKE) -C remote-client uninstall
 endif
 ifeq (${SHARED_PREFIX},yes)
@@ -1195,15 +1195,18 @@ test/%:
 
 ## 'check-install' checks the installed name of Emacs and the directory
 ## of its DOC file for random --program-prefix, --program-suffix, and
-## --program-transform-name options, with autoconf and a small
-## configure script.  In a build with --with-remote-display and a
-## program name that is not "emacs", it also installs the build in a
-## temporary DESTDIR, and checks the client program, the DOC files, and
-## the uninstall in a prefix that has the files of another "emacs".
-## The checks take minutes, so "make check" does not run this target.
+## --program-transform-name options, and the option
+## --with-remote-client, with autoconf and small configure scripts.  In
+## a build that makes the client program of the remote display, it also
+## installs the build in a temporary DESTDIR, and checks the client
+## program and the uninstall.  For a program name that is not "emacs",
+## it also checks the DOC files and the uninstall in a prefix that has
+## the files of another "emacs".  The checks take minutes, so "make
+## check" does not run this target.
 .PHONY: check-install
 check-install: all
 	${srcdir}/test/install/program-name.sh ${srcdir}
+	${srcdir}/test/install/client-option.sh ${srcdir} .
 	${srcdir}/test/install/install.sh .
 
 

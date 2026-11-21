@@ -4385,25 +4385,10 @@ fi
 AC_SUBST([REMOTE_DISPLAY_OBJ])
 AC_SUBST([HAVE_REMOTE_DISPLAY])
 
-dnl The libraries of the client program of the remote display in
-dnl remote-client.  Each configuration looks for them, so a developer
-dnl can make and test the client in any build ("make -C remote-client
-dnl check").  The tests also use x11 and xtst.  A build with the remote
-dnl display makes the client in "make", so it needs the libraries of
-dnl the program.
+dnl The client program of the remote display (see
+dnl m4/emacs-remote-client.m4).
 if test "${ANDROID}" != "yes"; then
-  EMACS_CHECK_MODULES([RC_BASE],
-    [cairo cairo-ft fontconfig freetype2 glib-2.0])
-  EMACS_CHECK_MODULES([RC_TLS], [gnutls])
-  EMACS_CHECK_MODULES([RC_GTK], [gtk+-3.0])
-  EMACS_CHECK_MODULES([RC_X11], [x11 xtst])
-fi
-if test "$HAVE_REMOTE_DISPLAY" = yes \
-   && test "$HAVE_RC_BASE$HAVE_RC_TLS$HAVE_RC_GTK" != yesyesyes; then
-  AC_MSG_ERROR([The client program of the remote display needs the
-pkg-config packages cairo, cairo-ft, fontconfig, freetype2, glib-2.0,
-gnutls, and gtk+-3.0.  Install their development files, or configure
-without --with-remote-display.])
+  emacs_REMOTE_CLIENT
 fi
 
 if test "$window_system" = "pgtk" || test "$window_system" = "remote"; then
@@ -7575,6 +7560,7 @@ AS_ECHO(["  Does Emacs use -lXaw3d?                                 ${HAVE_XAW3D
   Does Emacs use toolkit scroll bars?                     ${USE_TOOLKIT_SCROLL_BARS}
   Does Emacs support Xwidgets?                            ${HAVE_XWIDGETS}
   Does Emacs support the remote display protocol?         ${HAVE_REMOTE_DISPLAY}
+  Does Emacs make the client of the remote display?       ${HAVE_REMOTE_CLIENT}
   Does Emacs have threading support in lisp?              ${threads_enabled}
   Does Emacs support the portable dumper?                 ${with_pdumper}
   Which dumping strategy does Emacs use?                  ${with_dumping}
