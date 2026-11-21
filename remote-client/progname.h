@@ -20,10 +20,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #ifndef RC_PROGNAME_H
 #define RC_PROGNAME_H
 
-/* The name of the program.  The messages and the usage of the program
-   start with this name.  The remote command that the client gives to
-   SSH runs the relay with this name, so the relay must have this name
-   in the PATH of the host.  */
-#define RC_PROGRAM "emacs-remote-client"
+/* RC_PROGRAM is the name of the program, as a string.  The Makefile
+   defines it from PROGRAM, so the file of the program and its
+   messages have the same name.  The messages and the usage of the
+   program start with this name.  The remote command that the client
+   gives to SSH runs the relay with this name, so the relay must have
+   this name in the PATH of the host.  */
+#ifndef RC_PROGRAM
+# error "RC_PROGRAM is not defined; the Makefile defines it from PROGRAM"
+#endif
 
 #endif /* RC_PROGNAME_H */

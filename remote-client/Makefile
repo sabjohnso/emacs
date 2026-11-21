@@ -26,7 +26,7 @@ PKG_CONFIG = pkg-config
 PACKAGES = cairo cairo-ft fontconfig freetype2 glib-2.0
 CFLAGS = -O2 -g
 WARNINGS = -Wall -Wextra
-ALL_CFLAGS = $(WARNINGS) -I. -I../src \
+ALL_CFLAGS = $(WARNINGS) -DRC_PROGRAM='"$(PROGRAM)"' -I. -I../src \
   $(shell $(PKG_CONFIG) --cflags $(PACKAGES)) $(CFLAGS)
 LIBS = $(shell $(PKG_CONFIG) --libs $(PACKAGES)) -lm
 
@@ -43,8 +43,8 @@ GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 # the XTEST extension.
 X11_LIBS = $(shell $(PKG_CONFIG) --libs x11 xtst)
 
-# The program.  RC_PROGRAM in progname.h has the same name, because the
-# messages of the program and the remote command of SSH use it.
+# The program.  The C files get its name as RC_PROGRAM (see
+# progname.h), for the messages and for the remote command of SSH.
 PROGRAM = emacs-remote-client
 
 RENDER_OBJS = render.o images.o table.o rdproto.o rdchunk.o rdpng.o
@@ -77,7 +77,18 @@ all: $(PROGRAM) $(TESTS)
 $(PROGRAM): $(CLIENT_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(TLS_LIBS) $(LIBS)
 
-check: $(PROGRAM) $(TESTS)
+# The first line of the usage starts with "Usage: $(PROGRAM) ".  The
+# check takes the name from this Makefile, so it fails if the program
+# has another name in its messages.
+check-usage: $(PROGRAM)
+	@line=`./$(PROGRAM) 2>&1 | head -n 1`; \
+	case "$$line" in \
+	  "Usage: $(PROGRAM) "*) ;; \
+	  *) echo "check-usage: the first line of the usage is \"$$line\"" >&2; \
+	     exit 1 ;; \
+	esac
+
+check: $(PROGRAM) $(TESTS) check-usage
 	./test-table
 	./test-render
 	./test-reader
@@ -304,4 +315,4 @@ bootstrap.o child.o client.o relay.o sshargs.o stack.o unixsocket.o: \
 clean:
 	rm -f *.o $(PROGRAM) $(TESTS)
 
-.PHONY: all check check-sanitize clean
+.PHONY: all check check-usage check-sanitize clean
