@@ -18,15 +18,17 @@
 # You should have received a copy of the GNU General Public License
 # along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 
-# Usage: client-option.sh SRCDIR [BUILDDIR]
+# Usage: client-option.sh SRCDIR BUILDDIR
 #
-# SRCDIR is the source directory of Emacs.  The check makes a small
-# configure script with autoconf.  The script runs the macro
-# emacs_REMOTE_CLIENT of SRCDIR/m4/emacs-remote-client.m4, with
-# EMACS_CHECK_MODULES from SRCDIR/configure.ac (and the macros of
-# m4/pkg.m4 and m4/ndk-build.m4 that it uses).  It sets
-# HAVE_REMOTE_DISPLAY from its option --with-remote-display, as the
-# window system of configure.ac does.  The check runs the script for
+# SRCDIR is the source directory of Emacs, and BUILDDIR is a configured
+# build of it.  The check makes a small configure script with autoconf.
+# The script runs the macro emacs_REMOTE_CLIENT of
+# SRCDIR/m4/emacs-remote-client.m4, with EMACS_CHECK_MODULES from
+# SRCDIR/configure.ac (and the macros of m4/pkg.m4 and m4/ndk-build.m4
+# that it uses).  Before the macro, it runs the lines of configure.ac
+# that set HAVE_REMOTE_DISPLAY: the option --with-remote-display
+# (OPTION_DEFAULT_OFF), the window system "remote", and the block of
+# HAVE_REMOTE_DISPLAY.  The check runs the script for
 # each combination of the options and the libraries below, and
 # compares the result with expected_result.  Each run of configure has
 # an empty PKG_CONFIG_PATH, so the environment of the caller cannot
@@ -34,18 +36,19 @@
 #
 # The check also makes sure that the real build files use the result.
 # configure.ac must call emacs_REMOTE_CLIENT after it sets
-# HAVE_REMOTE_DISPLAY, and show HAVE_REMOTE_CLIENT in its summary.  If
-# BUILDDIR is given, it is a configured build: in its Makefile, with
-# HAVE_REMOTE_CLIENT "yes" and then "no", actual-all must depend on
+# HAVE_REMOTE_DISPLAY, and show HAVE_REMOTE_CLIENT in its summary.  In
+# the Makefile of BUILDDIR, with HAVE_REMOTE_CLIENT "yes" and then
+# "no", actual-all must depend on
 # remote-client, install-arch-dep must install the client, and
 # uninstall must uninstall it, only for "yes".
 
 # The check runs each combination of these values.  A library value
 # other than "all" names a package that pkg-config does not find when
 # configure asks for it (see hide_package).
-client_options=('' '--with-remote-client' '--without-remote-client'
+client_options=('' '--with-remote-client' '--with-remote-client=yes'
+		'--without-remote-client' '--with-remote-client=no'
 		'--with-remote-client=maybe')
-display_options=('' '--with-remote-display')
+display_options=('' '--with-remote-display' '--with-remote-display=no')
 libraries=(all gtk+-3.0 gnutls cairo x11)
 
 # Print the expected result for the client option $1, the display
@@ -55,16 +58,17 @@ libraries=(all gtk+-3.0 gnutls cairo x11)
 # without the client), or "package" (a missing library).  Only the
 # tests of the client use x11.
 expected_result () {
-  local missing=yes
+  local missing=yes display=
   case $3 in all | x11) missing= ;; esac
+  [ "$2" = --with-remote-display ] && display=yes
   case $1 in
     --with-remote-client=maybe) echo error:value ;;
-    --without-remote-client)
-      if [ -n "$2" ]; then echo error:conflict; else echo no; fi ;;
+    --without-remote-client | --with-remote-client=no)
+      if [ -n "$display" ]; then echo error:conflict; else echo no; fi ;;
     *)
       if [ -z "$missing" ]; then
 	echo yes
-      elif [ -n "$2" ] || [ "$1" = --with-remote-client ]; then
+      elif [ -n "$display" ] || [ -n "$1" ]; then
 	echo error:package
       else
 	echo no
@@ -83,13 +87,15 @@ error_phrase () {
 }
 
 main () {
+  if [ $# != 2 ]; then
+    echo "Usage: client-option.sh SRCDIR BUILDDIR" >&2
+    exit 2
+  fi
   local srcdir
   srcdir=$(cd "$1" && pwd) || exit 1
   local failed=0
   check_configure_ac "$srcdir" || failed=1
-  if [ -n "$2" ]; then
-    check_makefile "$2" || failed=1
-  fi
+  check_makefile "$2" || failed=1
   work=$(mktemp -d) || exit 1
   trap 'rm -rf "$work"' EXIT
   make_configure "$srcdir" || exit 1
@@ -174,8 +180,7 @@ make_configure () {
     sed -n '/^AC_DEFUN(\[EMACS_CHECK_MODULES\],$/,/^$/p' \
 	"$srcdir/configure.ac"
     echo 'PKG_PROG_PKG_CONFIG'
-    echo 'AC_ARG_WITH([remote-display], [],'
-    echo '  [HAVE_REMOTE_DISPLAY=$withval], [HAVE_REMOTE_DISPLAY=no])'
+    display_lines "$srcdir/configure.ac" || return 1
     echo 'emacs_REMOTE_CLIENT'
     echo 'echo "result: HAVE_REMOTE_CLIENT=$HAVE_REMOTE_CLIENT"'
     echo 'AC_OUTPUT'
@@ -188,6 +193,28 @@ make_configure () {
     echo "client-option.sh: autoconf failed" >&2
     return 1
   }
+}
+
+# Print the lines of the configure.ac $1 that set HAVE_REMOTE_DISPLAY:
+# the definition and the call of OPTION_DEFAULT_OFF for remote-display,
+# the "if" that sets the window system "remote", and the block from
+# HAVE_REMOTE_DISPLAY=no to its AC_SUBST.  Return false if a part is
+# missing.
+display_lines () {
+  local part text
+  for part in \
+      '/^AC_DEFUN(\[OPTION_DEFAULT_OFF\], \[dnl$/,/^\])dnl$/' \
+      '/^OPTION_DEFAULT_OFF(\[remote-display\],$/,/^$/' \
+      '/^if test "\${with_remote_display}" = "yes"; then$/,/^fi$/' \
+      '/^HAVE_REMOTE_DISPLAY=no$/,/^AC_SUBST(\[HAVE_REMOTE_DISPLAY\])$/'
+  do
+    text=$(sed -n "${part}p" "$1")
+    if [ -z "$text" ]; then
+      echo "client-option.sh: configure.ac has no part $part" >&2
+      return 1
+    fi
+    printf '%s\n' "$text"
+  done
 }
 
 # Make $work/no-$1, a pkg-config that fails when the modules that it
@@ -240,6 +267,11 @@ check_case () {
   if [ "$actual" = error ]; then
     local phrase
     phrase=$(error_phrase "${expected#error:}")
+    # A package error also names the package that is missing.
+    if [ "$expected" = error:package ] \
+       && ! printf '%s\n' "$output" | grep -qF -- "$3"; then
+      phrase=$3
+    fi
     if ! printf '%s\n' "$output" | grep -qF -- "$phrase"; then
       echo "FAIL client-option.sh: options [$options], hidden [$3]: the" \
 	   "error has no [$phrase]" >&2
