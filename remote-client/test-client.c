@@ -1,4 +1,4 @@
-/* Tests of the program remote-client.
+/* Tests of the program emacs-remote-client.
 
 Copyright (C) 2026 Free Software Foundation, Inc.
 
@@ -17,8 +17,8 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* The test starts "remote-client --render-to=FILE.png SOCKET" with a
-   socket of the test, and acts as the server.  The laws:
+/* The test starts "emacs-remote-client --render-to=FILE.png SOCKET"
+   with a socket of the test, and acts as the server.  The laws:
 
    - render-to: after the server closes the connection, the program
      writes the surface of the first frame that the server defined to
@@ -419,7 +419,7 @@ run_trial (uint64_t seed)
   if (!passed)
     fprintf (stderr, "test-client: seed %llu: %s\n",
 	     (unsigned long long) seed,
-	     (status == NOT_STARTED ? "./remote-client did not start"
+	     (status == NOT_STARTED ? "./emacs-remote-client did not start"
 	      : status == -1 ? "the program did not exit"
 	      : "the status or the pixels are not correct"));
   remove_run (&run);
@@ -456,8 +456,8 @@ run_client (struct run *run, const struct rd_message *messages, int n,
   if (pid == 0)
     {
       setenv ("XDG_CACHE_HOME", run->directory, 1);
-      execl ("./remote-client", "remote-client", option, run->socket,
-	     (char *) NULL);
+      execl ("./emacs-remote-client", "emacs-remote-client", option,
+	     run->socket, (char *) NULL);
       _exit (127);
     }
   struct pollfd wait = { .fd = listener, .events = POLLIN };

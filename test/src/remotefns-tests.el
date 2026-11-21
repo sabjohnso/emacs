@@ -184,7 +184,7 @@
 ;;     uses only an S from 1 to `remote-display--max-scale'.
 ;;
 ;; The message of the session block (Session end).  The server, or
-;; the relay of remote-client, sends this message to the client:
+;; the relay of emacs-remote-client, sends this message to the client:
 ;;
 ;; (end-session :reason R)
 ;;     The session ended, and the connection closes after this

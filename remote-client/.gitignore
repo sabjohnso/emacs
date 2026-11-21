@@ -3,7 +3,7 @@ test-render
 test-reader
 test-glyphs
 test-client
-remote-client
+emacs-remote-client
 test-table
 test-fonts
 test-input

@@ -17,8 +17,8 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* The test starts "remote-client --timeout=TIMEOUT SOCKET" with a
-   socket of the test, and acts as the server.  The program shows
+/* The test starts "emacs-remote-client --timeout=TIMEOUT SOCKET" with
+   a socket of the test, and acts as the server.  The program shows
    windows, so the check of the Makefile runs this test in Xvfb.  Each
    example first defines a frame, so the program has a window.
 
@@ -1353,8 +1353,8 @@ start_program (const struct run *run, const char *option)
   if (pid == 0)
     {
       setenv ("XDG_CACHE_HOME", run->directory, 1);
-      execl ("./remote-client", "remote-client", option, run->socket,
-	     (char *) NULL);
+      execl ("./emacs-remote-client", "emacs-remote-client", option,
+	     run->socket, (char *) NULL);
       _exit (127);
     }
   return pid;

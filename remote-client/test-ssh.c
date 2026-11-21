@@ -17,10 +17,10 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* The test starts "remote-client --ssh-command=FAKE --ssh HOST".  FAKE
-   is this program under the name fake-ssh.  The test acts as the
-   session, and the real relay of remote-client connects the session
-   and the client.  The program shows windows, so the check of the
+/* The test starts "emacs-remote-client --ssh-command=FAKE --ssh HOST".
+   FAKE is this program under the name fake-ssh.  The test acts as the
+   session, and the real relay of emacs-remote-client connects the
+   session and the client.  The program shows windows, so the check of the
    Makefile runs this test in Xvfb.
 
    As "ssh -G", the fake writes a configuration whose host name is
@@ -394,13 +394,13 @@ start_run (struct run *run, struct setup setup)
       setenv ("XDG_CACHE_HOME", run->directory, 1);
       for (int i = 0; i < 2 && setup.environment[i]; i++)
 	putenv ((char *) setup.environment[i]);
-      const char *argv[8] = { "remote-client", timeout, ssh };
+      const char *argv[8] = { "emacs-remote-client", timeout, ssh };
       int argc = 3;
       for (int i = 0; i < 2 && setup.options[i]; i++)
 	argv[argc++] = setup.options[i];
       argv[argc++] = "--ssh";
       argv[argc++] = "testhost";
-      execv ("./remote-client", (char **) argv);
+      execv ("./emacs-remote-client", (char **) argv);
       _exit (127);
     }
   run->connection = accept_while_running (run);
@@ -605,8 +605,8 @@ free_port (void)
 }
 
 /* Make the directory bin of RUN: fake-ssh is this program,
-   remote-client is the program of the test, and emacsclient prints the
-   session socket as Emacs prints a string.  */
+   emacs-remote-client is the program of the test, and emacsclient
+   prints the session socket as Emacs prints a string.  */
 static bool
 make_bin (const struct run *run)
 {
@@ -619,8 +619,8 @@ make_bin (const struct run *run)
   strcpy (target + length, "/test-ssh");
   if (symlink (target, name) != 0)
     return false;
-  snprintf (name, sizeof name, "%s/remote-client", bin);
-  strcpy (target + length, "/remote-client");
+  snprintf (name, sizeof name, "%s/emacs-remote-client", bin);
+  strcpy (target + length, "/emacs-remote-client");
   if (symlink (target, name) != 0)
     return false;
   snprintf (name, sizeof name, "%s/emacsclient", bin);
@@ -685,12 +685,12 @@ run_usage (const char *const *arguments)
   pid_t pid = fork ();
   if (pid == 0)
     {
-      const char *argv[8] = { "remote-client" };
+      const char *argv[8] = { "emacs-remote-client" };
       for (int i = 0; arguments[i] && i < 6; i++)
 	argv[i + 1] = arguments[i];
       dup2 (pipe_fds[1], STDERR_FILENO);
       close (pipe_fds[0]);
-      execv ("./remote-client", (char **) argv);
+      execv ("./emacs-remote-client", (char **) argv);
       _exit (127);
     }
   close (pipe_fds[1]);
@@ -703,7 +703,7 @@ run_usage (const char *const *arguments)
   text[used] = 0;
   close (pipe_fds[0]);
   int status = wait_for_exit (pid);
-  return strstr (text, "Usage: remote-client") ? status : -2;
+  return strstr (text, "Usage: emacs-remote-client") ? status : -2;
 }
 
 /* The fake SSH.  With -G, it writes a configuration.  Otherwise, it

@@ -17,7 +17,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* "remote-client --ssh HOST" runs SSH two times.  The bootstrap runs
+/* "emacs-remote-client --ssh HOST" runs SSH two times.  The bootstrap runs
    the remote command on HOST: it starts a session and its relay, and
    SSH gives the line of the relay to the client.  "ssh -G HOST" gives
    the configuration of HOST, so the client finds the name that SSH

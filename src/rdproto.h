@@ -521,8 +521,8 @@ enum { RD_MAX_SCALE = 8 };
 /* The messages of the end of a session.  When a session ends, the
    server sends this message, and then closes the connection.  Thus the
    client can tell the end of the session from the loss of the
-   connection.  The relay of remote-client also sends it when the
-   session does not exist.  */
+   connection.  The relay of emacs-remote-client also sends it when
+   the session does not exist.  */
 #define RD_SESSION_MESSAGES(MESSAGE)					\
   MESSAGE (END_SESSION, end_session, RD_END_SESSION_FIELDS)
 

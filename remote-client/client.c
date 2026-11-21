@@ -1,4 +1,4 @@
-/* The program remote-client: the client of a remote display session.
+/* The program emacs-remote-client: the client of a remote display session.
 
 Copyright (C) 2026 Free Software Foundation, Inc.
 
@@ -17,11 +17,12 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* Usage: remote-client [--render-to=FILE.png | --timeout=MS] SOCKET
-	  remote-client [--timeout=MS] [--ssh-command=PROGRAM]
-			[--listen=SPEC] [--connect=ADDRESS] [--session=NAME]
-			--ssh HOST
-	  remote-client --relay [--listen=SPEC] SOCKET
+/* Usage: emacs-remote-client [--render-to=FILE.png | --timeout=MS]
+			      SOCKET
+	  emacs-remote-client [--timeout=MS] [--ssh-command=PROGRAM]
+			      [--listen=SPEC] [--connect=ADDRESS]
+			      [--session=NAME] --ssh HOST
+	  emacs-remote-client --relay [--listen=SPEC] SOCKET
 
    The program connects to the Unix-domain socket SOCKET of a session,
    and shows each frame of the session in a window.  When the user

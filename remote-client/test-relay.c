@@ -17,8 +17,8 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* The test starts "remote-client --relay [--listen=SPEC] SOCKET" with
-   a socket of the test.  Most examples give no --listen, and give the
+/* The test starts "emacs-remote-client --relay [--listen=SPEC] SOCKET"
+   with a socket of the test.  Most examples give no --listen, and give the
    loopback address as the server address of $SSH_CONNECTION.  The
    test acts as the session at SOCKET, and as the client of the
    relay.  The relay opens no window, so the test needs no display.
@@ -1485,7 +1485,8 @@ usage_example (void)
     {
       int null = open ("/dev/null", O_WRONLY);
       dup2 (null, STDERR_FILENO);
-      execl ("./remote-client", "remote-client", "--relay", (char *) NULL);
+      execl ("./emacs-remote-client", "emacs-remote-client", "--relay",
+	     (char *) NULL);
       _exit (127);
     }
   pid_t listen = fork ();
@@ -1493,7 +1494,7 @@ usage_example (void)
     {
       int null = open ("/dev/null", O_WRONLY);
       dup2 (null, STDERR_FILENO);
-      execl ("./remote-client", "remote-client", "--relay",
+      execl ("./emacs-remote-client", "emacs-remote-client", "--relay",
 	     "--listen=127.0.0.1", (char *) NULL);
       _exit (127);
     }
@@ -1617,8 +1618,8 @@ refused_p (bool missing, struct where where)
   return ok;
 }
 
-/* Start "remote-client --relay SOCKET" at WHERE as the leader of a new
-   group of processes.  Put the write end of its standard input in *IN,
+/* Start "emacs-remote-client --relay SOCKET" at WHERE as the leader of
+   a new group of processes.  Put the write end of its standard input in *IN,
    and the read ends of its standard output and standard error output
    in *OUT and *ERR.  Return its process.  */
 static int
@@ -1646,11 +1647,11 @@ start_relay (const char *socket, struct where where, int *in, int *out,
       else
 	unsetenv ("SSH_CONNECTION");
       if (where.listen)
-	execl ("./remote-client", "remote-client", "--relay", where.listen,
-	       socket, (char *) NULL);
+	execl ("./emacs-remote-client", "emacs-remote-client", "--relay",
+	       where.listen, socket, (char *) NULL);
       else
-	execl ("./remote-client", "remote-client", "--relay", socket,
-	       (char *) NULL);
+	execl ("./emacs-remote-client", "emacs-remote-client", "--relay",
+	       socket, (char *) NULL);
       _exit (127);
     }
   setpgid (pid, pid);

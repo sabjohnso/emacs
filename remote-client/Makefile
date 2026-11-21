@@ -43,6 +43,10 @@ GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
 # the XTEST extension.
 X11_LIBS = $(shell $(PKG_CONFIG) --libs x11 xtst)
 
+# The program.  RC_PROGRAM in progname.h has the same name, because the
+# messages of the program and the remote command of SSH use it.
+PROGRAM = emacs-remote-client
+
 RENDER_OBJS = render.o images.o table.o rdproto.o rdchunk.o rdpng.o
 READER_OBJS = reader.o rdproto.o
 FONTS_OBJS = fonts.o hashfonts.o hashcache.o fontstore.o
@@ -68,12 +72,12 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
 # comes on the screen of the user.
 XVFB_RUN = xvfb-run -a
 
-all: remote-client $(TESTS)
+all: $(PROGRAM) $(TESTS)
 
-remote-client: $(CLIENT_OBJS)
+$(PROGRAM): $(CLIENT_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(TLS_LIBS) $(LIBS)
 
-check: remote-client $(TESTS)
+check: $(PROGRAM) $(TESTS)
 	./test-table
 	./test-render
 	./test-reader
@@ -170,7 +174,7 @@ test-ending: test-ending.o ending.o rdproto.o
 test-scale: test-scale.o scale.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
-test-reconnect: test-reconnect.o rdproto.o rdchunk.o | remote-client
+test-reconnect: test-reconnect.o rdproto.o rdchunk.o | $(PROGRAM)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(X11_LIBS) $(LIBS)
 
 test-backoff: test-backoff.o backoff.o
@@ -181,7 +185,7 @@ test-relayline: test-relayline.o relayline.o token.o
 
 # The test runs the program, so the program must be current.
 test-relay: test-relay.o rdproto.o relayline.o token.o tls.o stream.o \
-  listenspec.o | remote-client
+  listenspec.o | $(PROGRAM)
 	$(CC) $(LDFLAGS) -o $@ $^ $(TLS_LIBS)
 
 test-flow: test-flow.o flow.o
@@ -200,7 +204,7 @@ test-sshargs: test-sshargs.o sshargs.o listenspec.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
 test-ssh: test-ssh.o rdproto.o relayline.o token.o tls.o stream.o \
-  | remote-client
+  | $(PROGRAM)
 	$(CC) $(LDFLAGS) -o $@ $^ $(TLS_LIBS)
 
 test-sshconfig: test-sshconfig.o sshconfig.o
@@ -298,6 +302,6 @@ bootstrap.o child.o client.o relay.o sshargs.o stack.o unixsocket.o: \
   progname.h
 
 clean:
-	rm -f *.o remote-client $(TESTS)
+	rm -f *.o $(PROGRAM) $(TESTS)
 
 .PHONY: all check check-sanitize clean

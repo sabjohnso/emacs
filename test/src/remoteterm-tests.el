@@ -10184,7 +10184,7 @@ Each call gives a session with a new name.  The directory of the
 socket has the mode 700.  A client of the socket gets a define-frame
 message for the frame of its session.  The name of the session has 1
 to 32 ASCII letters, digits, and \"-\" characters, so the option
---session of remote-client accepts it (`rc_ssh_session_name_p' in
+--session of emacs-remote-client accepts it (`rc_ssh_session_name_p' in
 remote-client/sshargs.c)."
   (let ((rd-gen-trials 5))
     (rd-gen-for-all

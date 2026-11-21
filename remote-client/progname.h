@@ -24,6 +24,6 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    start with this name.  The remote command that the client gives to
    SSH runs the relay with this name, so the relay must have this name
    in the PATH of the host.  */
-#define RC_PROGRAM "remote-client"
+#define RC_PROGRAM "emacs-remote-client"
 
 #endif /* RC_PROGNAME_H */

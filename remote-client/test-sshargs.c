@@ -73,7 +73,7 @@ enum { TRIALS = 1000 };
 
 /* The remote command with no spec.  */
 #define BASE_COMMAND \
-  "remote-client --relay \"$(emacsclient --eval " \
+  "emacs-remote-client --relay \"$(emacsclient --eval " \
   "'(remote-display-start)' | tr -d '\"')\""
 
 /* A random case: a host and a listen spec.  */
@@ -360,13 +360,13 @@ golden_example (void)
   inet_pton (AF_INET, "10.0.0.200", &spec.address.v4);
   rc_ssh_remote_command (&spec, NULL, command);
   if (strcmp (command,
-	      "remote-client --relay --listen=10.0.0.200:60001-60010 "
+	      "emacs-remote-client --relay --listen=10.0.0.200:60001-60010 "
 	      "\"$(emacsclient --eval '(remote-display-start)' "
 	      "| tr -d '\"')\"") != 0)
     return false;
   rc_ssh_remote_command (NULL, "remote-2", command);
   return strcmp (command,
-		 "remote-client --relay "
+		 "emacs-remote-client --relay "
 		 "\"$(emacsclient --eval '(remote-display-resume \"remote-2\")' "
 		 "| tr -d '\"')\"") == 0;
 }

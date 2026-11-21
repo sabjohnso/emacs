@@ -125,9 +125,9 @@ does not ask about the server when it exits."
 (defun remote-display--end-session (terminal)
   "End the session TERMINAL: stop its listener, and then end its client.
 Do nothing if TERMINAL is not a session.  The relay of
-\"remote-client --ssh\" exits when the session closes the connection
-and the socket does not exist, so the socket goes first.  This
-function is in `delete-terminal-functions', so it runs for each
+\"emacs-remote-client --ssh\" exits when the session closes the
+connection and the socket does not exist, so the socket goes first.
+This function is in `delete-terminal-functions', so it runs for each
 terminal."
   (when (eq (terminal-live-p terminal) 'remote)
     (remote-display--stop-listening terminal)
@@ -341,8 +341,8 @@ pixels, also for a frame that does not have its first size yet."
 (defun remote-display-start ()
   "Start a new session with one frame, and return the name of its socket.
 A client of the socket shows the frame.  The command
-\"remote-client --ssh HOST\" calls this function through emacsclient on
-HOST.
+\"emacs-remote-client --ssh HOST\" calls this function through
+emacsclient on HOST.
 
 The new frame becomes the selected frame.  In a daemon, the selected
 frame is otherwise the initial frame, and redisplay does nothing while
@@ -355,9 +355,9 @@ the initial frame is selected."
 (defun remote-display-resume (display)
   "Return the name of the socket of the open session DISPLAY.
 A new client of the socket shows the frames of the session again.  The
-command \"remote-client --ssh HOST --session=DISPLAY\" calls this
-function through emacsclient on HOST.  Signal an error if DISPLAY is
-not an open session with a socket."
+command \"emacs-remote-client --ssh HOST --session=DISPLAY\" calls
+this function through emacsclient on HOST.  Signal an error if DISPLAY
+is not an open session with a socket."
   (let ((listener (assoc display remote-display--listeners)))
     (unless listener
       (error "No open session %s" display))
