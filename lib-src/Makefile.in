@@ -357,7 +357,8 @@ $(DESTDIR)${archlibdir}: all
 	  done ; \
 	fi
 
-.PHONY: install uninstall mostlyclean clean distclean maintainer-clean
+.PHONY: install uninstall uninstall-bin uninstall-archlib mostlyclean clean
+.PHONY: distclean maintainer-clean
 .PHONY: bootstrap-clean check tags
 
 install: $(DESTDIR)${archlibdir}
@@ -371,12 +372,19 @@ install: $(DESTDIR)${archlibdir}
 	    `${EXEEXT} || exit; \
 	done
 
-uninstall:
+uninstall: uninstall-bin uninstall-archlib
+
+## The programs in bindir have the transformed names, so each build
+## has its own.  Builds of one version and configuration share the
+## programs in archlibdir.
+uninstall-bin:
 	for file in ${INSTALLABLES}; do \
 	  rm -f "$(DESTDIR)${bindir}"/` \
 	    echo $${file} | sed -e 's/${EXEEXT}$$//' -e '$(TRANSFORM)' \
 	  `${EXEEXT}; \
 	done
+
+uninstall-archlib:
 	if [ -d "$(DESTDIR)${archlibdir}" ]; then \
 	  cd "$(DESTDIR)${archlibdir}" && \
 	  rm -f ${UTILITIES} ${SCRIPTS}; \

@@ -17,31 +17,50 @@
 # You should have received a copy of the GNU General Public License
 # along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.
 
-# The top-level build of Emacs does not use this file.  The client
-# compiles the codec of the server, ../src/rdproto.c.  The directory
-# "." comes first in the include path, so <config.h> is the file of
-# the client and not a config.h of an Emacs build in ../src.
+# configure makes remote-client/Makefile from this file for each
+# configuration of Emacs.  The top-level "make" of a build with
+# --with-remote-display makes the program, and "make install" installs
+# it.  In each configured tree, "make -C remote-client check" builds
+# and runs the tests of the client.
+#
+# The client compiles the codec of the server, ../src/rdproto.c.  The
+# source directory of the client comes first in the include path, so
+# <config.h> is the file of the client and not the config.h of the
+# Emacs build in ../src.
 
-PKG_CONFIG = pkg-config
-PACKAGES = cairo cairo-ft fontconfig freetype2 glib-2.0
-CFLAGS = -O2 -g
+srcdir = @srcdir@
+VPATH = @srcdir@
+
+CC = @CC@
+CFLAGS = @CFLAGS@
+LDFLAGS = @LDFLAGS@
+
+prefix = @prefix@
+exec_prefix = @exec_prefix@
+bindir = @bindir@
+INSTALL = @INSTALL@
+INSTALL_PROGRAM = @INSTALL_PROGRAM@
+MKDIR_P = @MKDIR_P@
+
+# configure finds the flags of the libraries with pkg-config.  All
+# parts use cairo, cairo-ft, fontconfig, freetype2, and glib-2.0.
 WARNINGS = -Wall -Wextra
-ALL_CFLAGS = $(WARNINGS) -DRC_PROGRAM='"$(PROGRAM)"' -I. -I../src \
-  $(shell $(PKG_CONFIG) --cflags $(PACKAGES)) $(CFLAGS)
-LIBS = $(shell $(PKG_CONFIG) --libs $(PACKAGES)) -lm
+ALL_CFLAGS = $(WARNINGS) -DRC_PROGRAM='"$(PROGRAM)"' \
+  -I$(srcdir) -I$(srcdir)/../src @RC_BASE_CFLAGS@ $(CFLAGS)
+LIBS = @RC_BASE_LIBS@ -lm
 
 # The relay, the program, and the tests of TLS use GnuTLS.
-TLS_CFLAGS = $(shell $(PKG_CONFIG) --cflags gnutls)
-TLS_LIBS = $(shell $(PKG_CONFIG) --libs gnutls)
+TLS_CFLAGS = @RC_TLS_CFLAGS@
+TLS_LIBS = @RC_TLS_LIBS@
 
 # Only the program uses GTK.  The modules and their tests do not.
-GTK_CFLAGS = $(shell $(PKG_CONFIG) --cflags gtk+-3.0)
-GTK_LIBS = $(shell $(PKG_CONFIG) --libs gtk+-3.0)
+GTK_CFLAGS = @RC_GTK_CFLAGS@
+GTK_LIBS = @RC_GTK_LIBS@
 
 # test-reconnect asks a window of the program to close through X, as a
 # window manager does, and sends keys to a menu of the program through
 # the XTEST extension.
-X11_LIBS = $(shell $(PKG_CONFIG) --libs x11 xtst)
+X11_LIBS = @RC_X11_LIBS@
 
 # The program.  The C files get its name as RC_PROGRAM (see
 # progname.h), for the messages and for the remote command of SSH.
@@ -74,6 +93,9 @@ XVFB_RUN = xvfb-run -a
 
 all: $(PROGRAM) $(TESTS)
 
+# Only the program, with no tests.  The top-level "make" uses it.
+program: $(PROGRAM)
+
 $(PROGRAM): $(CLIENT_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(TLS_LIBS) $(LIBS)
 
@@ -87,6 +109,13 @@ check-usage: $(PROGRAM)
 	  *) echo "check-usage: the first line of the usage is \"$$line\"" >&2; \
 	     exit 1 ;; \
 	esac
+
+# A new PROGRAM makes the objects again, so the program has the new
+# name in its usage.  The check makes all the objects two more times,
+# so "make check" does not run it.
+check-flags: $(PROGRAM)
+	$(MAKE) check-usage PROGRAM=rc-check-flags
+	rm -f rc-check-flags
 
 check: $(PROGRAM) $(TESTS) check-usage
 	./test-table
@@ -127,7 +156,7 @@ check: $(PROGRAM) $(TESTS) check-usage
 # run the test.
 SANITIZE = -fsanitize=address,undefined -fno-sanitize-recover=all
 check-sanitize: clean
-	LSAN_OPTIONS=suppressions=$(CURDIR)/lsan.supp \
+	LSAN_OPTIONS=suppressions=$(abspath $(srcdir))/lsan.supp \
 	  $(MAKE) CFLAGS="-O1 -g $(SANITIZE)" LDFLAGS="$(SANITIZE)" check
 	$(MAKE) clean
 
@@ -258,6 +287,19 @@ rdscrollbar.o: ../src/rdscrollbar.c ../src/rdscrollbar.h config.h
 
 test-rdscrollbar.o: ../src/rdscrollbar.h
 
+# compile.stamp has the compile command.  Its file changes only when
+# the command changes, for example after a new PROGRAM, CC, or CFLAGS.
+# Each object depends on it, so such a change makes the objects again.
+COMPILE = $(CC) $(ALL_CFLAGS) $(GTK_CFLAGS) $(TLS_CFLAGS)
+OBJECTS = $(patsubst $(srcdir)/%.c,%.o,$(wildcard $(srcdir)/*.c)) \
+  rdproto.o rdchunk.o rdpng.o rdscrollbar.o
+$(OBJECTS): compile.stamp
+compile.stamp: FORCE
+	@printf '%s\n' '$(subst ','\'',$(COMPILE))' > compile.tmp
+	@if cmp -s compile.tmp $@; then rm -f compile.tmp; \
+	 else mv compile.tmp $@; fi
+FORCE:
+
 %.o: %.c
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 
@@ -312,7 +354,28 @@ menugen.o test-menu.o test-view.o: menugen.h menu.h ../src/rdproto.h
 bootstrap.o child.o client.o relay.o sshargs.o stack.o unixsocket.o: \
   progname.h
 
-clean:
-	rm -f *.o $(PROGRAM) $(TESTS)
+# The install copies the program to $(bindir).  It does not make the
+# program, because "make install" can run as another user, for example
+# root.  "make install-strip" of Emacs sets INSTALL_STRIP to -s.
+INSTALL_STRIP =
 
-.PHONY: all check check-usage check-sanitize clean
+install:
+	@[ -f $(PROGRAM) ] || { \
+	  echo "$(PROGRAM) does not exist: run \"make\" before" \
+	       "\"make install\"" >&2; \
+	  exit 1; }
+	umask 022; $(MKDIR_P) "$(DESTDIR)$(bindir)"
+	$(INSTALL_PROGRAM) $(INSTALL_STRIP) $(PROGRAM) \
+	  "$(DESTDIR)$(bindir)/$(PROGRAM)"
+
+uninstall:
+	rm -f "$(DESTDIR)$(bindir)/$(PROGRAM)"
+
+clean:
+	rm -f *.o $(PROGRAM) $(TESTS) compile.stamp compile.tmp
+
+# The top-level clean targets of Emacs run these targets.
+distclean bootstrap-clean maintainer-clean: clean
+
+.PHONY: all program check check-usage check-flags check-sanitize clean install \
+  uninstall distclean bootstrap-clean maintainer-clean FORCE

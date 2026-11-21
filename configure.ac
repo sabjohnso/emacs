@@ -275,6 +275,8 @@ emacs_uname_r=`uname -r`
 dnl Support for --program-prefix, --program-suffix and
 dnl --program-transform-name options
 AC_ARG_PROGRAM
+dnl The installed name of "emacs" (see m4/emacs-program-name.m4).
+emacs_PROGRAM_NAME
 
 dnl It is important that variables on the RHS not be expanded here,
 dnl hence the single quotes.  This is per the GNU coding standards, see
@@ -288,7 +290,7 @@ locallisppath='${datadir}/emacs/${version}/site-lisp:'\
 lisppath='${locallisppath}:${standardlisppath}'
 etcdir='${datadir}/emacs/${version}/etc'
 archlibdir='${libexecdir}/emacs/${version}/${configuration}'
-etcdocdir='${datadir}/emacs/${version}/etc'
+emacs_ETCDOCDIR
 gamedir='${localstatedir}/games/emacs'
 
 dnl Special option to disable the most of other options.
@@ -4381,6 +4383,28 @@ if test "$window_system" = "remote"; then
   fi
 fi
 AC_SUBST([REMOTE_DISPLAY_OBJ])
+AC_SUBST([HAVE_REMOTE_DISPLAY])
+
+dnl The libraries of the client program of the remote display in
+dnl remote-client.  Each configuration looks for them, so a developer
+dnl can make and test the client in any build ("make -C remote-client
+dnl check").  The tests also use x11 and xtst.  A build with the remote
+dnl display makes the client in "make", so it needs the libraries of
+dnl the program.
+if test "${ANDROID}" != "yes"; then
+  EMACS_CHECK_MODULES([RC_BASE],
+    [cairo cairo-ft fontconfig freetype2 glib-2.0])
+  EMACS_CHECK_MODULES([RC_TLS], [gnutls])
+  EMACS_CHECK_MODULES([RC_GTK], [gtk+-3.0])
+  EMACS_CHECK_MODULES([RC_X11], [x11 xtst])
+fi
+if test "$HAVE_REMOTE_DISPLAY" = yes \
+   && test "$HAVE_RC_BASE$HAVE_RC_TLS$HAVE_RC_GTK" != yesyesyes; then
+  AC_MSG_ERROR([The client program of the remote display needs the
+pkg-config packages cairo, cairo-ft, fontconfig, freetype2, glib-2.0,
+gnutls, and gtk+-3.0.  Install their development files, or configure
+without --with-remote-display.])
+fi
 
 if test "$window_system" = "pgtk" || test "$window_system" = "remote"; then
   CAIRO_REQUIRED=1.12.0
@@ -7621,12 +7645,13 @@ dnl config.status treats $srcdir specially, so I think this is ok...
 ARCH_INDEPENDENT_CONFIG_FILES([$srcdir/doc/man/emacs.1])
 
 AC_CONFIG_FILES([lib/Makefile lib-src/Makefile oldXMenu/Makefile src/Makefile
-                 lwlib/Makefile nextstep/Makefile nt/Makefile])
+                 lwlib/Makefile nextstep/Makefile nt/Makefile
+                 remote-client/Makefile])
 ARCH_INDEPENDENT_CONFIG_FILES([doc/emacs/Makefile doc/misc/Makefile
                                doc/lispintro/Makefile doc/lispref/Makefile
 			       lisp/Makefile leim/Makefile])
 
-SUBDIR_MAKEFILES="lib/Makefile lib-src/Makefile oldXMenu/Makefile src/Makefile lwlib/Makefile nextstep/Makefile nt/Makefile doc/emacs/Makefile doc/misc/Makefile doc/lispintro/Makefile doc/lispref/Makefile lisp/Makefile leim/Makefile"
+SUBDIR_MAKEFILES="lib/Makefile lib-src/Makefile oldXMenu/Makefile src/Makefile lwlib/Makefile nextstep/Makefile nt/Makefile remote-client/Makefile doc/emacs/Makefile doc/misc/Makefile doc/lispintro/Makefile doc/lispref/Makefile lisp/Makefile leim/Makefile"
 
 dnl The test/ directory is missing if './make-dist --no-tests' was used.
 opt_makefile=test/Makefile

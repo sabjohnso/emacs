@@ -278,6 +278,18 @@ archlibdir=@archlibdir@
 # Where to put the etc/DOC file.
 etcdocdir=@etcdocdir@
 
+# "yes" if etcdocdir is not etcdir.  Then the program has a name that
+# is not "emacs" (see m4/emacs-program-name.m4), and the prefix can
+# also have the "emacs" of another configuration.  The uninstall of
+# such a build removes only its own files, and keeps the files that
+# the builds share: lisp, etc, info, the programs in archlibdir, and
+# the other files of the version.
+ifeq (${etcdocdir},${etcdir})
+SHARED_PREFIX = no
+else
+SHARED_PREFIX = yes
+endif
+
 # User or group of the auxiliary program update-game-score, which is
 # installed on platforms with a game directory shared by multiple users.
 # On other platforms Emacs can update the score files itself.
@@ -331,6 +343,16 @@ EMACS = ${EMACS_NAME}${EXEEXT}
 EMACSFULL = `echo emacs-${version} | sed '$(TRANSFORM)'`${EXEEXT}
 EMACS_PDMP = `./src/emacs${EXEEXT} --fingerprint`.pdmp
 
+# "yes" if the remote display is the window system.  Such a build also
+# makes and installs the client program of the remote display in
+# remote-client.  The install does not change the name of the client
+# program, because the client runs the relay on the host with that
+# name.
+HAVE_REMOTE_DISPLAY = @HAVE_REMOTE_DISPLAY@
+ifeq (${HAVE_REMOTE_DISPLAY},yes)
+REMOTE_CLIENT = remote-client
+endif
+
 # Subdirectories to make recursively.
 SUBDIR = $(NTDIR) lib lib-src src lisp
 
@@ -376,7 +398,7 @@ bootstrap-all:
 
 .PHONY: bootstrap-all actual-all advice-on-failure sanity-check
 
-actual-all: ${SUBDIR} info $(gsettings_SCHEMAS:.xml=.valid) src-depending-on-lisp blessmail
+actual-all: ${SUBDIR} ${REMOTE_CLIENT} info $(gsettings_SCHEMAS:.xml=.valid) src-depending-on-lisp blessmail
 
 # ADVICE-ON-FAILURE-BEGIN:all
 # You could try to:
@@ -429,7 +451,7 @@ sanity-check:
 	echo >&2 '***'; \
 	exit 1
 
-.PHONY: all ${SUBDIR} blessmail epaths-force epaths-force-w32 epaths-force-ns-self-contained etc-emacsver
+.PHONY: all ${SUBDIR} remote-client blessmail epaths-force epaths-force-w32 epaths-force-ns-self-contained etc-emacsver
 
 # Changes in lisp may require us to reconsider the build in src.  For
 # example, if loaddefs.{el,elc} were built in lisp, we need a new
@@ -531,6 +553,9 @@ lisp: src
 lib lib-src lisp nt: Makefile
 	$(MAKE) -C $@ all
 
+remote-client: Makefile
+	$(MAKE) -C $@ program
+
 java: lisp info
 	$(MAKE) -C $@ all
 
@@ -621,6 +646,9 @@ write_subdir=if [ -f "$${subdir}/subdirs.el" ]; \
 install-arch-dep: src install-arch-indep install-etcdoc install-$(NTDIR)
 	umask 022; ${MKDIR_P} "$(DESTDIR)${bindir}"
 	$(MAKE) -C lib-src install
+ifeq (${HAVE_REMOTE_DISPLAY},yes)
+	$(MAKE) -C remote-client install
+endif
 ifeq (${ns_self_contained},no)
 	${INSTALL_PROGRAM} $(INSTALL_STRIP) src/emacs${EXEEXT} "$(DESTDIR)${bindir}/$(EMACSFULL)"
 ifeq (${HAVE_BE_APP},yes)
@@ -684,6 +712,10 @@ set_installuser=for installuser in $${LOGNAME} $${USERNAME} $${USER} \
 ## deleted the entire installed etc/ directory and recreated it.
 ## install-etcdoc installs the relevant DOC.
 
+## A build whose etcdocdir is not etcdir (a renamed program, see
+## configure.ac) keeps the installed etc/DOC.  That file is the DOC
+## file of the "emacs" of another configuration in the same prefix.
+
 ## Note that we install etc/refcards/*.ps if present.
 ## TODO we should compress these if GZIP_PROG is set.
 ## It would be simpler to have a separate install rule for etc/refcards
@@ -720,14 +752,25 @@ install-arch-indep: lisp install-info install-man ${INSTALL_ARCH_INDEP_EXTRA}
 	    [ "$$exp_dest" = "`cd $${dir} && pwd -P`" ] && continue ; \
 	  else true; \
 	  fi; \
+	  keep_doc= ; \
+	  if [ "$${dir}" = "${srcdir}/etc" ] && [ -f "$${dest}/DOC" ] \
+	     && [ "${etcdocdir}" != "${etcdir}" ]; then \
+	    keep_doc="$${dest}.DOC.$$$$"; \
+	    mv "$${dest}/DOC" "$${keep_doc}" || exit 1; \
+	  else true; \
+	  fi; \
 	  rm -rf "$${dest}" ; \
 	  umask 022; ${MKDIR_P} "$${dest}" ; \
 	  printf 'Copying %s to %s...\n' "$$dir" "$$dest" ; \
 	  (cd $${dir}; tar -chf - . ) \
 	    | (cd "$${dest}"; umask 022; \
-	       tar -xvf - && cat > /dev/null) || exit 1; \
+	       tar -xvf - && cat > /dev/null) || { \
+	    [ -z "$${keep_doc}" ] || mv "$${keep_doc}" "$${dest}/DOC"; \
+	    exit 1; }; \
 	  if [ "$${dir}" = "${srcdir}/etc" ]; then \
 	      rm -f "$${dest}/DOC"* ; \
+	      [ -z "$${keep_doc}" ] || mv "$${keep_doc}" "$${dest}/DOC" \
+	        || exit 1; \
 	      rm -f "$${dest}/refcards"/*.aux "$${dest}/refcards"/*.dvi; \
 	      rm -f "$${dest}/refcards"/*.log "$${dest}/refcards"/*.in; \
 	  else true; \
@@ -928,7 +971,19 @@ install-strip:
 ### create (but not the noninstalled files such as 'make all' would create).
 ###
 ### Don't delete the lisp and etc directories if they're in the source tree.
-uninstall: uninstall-$(NTDIR) uninstall-doc uninstall-gsettings-schemas
+ifeq (${SHARED_PREFIX},no)
+UNINSTALL_SHARED = uninstall-doc uninstall-gsettings-schemas
+endif
+
+uninstall: uninstall-$(NTDIR) $(UNINSTALL_SHARED)
+ifeq (${HAVE_REMOTE_DISPLAY},yes)
+	$(MAKE) -C remote-client uninstall
+endif
+ifeq (${SHARED_PREFIX},yes)
+	$(MAKE) -C lib-src uninstall-bin
+	-rm -rf "$(DESTDIR)${etcdocdir}"
+	-rm -f "$(DESTDIR)${archlibdir}/emacs-${EMACS_PDMP}"
+else
 	rm -f "$(DESTDIR)$(includedir)/emacs-module.h"
 	$(MAKE) -C lib-src uninstall
 	-unset CDPATH; \
@@ -958,6 +1013,7 @@ uninstall: uninstall-$(NTDIR) uninstall-doc uninstall-gsettings-schemas
 	   done; \
 	   rm -f elisp_type_hierarchy.jpg elisp_type_hierarchy.txt; \
 	 fi)
+endif
 	(if [ -n "${GZIP_PROG}" ]; then \
 	    ext=.gz; else ext=; fi; \
 	 if cd ${mansrcdir}; then \
@@ -978,10 +1034,12 @@ uninstall: uninstall-$(NTDIR) uninstall-doc uninstall-gsettings-schemas
 	-rm -f "$(DESTDIR)$(systemduserunitdir)/${EMACS_NAME}.service"
   endif
   ifneq (,$(use_gamedir))
+  ifeq (${SHARED_PREFIX},no)
 	for file in snake-scores tetris-scores; do \
 	  file="$(DESTDIR)${gamedir}/$${file}"; \
 	  [ -s "$${file}" ] || rm -f "$$file"; \
 	done
+  endif
   endif
 
 ### Windows-specific uninstall target for removing programs produced
@@ -1030,7 +1088,7 @@ mostlyclean: $(mostlyclean_dirs:=_mostlyclean)
 ###
 ###      Delete '.dvi' files here if they are not part of the distribution.
 clean_dirs = $(mostlyclean_dirs) java cross nextstep admin/charsets \
-  admin/unidata
+  admin/unidata remote-client
 
 $(foreach dir,$(clean_dirs),$(eval $(call submake_template,$(dir),clean)))
 
@@ -1134,6 +1192,19 @@ $(CHECK_TARGETS): all
 
 test/%:
 	$(MAKE) -C test $*
+
+## 'check-install' checks the installed name of Emacs and the directory
+## of its DOC file for random --program-prefix, --program-suffix, and
+## --program-transform-name options, with autoconf and a small
+## configure script.  In a build with --with-remote-display and a
+## program name that is not "emacs", it also installs the build in a
+## temporary DESTDIR, and checks the client program, the DOC files, and
+## the uninstall in a prefix that has the files of another "emacs".
+## The checks take minutes, so "make check" does not run this target.
+.PHONY: check-install
+check-install: all
+	${srcdir}/test/install/program-name.sh ${srcdir}
+	${srcdir}/test/install/install.sh .
 
 
 dist:

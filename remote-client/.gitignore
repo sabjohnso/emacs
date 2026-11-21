@@ -33,3 +33,5 @@ test-rdscrollbar
 test-scale
 test-stream
 test-ending
+Makefile
+compile.stamp
