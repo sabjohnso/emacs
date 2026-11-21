@@ -23,13 +23,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdio.h>
 #include <string.h>
 
+#include "progname.h"
 #include "sshargs.h"
 
 static int copy_args (const char *const *, const char **);
 
 /* The parts of the remote command: the relay, the --listen, the form
    that gives the socket, and the rest.  */
-static const char command_start[] = "remote-client --relay";
+static const char command_start[] = RC_PROGRAM " --relay";
 static const char command_eval[] = " \"$(emacsclient --eval '";
 static const char command_end[] = "' | tr -d '\"')\"";
 

@@ -93,6 +93,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "link.h"
 #include "rdchunk.h"
 #include "listenspec.h"
+#include "progname.h"
 #include "backoff.h"
 #include "reader.h"
 #include "relay.h"
@@ -325,14 +326,14 @@ relay_main (int argc, char **argv)
   const char *connection = getenv ("SSH_CONNECTION");
   if (listen && !rc_listen_spec_parse (argv[2] + 9, &spec))
     {
-      fprintf (stderr, "remote-client: %s: not a listen spec\n",
+      fprintf (stderr, RC_PROGRAM ": %s: not a listen spec\n",
 	       argv[2] + 9);
       return 1;
     }
   if (!listen
       && !(connection && rc_listen_spec_from_connection (connection, &spec)))
     {
-      fprintf (stderr, "remote-client: no --listen, and no valid "
+      fprintf (stderr, RC_PROGRAM ": no --listen, and no valid "
 	       "SSH_CONNECTION\n");
       return 1;
     }
@@ -366,7 +367,7 @@ parse_options (int argc, char **argv)
 	options.has_listen = true;
 	if (!rc_listen_spec_parse (argv[arg] + 9, &options.listen))
 	  {
-	    fprintf (stderr, "remote-client: %s: not a listen spec\n",
+	    fprintf (stderr, RC_PROGRAM ": %s: not a listen spec\n",
 		     argv[arg] + 9);
 	    exit (1);
 	  }
@@ -378,7 +379,7 @@ parse_options (int argc, char **argv)
 	options.session = argv[arg] + 10;
 	if (!rc_ssh_session_name_p (options.session))
 	  {
-	    fprintf (stderr, "remote-client: %s: not a name of a session\n",
+	    fprintf (stderr, RC_PROGRAM ": %s: not a name of a session\n",
 		     options.session);
 	    exit (1);
 	  }
@@ -428,13 +429,13 @@ open_ssh_session (const struct options *options,
   *direct = rc_direct_new (address, &line);
   if (!*direct)
     {
-      perror ("remote-client");
+      perror (RC_PROGRAM);
       return NULL;
     }
   *connector = (struct rc_connector) { rc_direct_connect, *direct };
   struct rc_stream *stream = rc_direct_connect (*direct);
   if (!stream)
-    fprintf (stderr, "remote-client: %s: cannot connect to the relay\n",
+    fprintf (stderr, RC_PROGRAM ": %s: cannot connect to the relay\n",
 	     address);
   return stream;
 }
@@ -494,13 +495,13 @@ warn_fallback (const struct rc_font_key *key)
 {
   if (key->nhash < RD_HASH_SIZE)
     {
-      fprintf (stderr, "remote-client: the server could not read a font "
+      fprintf (stderr, RC_PROGRAM ": the server could not read a font "
 	       "file, so the fallback font draws its glyphs\n");
       return;
     }
   char hex[2 * RD_HASH_SIZE + 1];
   rc_hash_to_hex (key->hash, hex);
-  fprintf (stderr, "remote-client: no font file has the hash %s (face "
+  fprintf (stderr, RC_PROGRAM ": no font file has the hash %s (face "
 	   "%lu), so the client asks the server for the file\n", hex,
 	   (unsigned long) key->index);
 }
@@ -528,14 +529,14 @@ render_to_file (struct rc_renderer *renderer, struct rc_stream *stream,
     return 1;
   if (!surface)
     {
-      fprintf (stderr, "remote-client: the first frame does not exist\n");
+      fprintf (stderr, RC_PROGRAM ": the first frame does not exist\n");
       return 1;
     }
   cairo_status_t status = cairo_surface_write_to_png (surface, png);
   cairo_surface_destroy (surface);
   if (status != CAIRO_STATUS_SUCCESS)
     {
-      fprintf (stderr, "remote-client: %s: %s\n", png,
+      fprintf (stderr, RC_PROGRAM ": %s: %s\n", png,
 	       cairo_status_to_string (status));
       return 1;
     }
@@ -684,7 +685,7 @@ lose_connection (struct window_mode *mode, bool failed)
       gtk_main_quit ();
       return;
     }
-  fprintf (stderr, "remote-client: the connection is lost; "
+  fprintf (stderr, RC_PROGRAM ": the connection is lost; "
 	   "the program connects again\n");
   rc_view_set_connected (mode->view, false);
   schedule_retry (mode);
@@ -698,7 +699,7 @@ end_session (struct window_mode *mode)
 {
   close_connection (mode);
   if (exit_status (mode) != 0)
-    fprintf (stderr, "remote-client: the session does not exist\n");
+    fprintf (stderr, RC_PROGRAM ": the session does not exist\n");
   gtk_main_quit ();
 }
 
@@ -933,7 +934,7 @@ static void
 receive_font (struct window_mode *mode, const struct rd_font_data *data)
 {
   if (rc_font_store_receive (mode->store, data) == RC_FONT_REFUSED)
-    fprintf (stderr, "remote-client: a font file from the server is not "
+    fprintf (stderr, RC_PROGRAM ": a font file from the server is not "
 	     "correct, so the client does not draw its glyphs\n");
 }
 
@@ -1042,7 +1043,7 @@ send_on (struct connection *connection, const struct rd_message *message,
   rd_encode (message, bytes);
   connection->writes = write_all (connection->stream, bytes, size, limit);
   if (connection->writes != WRITE_OK)
-    fprintf (stderr, "remote-client: a write to the server failed\n");
+    fprintf (stderr, RC_PROGRAM ": a write to the server failed\n");
   g_free (bytes);
 }
 
@@ -1092,12 +1093,12 @@ read_chunk (struct rc_reader *reader, struct rc_stream *stream)
     return READ_WAIT;
   if (n < 0)
     {
-      fprintf (stderr, "remote-client: a read from the server failed\n");
+      fprintf (stderr, RC_PROGRAM ": a read from the server failed\n");
       return READ_ERROR;
     }
   if (!rc_reader_feed (reader, buffer, n))
     {
-      fprintf (stderr, "remote-client: %s\n", rc_reader_error (reader));
+      fprintf (stderr, RC_PROGRAM ": %s\n", rc_reader_error (reader));
       return READ_ERROR;
     }
   return READ_MORE;
@@ -1122,12 +1123,13 @@ now_ms (void)
 static void
 usage (void)
 {
-  fprintf (stderr, "Usage: remote-client [--render-to=FILE.png | "
-	   "--timeout=MS] SOCKET\n"
-	   "       remote-client [--timeout=MS] [--ssh-command=PROGRAM]\n"
-	   "                     [--listen=SPEC] [--connect=ADDRESS] "
-	   "[--session=NAME]\n"
-	   "                     --ssh HOST\n"
-	   "       remote-client --relay [--listen=SPEC] SOCKET\n");
+  /* The continuation lines start one column after the name.  */
+  int indent = sizeof "Usage: " RC_PROGRAM;
+  fprintf (stderr, "Usage: %s [--render-to=FILE.png | --timeout=MS] SOCKET\n"
+	   "       %s [--timeout=MS] [--ssh-command=PROGRAM]\n"
+	   "%*s[--listen=SPEC] [--connect=ADDRESS] [--session=NAME]\n"
+	   "%*s--ssh HOST\n"
+	   "       %s --relay [--listen=SPEC] SOCKET\n",
+	   RC_PROGRAM, RC_PROGRAM, indent, "", indent, "", RC_PROGRAM);
   exit (1);
 }

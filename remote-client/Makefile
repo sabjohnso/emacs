@@ -294,6 +294,8 @@ listenspec.o test-listenspec.o relay.o client.o test-relay.o: listenspec.h
 sshconfig.o test-sshconfig.o bootstrap.o client.o: sshconfig.h
 menu.o test-menu.o: menu.h ../src/rdproto.h
 menugen.o test-menu.o test-view.o: menugen.h menu.h ../src/rdproto.h
+bootstrap.o child.o client.o relay.o sshargs.o stack.o unixsocket.o: \
+  progname.h
 
 clean:
 	rm -f *.o remote-client $(TESTS)

@@ -37,6 +37,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "flow.h"
 #include "listenspec.h"
 #include "pending.h"
+#include "progname.h"
 #include "rdproto.h"
 #include "relay.h"
 #include "relayline.h"
@@ -166,18 +167,18 @@ prepare (struct relay *relay, const char *session,
 {
   if (!session_socket_p (session))
     {
-      fprintf (stderr, "remote-client: %s: not a socket\n", session);
+      fprintf (stderr, RC_PROGRAM ": %s: not a socket\n", session);
       return false;
     }
   if (!rc_token_new (line->token))
     {
-      fprintf (stderr, "remote-client: no random bytes for the token\n");
+      fprintf (stderr, RC_PROGRAM ": no random bytes for the token\n");
       return false;
     }
   relay->key = rc_tls_key_new ();
   if (!relay->key)
     {
-      fprintf (stderr, "remote-client: no TLS key\n");
+      fprintf (stderr, RC_PROGRAM ": no TLS key\n");
       return false;
     }
   rc_tls_key_pin (relay->key, line->pin);
@@ -205,7 +206,7 @@ start_daemon (void)
   pid_t pid = fork ();
   if (pid < 0)
     {
-      perror ("remote-client: fork");
+      perror (RC_PROGRAM ": fork");
       return DAEMON_FAILED;
     }
   if (pid > 0)
@@ -706,13 +707,13 @@ listen_in_range (const struct rc_listen_spec *spec, uint16_t *port)
 	}
       if (errno != EADDRINUSE)
 	{
-	  perror ("remote-client: listen");
+	  perror (RC_PROGRAM ": listen");
 	  return -1;
 	}
     }
   char text[RC_LISTEN_TEXT_SIZE];
   rc_listen_spec_format (spec, text);
-  fprintf (stderr, "remote-client: %s: no port is free\n", text);
+  fprintf (stderr, RC_PROGRAM ": %s: no port is free\n", text);
   return -1;
 }
 

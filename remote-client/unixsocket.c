@@ -26,6 +26,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "progname.h"
 #include "unixsocket.h"
 
 int
@@ -35,7 +36,7 @@ rc_connect_unix (const char *path, bool report)
   if (strlen (path) >= sizeof address.sun_path)
     {
       if (report)
-	fprintf (stderr, "remote-client: %s: the name is too long\n", path);
+	fprintf (stderr, RC_PROGRAM ": %s: the name is too long\n", path);
       return -1;
     }
   strcpy (address.sun_path, path);
@@ -44,7 +45,7 @@ rc_connect_unix (const char *path, bool report)
       || connect (fd, (struct sockaddr *) &address, sizeof address) != 0)
     {
       if (report)
-	fprintf (stderr, "remote-client: %s: %s\n", path, strerror (errno));
+	fprintf (stderr, RC_PROGRAM ": %s: %s\n", path, strerror (errno));
       if (fd >= 0)
 	close (fd);
       return -1;

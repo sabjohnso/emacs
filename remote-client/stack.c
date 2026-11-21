@@ -28,6 +28,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "progname.h"
 #include "stack.h"
 
 struct rc_stack
@@ -347,7 +348,7 @@ xrealloc (void *pointer, size_t size)
   void *result = realloc (pointer, size);
   if (!result)
     {
-      fputs ("remote-client: no memory is available\n", stderr);
+      fputs (RC_PROGRAM ": no memory is available\n", stderr);
       abort ();
     }
   return result;

@@ -23,12 +23,13 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <unistd.h>
 
 #include "child.h"
+#include "progname.h"
 
 void
 rc_child_exec (const char *program, const char *const *args)
 {
   closefrom (STDERR_FILENO + 1);
   execvp (program, (char *const *) args);
-  perror ("remote-client: ssh");
+  perror (RC_PROGRAM ": ssh");
   _exit (127);
 }

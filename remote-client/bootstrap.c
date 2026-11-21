@@ -29,6 +29,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "bootstrap.h"
 #include "child.h"
 #include "clock.h"
+#include "progname.h"
 #include "sshargs.h"
 
 static bool read_ssh (const char *, const char *const *, bool, char *,
@@ -45,7 +46,7 @@ rc_bootstrap (const char *ssh, const char *host,
   const char *args[RC_SSH_ARGS_SIZE];
   if (!rc_ssh_remote_command (spec, session, command))
     {
-      fprintf (stderr, "remote-client: %s: not a name of a session\n",
+      fprintf (stderr, RC_PROGRAM ": %s: not a name of a session\n",
 	       session);
       return false;
     }
@@ -54,7 +55,7 @@ rc_bootstrap (const char *ssh, const char *host,
   if (read_ssh (ssh, args, true, text, sizeof text)
       && rc_relay_line_parse (text, line))
     return true;
-  fprintf (stderr, "remote-client: %s: the session did not start\n", host);
+  fprintf (stderr, RC_PROGRAM ": %s: the session did not start\n", host);
   return false;
 }
 
@@ -68,7 +69,7 @@ rc_bootstrap_hostname (const char *ssh, const char *host,
   if (read_ssh (ssh, args, false, text, sizeof text)
       && rc_ssh_config_hostname (text, name, RC_SSH_HOSTNAME_SIZE))
     return true;
-  fprintf (stderr, "remote-client: %s: ssh -G gave no host name\n", host);
+  fprintf (stderr, RC_PROGRAM ": %s: ssh -G gave no host name\n", host);
   return false;
 }
 
@@ -85,7 +86,7 @@ read_ssh (const char *ssh, const char *const *args, bool line, char *text,
   pid_t pid = start_ssh (ssh, args, &out);
   if (pid < 0)
     {
-      perror ("remote-client: ssh");
+      perror (RC_PROGRAM ": ssh");
       return false;
     }
   bool ok = read_output (out, line, text, size);
