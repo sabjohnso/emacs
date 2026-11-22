@@ -36,3 +36,4 @@ test-ending
 Makefile
 compile.stamp
 test-options
+*.tmpdesktop

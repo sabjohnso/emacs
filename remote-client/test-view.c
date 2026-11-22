@@ -81,6 +81,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "menu.h"
 #include "menugen.h"
+#include "progname.h"
 #include "scale.h"
 #include "view.h"
 
@@ -158,6 +159,7 @@ struct example
 };
 
 static bool show_example (uint32_t, uint32_t);
+static bool icon_example (void);
 static bool focus_example (bool);
 static bool resize_example (uint32_t, uint32_t, int, int);
 static bool define_example (uint32_t, uint32_t, uint32_t, uint32_t);
@@ -281,6 +283,7 @@ main (int argc, char **argv)
       return passed ? 0 : 1;
     }
   bool passed = (show_example (300, 200) && show_example (640, 480)
+		 && icon_example ()
 		 && focus_example (true) && focus_example (false)
 		 && resize_example (300, 200, 420, 260)
 		 && resize_example (600, 400, 300, 200)
@@ -332,6 +335,20 @@ show_example (uint32_t width, uint32_t height)
   if (!passed)
     fprintf (stderr, "test-view: the new window of %ux%u is wrong\n",
 	     width, height);
+  end_example (example);
+  return passed;
+}
+
+/* The window of a new frame must have the icon of Emacs.  */
+static bool
+icon_example (void)
+{
+  struct example *example = start_example (300, 200);
+  const char *icon = gtk_window_get_icon_name (frame_window ());
+  bool passed = icon && strcmp (icon, RC_ICON) == 0;
+  if (!passed)
+    fprintf (stderr, "test-view: the icon of a window is %s and not %s\n",
+	     icon ? icon : "none", RC_ICON);
   end_example (example);
   return passed;
 }

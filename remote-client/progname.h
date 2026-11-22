@@ -36,4 +36,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 # error "RC_VERSION is not defined; the Makefile defines it from version"
 #endif
 
+/* RC_ICON is the name of the icon of the windows in the icon theme, as
+   a string.  The Makefile defines it from ICON.  */
+#ifndef RC_ICON
+# error "RC_ICON is not defined; the Makefile defines it from ICON"
+#endif
+
 #endif /* RC_PROGNAME_H */

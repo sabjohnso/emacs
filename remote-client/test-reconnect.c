@@ -63,6 +63,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
      message.  A define-font message for the monospace font file of
      fontconfig gives no want-font message, because the program has
      the file.
+   - Class: the X class of the window is the StartupWMClass of the
+     desktop file that $DESKTOP names.  The desktop finds the desktop
+     file of a window through the class.
    - Clipboard: when another program puts a text on the clipboard, the
      program sends the text in clipboard-data messages.  When the
      server sends a text, the program puts it on the clipboard, and
@@ -183,6 +186,7 @@ static bool no_session_example (void);
 static bool ends_with (uint8_t, int);
 static bool error_example (void);
 static bool close_example (void);
+static bool class_example (void);
 static bool offline_close_example (void);
 static bool font_example (void);
 static bool clipboard_example (void);
@@ -242,6 +246,7 @@ static int wait_for_exit (pid_t);
 static int listen_at (const char *);
 static int64_t now_ms (void);
 static bool close_window (pid_t);
+static char *window_class (pid_t);
 static Window wait_for_window (Display *, pid_t);
 static Window find_window (Display *, Window, pid_t);
 static pid_t window_pid (Display *, Window);
@@ -266,6 +271,7 @@ static const struct
     { "error", error_example },
     { "close", close_example },
     { "offline close", offline_close_example },
+    { "class", class_example },
     { "font", font_example },
     { "clipboard", clipboard_example },
     { "places", places_example },
@@ -507,6 +513,36 @@ close_example (void)
 		 && wait_for_close_frame (run.connection, CONNECT_LIMIT)
 		 && wait_for_ping (run.connection, CONNECT_LIMIT, &serial)
 		 && alive_p (&run));
+  stop_run (&run);
+  return passed;
+}
+
+/* The class example.  */
+static bool
+class_example (void)
+{
+  const char *desktop = getenv ("DESKTOP");
+  if (!desktop)
+    {
+      fprintf (stderr, "test-reconnect: $DESKTOP is not set\n");
+      return false;
+    }
+  struct run run;
+  if (!start_run (&run))
+    return false;
+  GKeyFile *file = g_key_file_new ();
+  g_key_file_load_from_file (file, desktop, G_KEY_FILE_NONE, NULL);
+  char *expected = g_key_file_get_string (file, "Desktop Entry",
+					  "StartupWMClass", NULL);
+  g_key_file_free (file);
+  char *class = (send_define_frame (run.connection)
+		 ? window_class (run.pid) : NULL);
+  bool passed = expected && class && strcmp (class, expected) == 0;
+  if (!passed)
+    fprintf (stderr, "test-reconnect: the class is %s and not %s\n",
+	     class ? class : "none", expected ? expected : "none");
+  g_free (class);
+  g_free (expected);
   stop_run (&run);
   return passed;
 }
@@ -1579,6 +1615,27 @@ close_window (pid_t pid)
     }
   XCloseDisplay (display);
   return window != 0;
+}
+
+/* Return the X class of the window of the program PID in new memory,
+   or NULL if no window shows or the window has no class.  */
+static char *
+window_class (pid_t pid)
+{
+  Display *display = XOpenDisplay (NULL);
+  if (!display)
+    return NULL;
+  Window window = wait_for_window (display, pid);
+  XClassHint hint = { NULL, NULL };
+  char *class = NULL;
+  if (window && XGetClassHint (display, window, &hint))
+    {
+      class = g_strdup (hint.res_class);
+      XFree (hint.res_name);
+      XFree (hint.res_class);
+    }
+  XCloseDisplay (display);
+  return class;
 }
 
 /* Wait at most CONNECT_LIMIT milliseconds for the window of the

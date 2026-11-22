@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Emacs (Remote)
+GenericName=Text Editor
+Comment=Show the frames of a remote display session of Emacs
+Exec=emacs-remote-client
+Icon=emacs
+Type=Application
+NoDisplay=true
+Terminal=false
+Categories=Development;TextEditor;
+StartupWMClass=Emacs-remote-client

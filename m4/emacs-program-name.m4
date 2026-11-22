@@ -39,6 +39,7 @@ case $emacs_program_name in
 Use only letters, digits, ".", "_", "+", and "-" in the name that
 --program-prefix, --program-suffix, and --program-transform-name give.]) ;;
 esac
+AC_SUBST([emacs_program_name])
 ])
 
 dnl emacs_ETCDOCDIR

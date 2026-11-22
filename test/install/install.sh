@@ -37,9 +37,14 @@
 #   name emacs-remote-client, and its man page emacs-remote-client.1
 #   in man1dir (compressed if GZIP_PROG is not empty).  The page has
 #   no other name, also when the program of Emacs has another name.
+# - desktop: the install puts CLIENT.desktop in the directory of the
+#   applications.  The file starts the client program in bindir.  It
+#   has the X class of the windows of the client.  GTK makes this class
+#   from the name of the program.  The icon of the file is an icon that
+#   the install also gives.
 # - uninstall: "make uninstall" removes the client program, its man
-#   page, and the program of Emacs, and keeps a file of another
-#   program in bindir.
+#   page, its desktop file, and the program of Emacs, and keeps a file
+#   of another program in bindir.
 #
 # A build with the name "emacs" also checks this fact:
 #
@@ -135,6 +140,29 @@ install_and_check () {
   check client [ "$client" = emacs-remote-client ]
   check man [ "$(client_pages)" = "./$client.1$man_suffix" ]
   check dump [ -f "$destdir$archlibdir/emacs-$fingerprint.pdmp" ]
+  check_desktop
+}
+
+# Check the desktop file of the client.
+check_desktop () {
+  desktop=$destdir$desktopdir/$client.desktop
+  check desktop [ -f "$desktop" ]
+  check desktop [ "$(desktop_value Exec)" = "$bindir/$client" ]
+  check desktop [ "$(desktop_value StartupWMClass)" = "${client^}" ]
+  check desktop [ "$(desktop_value NoDisplay)" = true ]
+  check desktop [ "$(desktop_value Icon)" = "$emacs_name" ]
+  check desktop \
+	[ -f "$destdir$icondir/hicolor/scalable/apps/$emacs_name.svg" ]
+  if command -v desktop-file-validate > /dev/null; then
+    check desktop desktop-file-validate "$desktop"
+  else
+    echo "SKIP install.sh: no desktop-file-validate"
+  fi
+}
+
+# Print the value of the key $1 in the desktop file.
+desktop_value () {
+  sed -n "s|^$1=||p" "$desktop"
 }
 
 # Uninstall the build, and check the files that each uninstall
@@ -144,6 +172,7 @@ uninstall_and_check () {
     || fail "make uninstall failed (see $log)"
   check uninstall [ ! -e "$destdir$bindir/$client" ]
   check uninstall [ -z "$(client_pages)" ]
+  check uninstall [ ! -e "$destdir$desktopdir/$client.desktop" ]
   check uninstall [ ! -e "$destdir$bindir/$emacs_name" ]
   check uninstall [ -e "$destdir$bindir/other-program" ]
 }
@@ -159,6 +188,8 @@ read_variables () {
   emacs_name=$(variable EMACS_NAME)
   bindir=$(variable bindir)
   man1dir=$(variable man1dir)
+  desktopdir=$(variable desktopdir remote-client)
+  icondir=$(variable icondir)
   if [ -n "$(variable GZIP_PROG)" ]; then man_suffix=.gz; else man_suffix=; fi
   lispdir=$(variable lispdir)
   etcdir=$(variable etcdir)

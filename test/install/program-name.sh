@@ -129,7 +129,6 @@ AC_ARG_PROGRAM
 emacs_PROGRAM_NAME
 etcdir='\${datadir}/emacs/\${version}/etc'
 emacs_ETCDOCDIR
-AC_SUBST([emacs_program_name])
 AC_SUBST([etcdir])
 AC_SUBST([etcdocdir])
 AC_CONFIG_FILES([Makefile])

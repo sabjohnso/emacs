@@ -26,6 +26,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
 #include "compose.h"
 #include "input.h"
+#include "progname.h"
 #include "scale.h"
 #include "sizes.h"
 #include "stack.h"
@@ -454,6 +455,7 @@ add_window (struct rc_view *view, uint32_t frame, struct rc_size size)
   g_signal_connect (window->area, "size-allocate",
 		    G_CALLBACK (area_resized), window);
   set_title (frame, window, NULL);
+  gtk_window_set_icon_name (GTK_WINDOW (window->window), RC_ICON);
   gtk_container_add (GTK_CONTAINER (window->window), window->area);
   struct rc_size logical = rc_scale_to_logical (size, view->scale);
   gtk_window_set_default_size (GTK_WINDOW (window->window), logical.width,

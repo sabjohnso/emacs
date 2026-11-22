@@ -40,6 +40,7 @@ prefix = @prefix@
 exec_prefix = @exec_prefix@
 bindir = @bindir@
 datarootdir = @datarootdir@
+desktopdir = $(datarootdir)/applications
 mandir = @mandir@
 man1dir = $(mandir)/man1
 INSTALL = @INSTALL@
@@ -52,7 +53,7 @@ MKDIR_P = @MKDIR_P@
 # parts use cairo, cairo-ft, fontconfig, freetype2, and glib-2.0.
 WARNINGS = -Wall -Wextra
 ALL_CFLAGS = $(WARNINGS) -DRC_PROGRAM='"$(PROGRAM)"' \
-  -DRC_VERSION='"$(version)"' \
+  -DRC_VERSION='"$(version)"' -DRC_ICON='"$(ICON)"' \
   -I$(srcdir) -I$(srcdir)/../src @RC_BASE_CFLAGS@ $(CFLAGS)
 LIBS = @RC_BASE_LIBS@ -lm
 
@@ -72,6 +73,10 @@ X11_LIBS = @RC_X11_LIBS@
 # The program.  The C files get its name as RC_PROGRAM (see
 # progname.h), for the messages and for the remote command of SSH.
 PROGRAM = emacs-remote-client
+
+# The name of the icon of the program.  The install of Emacs puts this
+# icon in the icon theme, under the installed name of Emacs.
+ICON = @emacs_program_name@
 
 RENDER_OBJS = render.o images.o table.o rdproto.o rdchunk.o rdpng.o
 READER_OBJS = reader.o rdproto.o
@@ -158,7 +163,7 @@ check: $(PROGRAM) $(TESTS) check-usage check-man
 	./test-sshconfig
 	./test-options
 	$(XVFB_RUN) ./test-view
-	$(XVFB_RUN) ./test-reconnect
+	DESKTOP=$(DESKTOP) $(XVFB_RUN) ./test-reconnect
 	$(XVFB_RUN) ./test-ssh
 
 # Build again with AddressSanitizer and UndefinedBehaviorSanitizer, and
@@ -363,18 +368,22 @@ listenspec.o test-listenspec.o relay.o client.o test-relay.o: listenspec.h
 sshconfig.o test-sshconfig.o bootstrap.o client.o: sshconfig.h
 options.o test-options.o client.o: options.h progname.h
 test-options.o: link.h listenspec.h
+view.o test-view.o: progname.h
 menu.o test-menu.o: menu.h ../src/rdproto.h
 menugen.o test-menu.o test-view.o: menugen.h menu.h ../src/rdproto.h
 bootstrap.o child.o client.o relay.o sshargs.o stack.o unixsocket.o: \
   progname.h
 
-# The install copies the program to $(bindir), and its man page to
-# $(man1dir).  As the other man pages of Emacs, the page is compressed
-# if GZIP_PROG is not empty.  The install does not make the program,
-# because "make install" can run as another user, for example root.
-# "make install-strip" of Emacs sets INSTALL_STRIP to -s.
+# The install copies the program to $(bindir), its man page to
+# $(man1dir), and its desktop file to $(desktopdir).  Because of the
+# desktop file, the desktop shows the icon of Emacs for the windows.
+# As the other man pages of Emacs, the page is compressed if GZIP_PROG
+# is not empty.  The install does not make the program, because "make
+# install" can run as another user, for example root.  "make
+# install-strip" of Emacs sets INSTALL_STRIP to -s.
 INSTALL_STRIP =
 MANPAGE = $(srcdir)/../doc/man/$(PROGRAM).1
+DESKTOP = $(srcdir)/../etc/$(PROGRAM).desktop
 
 install:
 	@[ -f $(PROGRAM) ] || { \
@@ -389,14 +398,22 @@ install:
 	[ -z "$(GZIP_PROG)" ] || { \
 	  rm -f "$(DESTDIR)$(man1dir)/$(PROGRAM).1.gz"; \
 	  $(GZIP_PROG) -9n "$(DESTDIR)$(man1dir)/$(PROGRAM).1" || true; }
+	umask 022; $(MKDIR_P) "$(DESTDIR)$(desktopdir)"
+	rm -f $(PROGRAM).tmpdesktop
+	sed -e 's|^Exec=|Exec=$(bindir)/|' -e 's|^Icon=.*|Icon=$(ICON)|' \
+	  $(DESKTOP) > $(PROGRAM).tmpdesktop
+	$(INSTALL_DATA) $(PROGRAM).tmpdesktop \
+	  "$(DESTDIR)$(desktopdir)/$(PROGRAM).desktop"
+	rm -f $(PROGRAM).tmpdesktop
 
 uninstall:
 	rm -f "$(DESTDIR)$(bindir)/$(PROGRAM)"
 	rm -f "$(DESTDIR)$(man1dir)/$(PROGRAM).1" \
 	  "$(DESTDIR)$(man1dir)/$(PROGRAM).1.gz"
+	rm -f "$(DESTDIR)$(desktopdir)/$(PROGRAM).desktop"
 
 clean:
-	rm -f *.o $(PROGRAM) $(TESTS) compile.stamp compile.tmp
+	rm -f *.o $(PROGRAM) $(TESTS) compile.stamp compile.tmp *.tmpdesktop
 
 # The top-level clean targets of Emacs run these targets.
 distclean bootstrap-clean maintainer-clean: clean
