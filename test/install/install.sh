@@ -133,9 +133,7 @@ install_and_check () {
   install_quiet || fail "make install failed (see $log)"
   check client [ -x "$destdir$bindir/$client" ]
   check client [ "$client" = emacs-remote-client ]
-  check man [ -f "$destdir$man1dir/$client.1$man_suffix" ]
-  check man [ ! -e "$destdir$man1dir/$client.1$man_other_suffix" ]
-  check man [ "$(ls "$destdir$man1dir" | grep -c "remote-client")" = 1 ]
+  check man [ "$(client_pages)" = "./$client.1$man_suffix" ]
   check dump [ -f "$destdir$archlibdir/emacs-$fingerprint.pdmp" ]
 }
 
@@ -145,9 +143,14 @@ uninstall_and_check () {
   make -C "$builddir" uninstall DESTDIR="$destdir" >> "$log" 2>&1 \
     || fail "make uninstall failed (see $log)"
   check uninstall [ ! -e "$destdir$bindir/$client" ]
-  check uninstall [ ! -e "$destdir$man1dir/$client.1$man_suffix" ]
+  check uninstall [ -z "$(client_pages)" ]
   check uninstall [ ! -e "$destdir$bindir/$emacs_name" ]
   check uninstall [ -e "$destdir$bindir/other-program" ]
+}
+
+# Print the pages of the client in man1dir of the DESTDIR.
+client_pages () {
+  (cd "$destdir$man1dir" 2> /dev/null && find . -name '*remote-client*')
 }
 
 # Set the variables of the Makefile of the build that the check uses.
@@ -156,11 +159,7 @@ read_variables () {
   emacs_name=$(variable EMACS_NAME)
   bindir=$(variable bindir)
   man1dir=$(variable man1dir)
-  if [ -n "$(variable GZIP_PROG)" ]; then
-    man_suffix=.gz man_other_suffix=
-  else
-    man_suffix= man_other_suffix=.gz
-  fi
+  if [ -n "$(variable GZIP_PROG)" ]; then man_suffix=.gz; else man_suffix=; fi
   lispdir=$(variable lispdir)
   etcdir=$(variable etcdir)
   etcdocdir=$(variable etcdocdir)

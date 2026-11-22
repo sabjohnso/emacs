@@ -21,7 +21,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
    The parser of client.c finds the options in the table, and the help
    shows each option of the table.  Thus an option without help cannot
    be on the command line.  doc/man/emacs-remote-client.1 has the same
-   options.  */
+   options with the same values, and check-man.sh checks this.  */
 
 #ifndef REMOTE_CLIENT_OPTIONS_H
 #define REMOTE_CLIENT_OPTIONS_H

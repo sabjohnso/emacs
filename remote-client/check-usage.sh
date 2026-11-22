@@ -29,13 +29,19 @@
 #   line of emacsclient about bugs.
 # - version: "PROGRAM --version" and "PROGRAM -V" exit with the status
 #   0, and print "PROGRAM VERSION".
-# - error: with no argument, with an option that does not exist, or
-#   with --relay after another option, the program exits with the
-#   status 1, and tells the user to run "PROGRAM --help".
+# - cases: for each line of the table below, the program exits with the
+#   status of the line and writes its words.  The table does not need a
+#   display: the program stops before it opens a window, because the
+#   socket does not exist or because the SSH program fails.  Each line
+#   with --ssh has --ssh-command=false first, so also a program that is
+#   wrong connects to no host.
 
 program=$1
 version=$2
 status=0
+errors=$(mktemp) || exit 1
+trap 'rm -f "$errors"' EXIT
+trap 'exit 1' HUP INT TERM
 
 fail () {
   echo "check-usage.sh: $*" >&2
@@ -44,10 +50,9 @@ fail () {
 
 # Run the program with the arguments, and set out, err, and code.
 run () {
-  out=$(./"$program" "$@" 2> check-usage.err)
+  out=$(./"$program" "$@" 2> "$errors" < /dev/null)
   code=$?
-  err=$(cat check-usage.err)
-  rm -f check-usage.err
+  err=$(cat "$errors")
 }
 
 for option in --help -H; do
@@ -70,13 +75,75 @@ for option in --version -V; do
     || fail "$option: it prints [$out], not [$program $version]"
 done
 
-for arguments in "" "--no-such-option" "--timeout=100 --relay socket"; do
+# Each line has the kind, the words, and the arguments.  The kinds:
+#
+# - usage: the status is 1.  The error output has the words, and the
+#   hint of --help.
+# - error: the status is 1.  The error output has the words, and no
+#   hint.  The words show that the program accepted the arguments and
+#   stopped later, or that a value is not valid.
+# - ok: the status is 0.  The output has the words.
+count=0
+while IFS='|' read -r kind words arguments; do
+  count=$((count + 1))
   run $arguments
-  [ $code = 1 ] || fail "[$arguments]: the exit status is $code, not 1"
-  case $err in
-    *"Try '$program --help' for more information"*) ;;
-    *) fail "[$arguments]: the error output [$err] has no hint of --help" ;;
+  case $kind in
+    ok) expected=0 text=$out ;;
+    *) expected=1 text=$err ;;
   esac
-done
+  [ $code = $expected ] \
+    || fail "[$arguments]: the exit status is $code, not $expected"
+  case $text in
+    *"$words"*) ;;
+    *) fail "[$arguments]: the output [$text] has no [$words]" ;;
+  esac
+  case $err in
+    *"Try '$program --help' for more information"*) hint=usage ;;
+    *) hint= ;;
+  esac
+  case $kind$hint in
+    usageusage | error | ok) ;;
+    *) fail "[$arguments]: the hint of --help: [$hint] for $kind" ;;
+  esac
+done <<EOF
+usage|SOCKET or --ssh HOST is necessary|
+usage|--no-such-option: not an option|--no-such-option
+usage|-x: not an option|-x
+usage|-h: not an option|-h
+usage|-Hx: not an option|-Hx socket
+usage|--timeout: not an option|--timeout 100 socket
+usage|--help=x: not an option|--help=x
+usage|2: not a valid timeout|--timeout=2 ./no-socket
+usage|abc: not a valid timeout|--timeout=abc ./no-socket
+usage|3x: not a valid timeout|--timeout=3x ./no-socket
+usage|: not a valid timeout|--timeout= ./no-socket
+usage|--ssh needs HOST|--ssh-command=false --ssh
+usage|--ssh HOST|--ssh-command=false --ssh=host
+usage|socket: --ssh takes no SOCKET|--ssh-command=false --ssh host socket
+usage|--render-to is not valid with --ssh|--ssh-command=false --render-to=x.png --ssh host
+usage|b: only one SOCKET is valid|./a b
+usage|need --ssh|--listen=127.0.0.1 ./no-socket
+usage|need --ssh|--connect=127.0.0.1 ./no-socket
+usage|need --ssh|--session=remote-2 ./no-socket
+usage|--relay must be the first argument|--timeout=100 --relay ./no-socket
+usage|--relay needs [--listen=SPEC] SOCKET|--relay
+usage|--relay needs [--listen=SPEC] SOCKET|--relay --listen=127.0.0.1
+usage|--relay needs [--listen=SPEC] SOCKET|--relay --timeout=100 ./no-socket
+usage|--relay needs [--listen=SPEC] SOCKET|--relay ./a ./b
+error|localhost: not a listen spec|--ssh-command=false --listen=localhost --ssh host
+error|a_b: not a name of a session|--ssh-command=false --session=a_b --ssh host
+error|localhost: not a listen spec|--relay --listen=localhost ./no-socket
+error|./no-socket: not a socket|--relay --listen=127.0.0.1 ./no-socket
+error|-: not a socket|--relay --listen=127.0.0.1 -
+error|./no-socket: No such file or directory|./no-socket
+error|./no-socket: No such file or directory|--timeout=3 ./no-socket
+error|./no-socket: No such file or directory|--render-to=x.png ./no-socket
+error|-: No such file or directory|-
+error|host: |--ssh-command=false --connect=127.0.0.1 --ssh host
+error|host: |--ssh-command=false --connect=127.0.0.1 --listen=127.0.0.1 --session=a-1 --timeout=3 --ssh host
+ok|Usage: $program|--timeout=100 --help
+ok|$program $version|--timeout=100 -V
+EOF
+[ $count = 37 ] || fail "the table has $count cases, not 37"
 
 exit $status

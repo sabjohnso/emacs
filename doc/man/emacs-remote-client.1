@@ -3,67 +3,58 @@
 .\" NAME should be all caps, SECTION should be 1-8, maybe w/ subsection
 .\" other params are allowed: see man(7), man(1)
 .SH NAME
-emacs-remote-client \- show the frames of a remote display session of Emacs
+emacs\-remote\-client \- show the frames of a remote display session of Emacs
 .SH SYNOPSIS
-.B emacs-remote-client
+.B emacs\-remote\-client
 .I "[options] socket"
 .br
-.B emacs-remote-client
+.B emacs\-remote\-client
 .I "[options]"
 .B \-\-ssh
 .I host
 .br
-.B emacs-remote-client \-\-relay
+.B emacs\-remote\-client \-\-relay
 .I "[\-\-listen=spec] socket"
 .SH DESCRIPTION
 This manual page documents briefly the
-.B emacs-remote-client
+.B emacs\-remote\-client
 command.
 .PP
 An Emacs that is configured with
-.B \-\-with-remote-display
+.B \-\-with\-remote\-display
 shows its frames on a remote display session.  Each session has a
 Unix-domain socket.
-.B emacs-remote-client
+.B emacs\-remote\-client
 connects to a session and shows each frame of the session in a window
 on the local display.  The keyboard and the mouse input of the windows
 goes to Emacs.
 .PP
 The program has these modes:
 .TP
-.I socket
-Connect to the Unix-domain socket
-.I socket
-of a session, and show its frames.  When the connection ends, or no
-bytes come from the server for the timeout, the program keeps its
-windows and connects to the socket again.
+.B SOCKET
+Connect to the Unix-domain socket SOCKET of a session, and show its
+frames.  When the connection ends, or no bytes come from the server
+for the timeout, the program keeps its windows and connects to the
+socket again.
 .TP
-.BI \-\-ssh " host"
-Start a new session on
-.I host
-through
+.B \-\-ssh HOST
+Start a new session on HOST through
 .BR ssh (1),
 or resume an open session with
 .BR \-\-session .
-The Emacs server on
-.I host
-must run.  The program runs
+The Emacs server on HOST must run.  The program runs
 .B emacsclient
 and
-.B "emacs-remote-client \-\-relay"
-on
-.I host
-through SSH, and then connects to the relay with TLS.
+.B "emacs\-remote\-client \-\-relay"
+on HOST through SSH, and then connects to the relay with TLS.
 .TP
 .B \-\-relay
 Be the relay on the host of the session.  The relay connects the
 session socket and the client.  It must be the first argument.
 .TP
-.BI \-\-render-to= file.png
+.B \-\-render\-to=FILE.png
 Open no window.  When the server closes the connection, write the
-first frame to
-.IR file.png ,
-and stop.  This mode needs no display.
+first frame to FILE.png, and stop.  This mode needs no display.
 .SH OPTIONS
 The options start with two dashes ("\-\-"), as the long options of
 the GNU command line syntax.
@@ -79,7 +70,7 @@ Connect again after MS milliseconds with no bytes from the server.
 The default is 15000, and the minimum is 3.  A slow network can need
 a larger value.
 .TP
-.B \-\-render-to=FILE.png
+.B \-\-render\-to=FILE.png
 Open no window.  When the server closes the connection, write the
 first frame to FILE.png, and stop.
 .TP
@@ -87,14 +78,14 @@ first frame to FILE.png, and stop.
 Start a new session on HOST through SSH, and connect to it through a
 relay on HOST.
 .TP
-.B \-\-ssh-command=PROGRAM
+.B \-\-ssh\-command=PROGRAM
 With \-\-ssh, run PROGRAM as SSH.  The default is "ssh".
 .TP
 .B \-\-listen=SPEC
 Let the relay listen at SPEC: ADDRESS, ADDRESS:PORT, or
-ADDRESS:LOW-HIGH, with an IPv6 ADDRESS in brackets.  The relay
+ADDRESS:LOW\-HIGH, with an IPv6 ADDRESS in brackets.  The relay
 listens on the first free port of the range.  The default is the
-server address of SSH, and the ports 60001-61000.
+server address of SSH, and the ports 60001\-61000.
 .TP
 .B \-\-connect=ADDRESS
 With \-\-ssh, connect to the relay at ADDRESS.  The default is the
@@ -106,7 +97,7 @@ session.  NAME has 1 to 32 letters, digits, and "\-" characters.
 .TP
 .B \-\-relay
 Be the relay for the session socket SOCKET.  It must be the first
-argument.  The client runs "emacs-remote-client \-\-relay" on HOST
+argument.  The client runs "emacs\-remote\-client \-\-relay" on HOST
 through SSH.
 .SH "EXIT STATUS"
 The exit status is 0 on success, and 1 on an error.  When the user ends
@@ -131,19 +122,19 @@ The directory of the cache of the fonts.  The default is "~/.cache".
 The display of the windows.
 .SH FILES
 .TP
-.I $XDG_CACHE_HOME/remote-client/
+.I $XDG_CACHE_HOME/remote\-client/
 The fonts that the server sent, and the hashes of the local fonts.
 .SH EXAMPLES
 Start a new session on the host "workstation", and show its frames:
 .PP
 .RS
-emacs-remote-client \-\-ssh workstation
+emacs\-remote\-client \-\-ssh workstation
 .RE
 .PP
-Resume the open session "remote-2" on that host:
+Resume the open session "remote\-2" on that host:
 .PP
 .RS
-emacs-remote-client \-\-ssh workstation \-\-session=remote-2
+emacs\-remote\-client \-\-ssh workstation \-\-session=remote\-2
 .RE
 .SH "SEE ALSO"
 .BR emacs (1),

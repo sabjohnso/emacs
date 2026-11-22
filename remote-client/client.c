@@ -22,7 +22,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 	  emacs-remote-client --relay [--listen=SPEC] SOCKET
 
    options.c has the options and their help ("emacs-remote-client
-   --help"), and doc/man/emacs-remote-client.1 has the same text.
+   --help").  doc/man/emacs-remote-client.1 has the same options.
 
    The program connects to the Unix-domain socket SOCKET of a session,
    and shows each frame of the session in a window.  When the user
@@ -72,6 +72,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -279,15 +280,21 @@ static enum write_state write_all (struct rc_stream *,
 static enum read_result read_chunk (struct rc_reader *, struct rc_stream *);
 static int64_t now_ms (void);
 static int relay_main (int, char **);
-static void usage_error (const char *, const char *);
-static void print_help_or_version (const struct rc_option *);
+static bool option_text_p (const char *);
+static const struct rc_option *find_option (const char *, const char **);
+static void print_help (void);
+static void print_version (void);
+static void finish_output (void);
+static void usage_error (const char *, ...)
+  __attribute__ ((format (printf, 1, 2), noreturn));
 
 int
 main (int argc, char **argv)
 {
-  const char *value;
-  if (argc > 1
-      && rc_option_find (argv[1], &value) == &rc_options[RC_OPTION_RELAY])
+  const char *value = NULL;
+  const struct rc_option *first
+    = argc > 1 ? rc_option_find (argv[1], &value) : NULL;
+  if (first && first->id == RC_OPTION_RELAY)
     return relay_main (argc, argv);
   struct options options = parse_options (argc, argv);
   struct rc_connector connector;
@@ -325,10 +332,11 @@ static int
 relay_main (int argc, char **argv)
 {
   const char *value = NULL;
-  bool listen = (argc == 4 && rc_option_find (argv[2], &value)
-		 == &rc_options[RC_OPTION_LISTEN]);
-  if (argc != 3 + listen || strncmp (argv[argc - 1], "-", 1) == 0)
-    usage_error ("--relay needs [--listen=SPEC] SOCKET", NULL);
+  const struct rc_option *option
+    = argc == 4 ? rc_option_find (argv[2], &value) : NULL;
+  bool listen = option && option->id == RC_OPTION_LISTEN;
+  if (argc != 3 + listen || option_text_p (argv[argc - 1]))
+    usage_error ("--relay needs [--listen=SPEC] SOCKET");
   struct rc_listen_spec spec;
   const char *connection = getenv ("SSH_CONNECTION");
   if (listen && !rc_listen_spec_parse (value, &spec))
@@ -354,17 +362,16 @@ parse_options (int argc, char **argv)
   struct options options = { .timeout = RC_LINK_DEFAULT_TIMEOUT,
 			     .ssh = "ssh" };
   int arg = 1;
-  for (; arg < argc && argv[arg][0] == '-'; arg++)
+  for (; arg < argc && option_text_p (argv[arg]); arg++)
     {
       const char *value = NULL;
-      const struct rc_option *option = rc_option_find (argv[arg], &value);
-      if (!option)
-	usage_error ("%s: not an option", argv[arg]);
-      switch (option->id)
+      switch (find_option (argv[arg], &value)->id)
 	{
 	case RC_OPTION_HELP:
+	  print_help ();
+	  break;
 	case RC_OPTION_VERSION:
-	  print_help_or_version (option);
+	  print_version ();
 	  break;
 	case RC_OPTION_RENDER_TO:
 	  options.png = value;
@@ -373,8 +380,7 @@ parse_options (int argc, char **argv)
 	  {
 	    char *end;
 	    options.timeout = strtoll (value, &end, 10);
-	    if (*end || end == value
-		|| options.timeout < RC_LINK_PINGS_PER_TIMEOUT)
+	    if (*end || options.timeout < RC_LINK_PINGS_PER_TIMEOUT)
 	      usage_error ("%s: not a valid timeout", value);
 	  }
 	  break;
@@ -383,7 +389,7 @@ parse_options (int argc, char **argv)
 	  break;
 	case RC_OPTION_SSH:
 	  if (arg + 1 == argc)
-	    usage_error ("--ssh needs HOST", NULL);
+	    usage_error ("--ssh needs HOST");
 	  options.host = argv[++arg];
 	  break;
 	case RC_OPTION_LISTEN:
@@ -407,7 +413,7 @@ parse_options (int argc, char **argv)
 	    }
 	  break;
 	case RC_OPTION_RELAY:
-	  usage_error ("--relay must be the first argument", NULL);
+	  usage_error ("--relay must be the first argument");
 	  break;
 	case RC_OPTION_COUNT:
 	  break;
@@ -418,17 +424,16 @@ parse_options (int argc, char **argv)
       if (arg != argc)
 	usage_error ("%s: --ssh takes no SOCKET", argv[arg]);
       if (options.png)
-	usage_error ("--render-to is not valid with --ssh", NULL);
+	usage_error ("--render-to is not valid with --ssh");
     }
   else
     {
       if (arg == argc)
-	usage_error ("SOCKET or --ssh HOST is necessary", NULL);
+	usage_error ("SOCKET or --ssh HOST is necessary");
       if (arg != argc - 1)
 	usage_error ("%s: only one SOCKET is valid", argv[arg + 1]);
       if (options.has_listen || options.connect || options.session)
-	usage_error ("--listen, --connect, and --session need --ssh",
-		     NULL);
+	usage_error ("--listen, --connect, and --session need --ssh");
     }
   options.socket = options.host ? NULL : argv[arg];
   return options;
@@ -1160,26 +1165,60 @@ now_ms (void)
   return g_get_monotonic_time () / 1000;
 }
 
-/* Print the help or the version for OPTION, and exit with the status
-   0.  */
-static void
-print_help_or_version (const struct rc_option *option)
+/* Return true if the argument TEXT is an option and not a socket.  A
+   lone "-" is a socket.  */
+static bool
+option_text_p (const char *text)
 {
-  if (option->id == RC_OPTION_HELP)
-    rc_options_help (stdout);
-  else
-    puts (RC_PROGRAM " " RC_VERSION);
+  return text[0] == '-' && text[1];
+}
+
+/* Return the option of the argument TEXT, and put its joined value in
+   *VALUE.  Exit with a usage error if TEXT is not an option.  */
+static const struct rc_option *
+find_option (const char *text, const char **value)
+{
+  const struct rc_option *option = rc_option_find (text, value);
+  if (!option && strncmp (text, "--ssh=", 6) == 0)
+    usage_error ("%s: write --ssh HOST, with a space", text);
+  if (!option)
+    usage_error ("%s: not an option", text);
+  return option;
+}
+
+/* Print the help, and exit.  */
+static void
+print_help (void)
+{
+  rc_options_help (stdout);
+  finish_output ();
+}
+
+/* Print the version, and exit.  */
+static void
+print_version (void)
+{
+  puts (RC_PROGRAM " " RC_VERSION);
+  finish_output ();
+}
+
+/* Exit with the status 0, or 1 if the standard output has an error.  */
+static void
+finish_output (void)
+{
   exit (fflush (stdout) == 0 ? 0 : 1);
 }
 
-/* Write the usage error FORMAT, with the argument ARGUMENT for its
-   "%s", and a hint of --help, as emacsclient does.  Exit with the
-   status 1.  */
+/* Write the usage error FORMAT with its arguments, as printf, and a
+   hint of --help, as emacsclient does.  Exit with the status 1.  */
 static void
-usage_error (const char *format, const char *argument)
+usage_error (const char *format, ...)
 {
+  va_list arguments;
+  va_start (arguments, format);
   fputs (RC_PROGRAM ": ", stderr);
-  fprintf (stderr, format, argument);
+  vfprintf (stderr, format, arguments);
   fputs ("\nTry '" RC_PROGRAM " --help' for more information\n", stderr);
+  va_end (arguments);
   exit (1);
 }

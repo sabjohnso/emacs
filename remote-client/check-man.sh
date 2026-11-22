@@ -23,56 +23,93 @@
 # PROGRAM is the name of the program in the current directory, and
 # MANPAGE is its man page.  The facts:
 #
-# - options: the options in the section "The following OPTIONS are
-#   accepted" of "PROGRAM --help" are the options of the labels of the
-#   section OPTIONS of MANPAGE, with the same values ("--timeout=MS").
+# - labels: the modes, the options, and the environment variables of
+#   "PROGRAM --help" are the labels of the sections DESCRIPTION,
+#   OPTIONS, and ENVIRONMENT of MANPAGE, with the same values
+#   ("--timeout=MS").
+# - defaults: MANPAGE has the defaults of link.h and listenspec.h.
 # - lint: "groff -man -ww -z" (or "mandoc -T lint" if groff is not
-#   there) gives no warning for MANPAGE.
+#   there) gives no warning for MANPAGE.  With neither program, the
+#   check prints that it skips the lint.
 
 program=$1
 page=$2
+srcdir=$(dirname "$0")
 status=0
+work=$(mktemp -d) || exit 1
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
 
 fail () {
   echo "check-man.sh: $*" >&2
   status=1
 }
 
-# Print the options of the help, one on each line, sorted.
-help_options () {
-  ./"$program" --help \
-    | sed -n '/^The following OPTIONS are accepted:$/,/^$/p' \
-    | grep '^-' | sed 's/  .*//; s/, /\n/g' | sort
+# Print the labels of the part of the help that starts with the line
+# $1, one on each line, sorted.
+help_labels () {
+  sed -n "/^$1\$/,/^\$/p" "$work/help" | sed '1d' \
+    | grep '^[^ ]' | sed 's/  .*//; s/, /\
+/g' | sort
 }
 
-# Print the options of the labels of the section OPTIONS of the man
-# page, one on each line, sorted.
-page_options () {
-  sed -n '/^\.SH OPTIONS$/,/^\.SH /p' "$page" \
-    | sed -n 's/^\.B //p' | sed 's/\\-/-/g; s/, /\n/g' | sort
+# Print the labels of the section $1 of the man page, one on each line,
+# sorted.  A label is the line ".B LABEL" after ".TP".
+page_labels () {
+  sed -n "/^\\.SH $1\$/,/^\\.SH /p" "$page" \
+    | sed -n '/^\.TP$/{n;s/^\.B //p;}' | sed 's/\\-/-/g; s/, /\
+/g' | sort
+}
+
+# Check that the part $1 of the help and the section $2 of the page
+# have the same labels.
+check_labels () {
+  help_labels "$1" > "$work/in-help"
+  page_labels "$2" > "$work/in-page"
+  [ -s "$work/in-help" ] || fail "the help has no \"$1\""
+  diff "$work/in-help" "$work/in-page" > "$work/diff" || {
+    fail "\"$1\" of the help and $2 of $page are not the same:"
+    cat "$work/diff" >&2
+  }
+}
+
+# Print the value of the constant $1 of the header $2.
+constant () {
+  sed -n "s/.*[{ ]$1 = \\([0-9][0-9]*\\).*/\\1/p" "$srcdir/$2"
+}
+
+# Check that the page has the words $1.
+check_words () {
+  case $1 in *'[]'*) fail "a constant has no value: $1" ;; esac
+  tr '\n' ' ' < "$page" | sed 's/\\-/-/g' | grep -qF -- "$1" \
+    || fail "$page has no \"$1\""
 }
 
 [ -f "$page" ] || { echo "check-man.sh: $page does not exist" >&2; exit 1; }
-help=$(help_options)
-man=$(page_options)
-[ -n "$help" ] || fail "the help has no options"
-if [ "$help" != "$man" ]; then
-  fail "the options of the help and of $page are not the same:"
-  printf '%s\n' "$help" > check-man.help
-  printf '%s\n' "$man" > check-man.page
-  diff check-man.help check-man.page >&2
-  rm -f check-man.help check-man.page
-fi
+./"$program" --help > "$work/help" || fail "--help fails"
+
+check_labels 'The modes:' DESCRIPTION
+check_labels 'The following OPTIONS are accepted:' OPTIONS
+check_labels 'The environment:' ENVIRONMENT
+
+timeout=$(constant RC_LINK_DEFAULT_TIMEOUT link.h)
+pings=$(constant RC_LINK_PINGS_PER_TIMEOUT link.h)
+low=$(constant RC_LISTEN_LOW listenspec.h)
+high=$(constant RC_LISTEN_HIGH listenspec.h)
+check_words "The default is ${timeout:-[]}, and the minimum is ${pings:-[]}."
+check_words "and the ports ${low:-[]}-${high:-[]}."
 
 if command -v groff > /dev/null; then
-  warnings=$(groff -man -ww -z "$page" 2>&1)
   linter="groff -man -ww -z"
 elif command -v mandoc > /dev/null; then
-  warnings=$(mandoc -T lint "$page" 2>&1)
   linter="mandoc -T lint"
 else
-  fail "no groff or mandoc to check $page"
+  linter=
+  echo "check-man.sh: no groff and no mandoc, so the lint is skipped"
 fi
-[ -z "$warnings" ] || fail "$linter: $warnings"
+if [ -n "$linter" ]; then
+  warnings=$($linter "$page" 2>&1)
+  [ -z "$warnings" ] || fail "$linter: $warnings"
+fi
 
 exit $status

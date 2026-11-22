@@ -1205,12 +1205,15 @@ test/%:
 ## installs the build in a temporary DESTDIR, and checks the client
 ## program and the uninstall.  For a program name that is not "emacs",
 ## it also checks the DOC files and the uninstall in a prefix that has
-## the files of another "emacs".  The checks take minutes, so "make
-## check" does not run this target.
+## the files of another "emacs".  man.sh checks the man page of the
+## client for each kind of GZIP_PROG, and that a build without the
+## client has no such page.  The checks take minutes, so "make check"
+## does not run this target.
 .PHONY: check-install
 check-install: all
 	${srcdir}/test/install/program-name.sh ${srcdir}
 	${srcdir}/test/install/client-option.sh ${srcdir} .
+	${srcdir}/test/install/man.sh .
 	${srcdir}/test/install/install.sh .
 
 
