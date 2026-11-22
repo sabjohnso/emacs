@@ -422,7 +422,9 @@ ignore_signal (int signal)
   (void) signal;
 }
 
-/* The example of a server that does not answer.  */
+/* The example of a server that does not answer.  GnuTLS counts whole
+   milliseconds, so it can stop up to one millisecond before the
+   limit.  */
 static bool
 limit_example (void)
 {
@@ -436,7 +438,7 @@ limit_example (void)
   int64_t time = now_ms () - start;
   close (fds[1]);
   rc_stream_close (stream);
-  return !stream && time >= WAIT && time < LIMIT;
+  return !stream && time >= WAIT - 1 && time < LIMIT;
 }
 
 /* The buffered law, for a random record and random reads of

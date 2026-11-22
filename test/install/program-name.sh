@@ -52,7 +52,7 @@ main () {
   local i
   count_emacs=0 count_renamed=0 count_rejected=0
   declare -gA count_class
-  local class
+  local class count
   for class in "${invalid_classes[@]}"; do count_class["$class"]=0; done
   for ((i = 0; i < trials; i++)); do
     make_case
@@ -73,12 +73,13 @@ main () {
   # Each class of invalid name must have a rejected trial.
   local fewest=$trials
   for class in "${invalid_classes[@]}"; do
-    if [ "${count_class["$class"]}" = 0 ]; then
+    count=${count_class["$class"]}
+    if [ "$count" = 0 ]; then
       echo "program-name.sh: seed $seed: no rejected trial has the" \
 	   "class [$class]" >&2
       exit 1
     fi
-    ((count_class["$class"] < fewest)) && fewest=${count_class["$class"]}
+    ((count < fewest)) && fewest=$count
   done
   echo "program-name.sh: $trials trials pass ($count_emacs emacs," \
        "$count_renamed renamed, $count_rejected rejected; each class of" \
