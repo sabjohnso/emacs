@@ -35,3 +35,4 @@ test-stream
 test-ending
 Makefile
 compile.stamp
+test-options

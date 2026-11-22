@@ -674,8 +674,9 @@ wait_for_exit (pid_t pid)
 }
 
 /* Run the program with ARGUMENTS, and return its exit status.  Return
-   -2 if it does not write its usage to the standard error output, so
-   another error with the status 1 does not pass for a usage error.  */
+   -2 if it does not tell the user on the standard error output to run
+   --help, so another error with the status 1 does not pass for a usage
+   error.  */
 static int
 run_usage (const char *const *arguments)
 {
@@ -703,7 +704,9 @@ run_usage (const char *const *arguments)
   text[used] = 0;
   close (pipe_fds[0]);
   int status = wait_for_exit (pid);
-  return strstr (text, "Usage: emacs-remote-client") ? status : -2;
+  return (strstr (text, "Try 'emacs-remote-client --help' for more "
+		  "information")
+	  ? status : -2);
 }
 
 /* The fake SSH.  With -G, it writes a configuration.  Otherwise, it

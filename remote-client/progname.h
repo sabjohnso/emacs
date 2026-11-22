@@ -30,4 +30,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 # error "RC_PROGRAM is not defined; the Makefile defines it from PROGRAM"
 #endif
 
+/* RC_VERSION is the version of Emacs, as a string.  The Makefile
+   defines it from the version that configure gives.  */
+#ifndef RC_VERSION
+# error "RC_VERSION is not defined; the Makefile defines it from version"
+#endif
+
 #endif /* RC_PROGNAME_H */

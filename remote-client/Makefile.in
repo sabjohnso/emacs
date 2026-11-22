@@ -29,6 +29,7 @@
 # Emacs build in ../src.
 
 srcdir = @srcdir@
+version = @version@
 VPATH = @srcdir@
 
 CC = @CC@
@@ -38,14 +39,20 @@ LDFLAGS = @LDFLAGS@
 prefix = @prefix@
 exec_prefix = @exec_prefix@
 bindir = @bindir@
+datarootdir = @datarootdir@
+mandir = @mandir@
+man1dir = $(mandir)/man1
 INSTALL = @INSTALL@
 INSTALL_PROGRAM = @INSTALL_PROGRAM@
+INSTALL_DATA = @INSTALL_DATA@
+GZIP_PROG = @GZIP_PROG@
 MKDIR_P = @MKDIR_P@
 
 # configure finds the flags of the libraries with pkg-config.  All
 # parts use cairo, cairo-ft, fontconfig, freetype2, and glib-2.0.
 WARNINGS = -Wall -Wextra
 ALL_CFLAGS = $(WARNINGS) -DRC_PROGRAM='"$(PROGRAM)"' \
+  -DRC_VERSION='"$(version)"' \
   -I$(srcdir) -I$(srcdir)/../src @RC_BASE_CFLAGS@ $(CFLAGS)
 LIBS = @RC_BASE_LIBS@ -lm
 
@@ -77,7 +84,7 @@ CLIENT_OBJS = client.o view.o input.o sizes.o reader.o render.o table.o \
   stack.o compose.o \
   menu.o \
   scale.o ending.o \
-  sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o
+  sshargs.o sshconfig.o bootstrap.o direct.o clock.o child.o options.o
 TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-input test-client test-sizes test-view test-link \
   test-backoff test-reconnect test-relayline \
@@ -85,7 +92,8 @@ TESTS = test-table test-render test-reader test-glyphs test-fonts \
   test-sshargs test-ssh test-tls test-listenspec test-sshconfig \
   test-fontstore test-rdchunk test-rdpng \
   test-images test-stack test-compose \
-  test-menu test-rdscrollbar test-scale test-stream test-ending
+  test-menu test-rdscrollbar test-scale test-stream test-ending \
+  test-options
 
 # The view needs a display.  Xvfb gives the test one, so no window
 # comes on the screen of the user.
@@ -99,16 +107,11 @@ program: $(PROGRAM)
 $(PROGRAM): $(CLIENT_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(GTK_LIBS) $(TLS_LIBS) $(LIBS)
 
-# The first line of the usage starts with "Usage: $(PROGRAM) ".  The
-# check takes the name from this Makefile, so it fails if the program
-# has another name in its messages.
+# The help, the version, and the usage errors of the program (see
+# check-usage.sh).  The check takes the name from this Makefile, so it
+# fails if the program has another name in its messages.
 check-usage: $(PROGRAM)
-	@line=`./$(PROGRAM) 2>&1 | head -n 1`; \
-	case "$$line" in \
-	  "Usage: $(PROGRAM) "*) ;; \
-	  *) echo "check-usage: the first line of the usage is \"$$line\"" >&2; \
-	     exit 1 ;; \
-	esac
+	$(srcdir)/check-usage.sh $(PROGRAM) $(version)
 
 # A new PROGRAM makes the objects again, so the program has the new
 # name in its usage.  The check makes all the objects two more times,
@@ -117,7 +120,12 @@ check-flags: $(PROGRAM)
 	$(MAKE) check-usage PROGRAM=rc-check-flags
 	rm -f rc-check-flags
 
-check: $(PROGRAM) $(TESTS) check-usage
+# The man page has the options of the help, and lint finds no problem
+# in it (see check-man.sh).
+check-man: $(PROGRAM)
+	$(srcdir)/check-man.sh $(PROGRAM) $(MANPAGE)
+
+check: $(PROGRAM) $(TESTS) check-usage check-man
 	./test-table
 	./test-render
 	./test-reader
@@ -148,6 +156,7 @@ check: $(PROGRAM) $(TESTS) check-usage
 	./test-tls
 	./test-listenspec
 	./test-sshconfig
+	./test-options
 	$(XVFB_RUN) ./test-view
 	$(XVFB_RUN) ./test-reconnect
 	$(XVFB_RUN) ./test-ssh
@@ -250,6 +259,9 @@ test-ssh: test-ssh.o rdproto.o relayline.o token.o tls.o stream.o \
 test-sshconfig: test-sshconfig.o sshconfig.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
+test-options: test-options.o options.o
+	$(CC) $(LDFLAGS) -o $@ $^
+
 test-listenspec: test-listenspec.o listenspec.o
 	$(CC) $(LDFLAGS) -o $@ $^
 
@@ -349,15 +361,20 @@ test-ssh.o: relayline.h token.h ../src/rdproto.h
 relay.o test-relay.o: ../src/rdproto.h
 listenspec.o test-listenspec.o relay.o client.o test-relay.o: listenspec.h
 sshconfig.o test-sshconfig.o bootstrap.o client.o: sshconfig.h
+options.o test-options.o client.o: options.h progname.h
+test-options.o: link.h listenspec.h
 menu.o test-menu.o: menu.h ../src/rdproto.h
 menugen.o test-menu.o test-view.o: menugen.h menu.h ../src/rdproto.h
 bootstrap.o child.o client.o relay.o sshargs.o stack.o unixsocket.o: \
   progname.h
 
-# The install copies the program to $(bindir).  It does not make the
-# program, because "make install" can run as another user, for example
-# root.  "make install-strip" of Emacs sets INSTALL_STRIP to -s.
+# The install copies the program to $(bindir), and its man page to
+# $(man1dir).  As the other man pages of Emacs, the page is compressed
+# if GZIP_PROG is not empty.  The install does not make the program,
+# because "make install" can run as another user, for example root.
+# "make install-strip" of Emacs sets INSTALL_STRIP to -s.
 INSTALL_STRIP =
+MANPAGE = $(srcdir)/../doc/man/$(PROGRAM).1
 
 install:
 	@[ -f $(PROGRAM) ] || { \
@@ -367,9 +384,16 @@ install:
 	umask 022; $(MKDIR_P) "$(DESTDIR)$(bindir)"
 	$(INSTALL_PROGRAM) $(INSTALL_STRIP) $(PROGRAM) \
 	  "$(DESTDIR)$(bindir)/$(PROGRAM)"
+	umask 022; $(MKDIR_P) "$(DESTDIR)$(man1dir)"
+	$(INSTALL_DATA) $(MANPAGE) "$(DESTDIR)$(man1dir)/$(PROGRAM).1"
+	[ -z "$(GZIP_PROG)" ] || { \
+	  rm -f "$(DESTDIR)$(man1dir)/$(PROGRAM).1.gz"; \
+	  $(GZIP_PROG) -9n "$(DESTDIR)$(man1dir)/$(PROGRAM).1" || true; }
 
 uninstall:
 	rm -f "$(DESTDIR)$(bindir)/$(PROGRAM)"
+	rm -f "$(DESTDIR)$(man1dir)/$(PROGRAM).1" \
+	  "$(DESTDIR)$(man1dir)/$(PROGRAM).1.gz"
 
 clean:
 	rm -f *.o $(PROGRAM) $(TESTS) compile.stamp compile.tmp
@@ -377,5 +401,6 @@ clean:
 # The top-level clean targets of Emacs run these targets.
 distclean bootstrap-clean maintainer-clean: clean
 
-.PHONY: all program check check-usage check-flags check-sanitize clean install \
+.PHONY: all program check check-usage check-man check-flags check-sanitize \
+  clean install \
   uninstall distclean bootstrap-clean maintainer-clean FORCE

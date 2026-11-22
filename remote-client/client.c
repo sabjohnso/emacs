@@ -17,12 +17,12 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 
-/* Usage: emacs-remote-client [--render-to=FILE.png | --timeout=MS]
-			      SOCKET
-	  emacs-remote-client [--timeout=MS] [--ssh-command=PROGRAM]
-			      [--listen=SPEC] [--connect=ADDRESS]
-			      [--session=NAME] --ssh HOST
+/* Usage: emacs-remote-client [OPTIONS] SOCKET
+	  emacs-remote-client [OPTIONS] --ssh HOST
 	  emacs-remote-client --relay [--listen=SPEC] SOCKET
+
+   options.c has the options and their help ("emacs-remote-client
+   --help"), and doc/man/emacs-remote-client.1 has the same text.
 
    The program connects to the Unix-domain socket SOCKET of a session,
    and shows each frame of the session in a window.  When the user
@@ -94,6 +94,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "link.h"
 #include "rdchunk.h"
 #include "listenspec.h"
+#include "options.h"
 #include "progname.h"
 #include "backoff.h"
 #include "reader.h"
@@ -278,12 +279,15 @@ static enum write_state write_all (struct rc_stream *,
 static enum read_result read_chunk (struct rc_reader *, struct rc_stream *);
 static int64_t now_ms (void);
 static int relay_main (int, char **);
-static void usage (void);
+static void usage_error (const char *, const char *);
+static void print_help_or_version (const struct rc_option *);
 
 int
 main (int argc, char **argv)
 {
-  if (argc > 1 && strcmp (argv[1], "--relay") == 0)
+  const char *value;
+  if (argc > 1
+      && rc_option_find (argv[1], &value) == &rc_options[RC_OPTION_RELAY])
     return relay_main (argc, argv);
   struct options options = parse_options (argc, argv);
   struct rc_connector connector;
@@ -320,15 +324,16 @@ main (int argc, char **argv)
 static int
 relay_main (int argc, char **argv)
 {
-  bool listen = argc == 4 && strncmp (argv[2], "--listen=", 9) == 0;
-  if (argc != 3 + listen || strncmp (argv[argc - 1], "--", 2) == 0)
-    usage ();
+  const char *value = NULL;
+  bool listen = (argc == 4 && rc_option_find (argv[2], &value)
+		 == &rc_options[RC_OPTION_LISTEN]);
+  if (argc != 3 + listen || strncmp (argv[argc - 1], "-", 1) == 0)
+    usage_error ("--relay needs [--listen=SPEC] SOCKET", NULL);
   struct rc_listen_spec spec;
   const char *connection = getenv ("SSH_CONNECTION");
-  if (listen && !rc_listen_spec_parse (argv[2] + 9, &spec))
+  if (listen && !rc_listen_spec_parse (value, &spec))
     {
-      fprintf (stderr, RC_PROGRAM ": %s: not a listen spec\n",
-	       argv[2] + 9);
+      fprintf (stderr, RC_PROGRAM ": %s: not a listen spec\n", value);
       return 1;
     }
   if (!listen
@@ -349,48 +354,82 @@ parse_options (int argc, char **argv)
   struct options options = { .timeout = RC_LINK_DEFAULT_TIMEOUT,
 			     .ssh = "ssh" };
   int arg = 1;
-  for (; arg < argc && strncmp (argv[arg], "--", 2) == 0; arg++)
-    if (strncmp (argv[arg], "--render-to=", 12) == 0)
-      options.png = argv[arg] + 12;
-    else if (strncmp (argv[arg], "--timeout=", 10) == 0)
-      {
-	char *end;
-	options.timeout = strtoll (argv[arg] + 10, &end, 10);
-	if (*end || options.timeout < RC_LINK_PINGS_PER_TIMEOUT)
-	  usage ();
-      }
-    else if (strncmp (argv[arg], "--ssh-command=", 14) == 0)
-      options.ssh = argv[arg] + 14;
-    else if (strcmp (argv[arg], "--ssh") == 0 && arg + 1 < argc)
-      options.host = argv[++arg];
-    else if (strncmp (argv[arg], "--listen=", 9) == 0)
-      {
-	options.has_listen = true;
-	if (!rc_listen_spec_parse (argv[arg] + 9, &options.listen))
+  for (; arg < argc && argv[arg][0] == '-'; arg++)
+    {
+      const char *value = NULL;
+      const struct rc_option *option = rc_option_find (argv[arg], &value);
+      if (!option)
+	usage_error ("%s: not an option", argv[arg]);
+      switch (option->id)
+	{
+	case RC_OPTION_HELP:
+	case RC_OPTION_VERSION:
+	  print_help_or_version (option);
+	  break;
+	case RC_OPTION_RENDER_TO:
+	  options.png = value;
+	  break;
+	case RC_OPTION_TIMEOUT:
 	  {
-	    fprintf (stderr, RC_PROGRAM ": %s: not a listen spec\n",
-		     argv[arg] + 9);
-	    exit (1);
+	    char *end;
+	    options.timeout = strtoll (value, &end, 10);
+	    if (*end || end == value
+		|| options.timeout < RC_LINK_PINGS_PER_TIMEOUT)
+	      usage_error ("%s: not a valid timeout", value);
 	  }
-      }
-    else if (strncmp (argv[arg], "--connect=", 10) == 0)
-      options.connect = argv[arg] + 10;
-    else if (strncmp (argv[arg], "--session=", 10) == 0)
-      {
-	options.session = argv[arg] + 10;
-	if (!rc_ssh_session_name_p (options.session))
-	  {
-	    fprintf (stderr, RC_PROGRAM ": %s: not a name of a session\n",
-		     options.session);
-	    exit (1);
-	  }
-      }
-    else
-      usage ();
-  if (options.host ? arg != argc || options.png
-      : (arg != argc - 1 || options.has_listen || options.connect
-	 || options.session))
-    usage ();
+	  break;
+	case RC_OPTION_SSH_COMMAND:
+	  options.ssh = value;
+	  break;
+	case RC_OPTION_SSH:
+	  if (arg + 1 == argc)
+	    usage_error ("--ssh needs HOST", NULL);
+	  options.host = argv[++arg];
+	  break;
+	case RC_OPTION_LISTEN:
+	  options.has_listen = true;
+	  if (!rc_listen_spec_parse (value, &options.listen))
+	    {
+	      fprintf (stderr, RC_PROGRAM ": %s: not a listen spec\n", value);
+	      exit (1);
+	    }
+	  break;
+	case RC_OPTION_CONNECT:
+	  options.connect = value;
+	  break;
+	case RC_OPTION_SESSION:
+	  options.session = value;
+	  if (!rc_ssh_session_name_p (options.session))
+	    {
+	      fprintf (stderr, RC_PROGRAM ": %s: not a name of a session\n",
+		       options.session);
+	      exit (1);
+	    }
+	  break;
+	case RC_OPTION_RELAY:
+	  usage_error ("--relay must be the first argument", NULL);
+	  break;
+	case RC_OPTION_COUNT:
+	  break;
+	}
+    }
+  if (options.host)
+    {
+      if (arg != argc)
+	usage_error ("%s: --ssh takes no SOCKET", argv[arg]);
+      if (options.png)
+	usage_error ("--render-to is not valid with --ssh", NULL);
+    }
+  else
+    {
+      if (arg == argc)
+	usage_error ("SOCKET or --ssh HOST is necessary", NULL);
+      if (arg != argc - 1)
+	usage_error ("%s: only one SOCKET is valid", argv[arg + 1]);
+      if (options.has_listen || options.connect || options.session)
+	usage_error ("--listen, --connect, and --session need --ssh",
+		     NULL);
+    }
   options.socket = options.host ? NULL : argv[arg];
   return options;
 }
@@ -1121,16 +1160,26 @@ now_ms (void)
   return g_get_monotonic_time () / 1000;
 }
 
+/* Print the help or the version for OPTION, and exit with the status
+   0.  */
 static void
-usage (void)
+print_help_or_version (const struct rc_option *option)
 {
-  /* The continuation lines start one column after the name.  */
-  int indent = sizeof "Usage: " RC_PROGRAM;
-  fprintf (stderr, "Usage: %s [--render-to=FILE.png | --timeout=MS] SOCKET\n"
-	   "       %s [--timeout=MS] [--ssh-command=PROGRAM]\n"
-	   "%*s[--listen=SPEC] [--connect=ADDRESS] [--session=NAME]\n"
-	   "%*s--ssh HOST\n"
-	   "       %s --relay [--listen=SPEC] SOCKET\n",
-	   RC_PROGRAM, RC_PROGRAM, indent, "", indent, "", RC_PROGRAM);
+  if (option->id == RC_OPTION_HELP)
+    rc_options_help (stdout);
+  else
+    puts (RC_PROGRAM " " RC_VERSION);
+  exit (fflush (stdout) == 0 ? 0 : 1);
+}
+
+/* Write the usage error FORMAT, with the argument ARGUMENT for its
+   "%s", and a hint of --help, as emacsclient does.  Exit with the
+   status 1.  */
+static void
+usage_error (const char *format, const char *argument)
+{
+  fputs (RC_PROGRAM ": ", stderr);
+  fprintf (stderr, format, argument);
+  fputs ("\nTry '" RC_PROGRAM " --help' for more information\n", stderr);
   exit (1);
 }

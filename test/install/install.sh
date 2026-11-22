@@ -34,9 +34,12 @@
 # - missing: the install of a client program that does not exist
 #   fails, and tells the user to run "make".
 # - client: "make install" puts the client program in bindir, with the
-#   name emacs-remote-client.
-# - uninstall: "make uninstall" removes the client program and the
-#   program of Emacs, and keeps a file of another program in bindir.
+#   name emacs-remote-client, and its man page emacs-remote-client.1
+#   in man1dir (compressed if GZIP_PROG is not empty).  The page has
+#   no other name, also when the program of Emacs has another name.
+# - uninstall: "make uninstall" removes the client program, its man
+#   page, and the program of Emacs, and keeps a file of another
+#   program in bindir.
 #
 # A build with the name "emacs" also checks this fact:
 #
@@ -130,6 +133,9 @@ install_and_check () {
   install_quiet || fail "make install failed (see $log)"
   check client [ -x "$destdir$bindir/$client" ]
   check client [ "$client" = emacs-remote-client ]
+  check man [ -f "$destdir$man1dir/$client.1$man_suffix" ]
+  check man [ ! -e "$destdir$man1dir/$client.1$man_other_suffix" ]
+  check man [ "$(ls "$destdir$man1dir" | grep -c "remote-client")" = 1 ]
   check dump [ -f "$destdir$archlibdir/emacs-$fingerprint.pdmp" ]
 }
 
@@ -139,6 +145,7 @@ uninstall_and_check () {
   make -C "$builddir" uninstall DESTDIR="$destdir" >> "$log" 2>&1 \
     || fail "make uninstall failed (see $log)"
   check uninstall [ ! -e "$destdir$bindir/$client" ]
+  check uninstall [ ! -e "$destdir$man1dir/$client.1$man_suffix" ]
   check uninstall [ ! -e "$destdir$bindir/$emacs_name" ]
   check uninstall [ -e "$destdir$bindir/other-program" ]
 }
@@ -148,6 +155,12 @@ read_variables () {
   have_remote_client=$(variable HAVE_REMOTE_CLIENT)
   emacs_name=$(variable EMACS_NAME)
   bindir=$(variable bindir)
+  man1dir=$(variable man1dir)
+  if [ -n "$(variable GZIP_PROG)" ]; then
+    man_suffix=.gz man_other_suffix=
+  else
+    man_suffix= man_other_suffix=.gz
+  fi
   lispdir=$(variable lispdir)
   etcdir=$(variable etcdir)
   etcdocdir=$(variable etcdocdir)

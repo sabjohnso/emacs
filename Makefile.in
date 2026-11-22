@@ -860,12 +860,15 @@ install-info: info
 ## if compression would not reduce the file size.  Eg, the gzip in
 ## OpenBSD 4.9 seems to do this (2013/03).  "gzip -f" is another option here,
 ## but not sure if portable.
+## The install of remote-client installs emacs-remote-client.1, with no
+## change of its name, only in a build that makes the client.
 install-man:
 	umask 022; ${MKDIR_P} "$(DESTDIR)${man1dir}"
 	thisdir=`pwd -P`; \
 	cd ${mansrcdir}; \
 	for page in *.1; do \
 	  test "$$page" = ChangeLog.1 && continue; \
+	  test "$$page" = emacs-remote-client.1 && continue; \
 	  dest=`echo "$${page}" | sed -e 's/\.1$$//' -e '$(TRANSFORM)'`.1; \
 	  (cd "$${thisdir}"; \
 	   ${INSTALL_DATA} ${mansrcdir}/$${page} "$(DESTDIR)${man1dir}/$${dest}"); \
@@ -1018,6 +1021,7 @@ endif
 	    ext=.gz; else ext=; fi; \
 	 if cd ${mansrcdir}; then \
 	   for page in *.1; do \
+	     test "$$page" = emacs-remote-client.1 && continue; \
 	     rm -f "$(DESTDIR)${man1dir}"/`echo "$${page}" | sed -e 's/\.1$$//' -e '$(TRANSFORM)'`.1$$ext; done; \
 	 fi)
 	rm -f "$(DESTDIR)${bindir}/$(EMACS)" "$(DESTDIR)${bindir}/$(EMACSFULL)"
